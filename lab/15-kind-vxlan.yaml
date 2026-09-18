@@ -1,0 +1,48 @@
+# Lab 15 — a THROWAWAY cluster for comparing tunnel protocols.
+# This file was written for the dossier and deliberately NOT created on the bench,
+# so anything the chapters say about VXLAN comes from the source, not from a capture.
+#
+# Create it yourself when you want the comparison:
+#
+#   kind create cluster --config lab/15-kind-vxlan.yaml
+#
+# then install the fork image, with VXLAN instead of the bench's Geneve:
+#
+#   helm install cilium ./install/kubernetes/cilium \
+#     --namespace kube-system \
+#     --set image.repository=localhost:5000/cilium/cilium-dev \
+#     --set image.tag=local \
+#     --set image.useDigest=false \
+#     --set operator.image.repository=localhost:5000/cilium/operator \
+#     --set operator.image.tag=local \
+#     --set operator.image.useDigest=false \
+#     --set operator.replicas=1 \
+#     --set kubeProxyReplacement=true \
+#     --set k8sServiceHost=pp-vxlan-control-plane \
+#     --set k8sServicePort=6443 \
+#     --set routingMode=tunnel \
+#     --set tunnelProtocol=vxlan \
+#     --set bpf.masquerade=true \
+#     --set enableTCX=true
+#
+#   kubectl -n kube-system rollout status ds/cilium
+#
+# What to look for, against chapter 15's Geneve capture:
+#   * the tunnel device is cilium_vxlan, not cilium_geneve
+#   * the outer packet is UDP 8472, not 6081
+#   * vxlan_xmit / vxlan_rcv replace geneve_xmit / geneve_udp_encap_recv
+#   * the identity still rides in the tunnel identifier, and netfilter still
+#     sees only the outer packet
+#
+# Tear down with:  kind delete cluster --name pp-vxlan
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pp-vxlan
+networking:
+  disableDefaultCNI: true      # Cilium replaces kindnet
+  kubeProxyMode: none          # kube-proxy replacement does the work
+  podSubnet: "10.244.0.0/16"
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

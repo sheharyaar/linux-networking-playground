@@ -1,0 +1,101 @@
+<section id="ch16" class="chapter">
+<span class="chnum">Chapter 16 · Epilogue</span>
+<h2>Epilogue: traps, fast paths, what came next</h2>
+<p class="chmeta">~RT16 min · <span class="tag LAB">LAB</span> · <em>Spine:</em> our skb has been born in a ring, delivered to a socket, sent through a loopback device, a veth pair, a bridge, a bond, a VRF, two kinds of upper device, an INPUT-hook load balancer and a BPF datapath. This chapter puts all twelve journeys in one table, then names the machinery that is quietly replacing parts of them.</p>
+
+<h3>The twelve scenarios, end to end</h3>
+<p>Each row is the ordered list of stations the skb actually visits. Capitals are netfilter hooks; monospace is a function you can probe.</p>
+<table>
+<thead><tr><th>Scenario</th><th>Ordered path</th></tr></thead>
+<tbody>
+<tr><td><a href="#ch8">Same interface, two ports</a></td><td>output lookup returns <code>RTN_LOCAL</code> → LOCAL_OUT → POST_ROUTING → <code>loopback_xmit</code> → <code>__netif_rx</code> → backlog → <code>ip_rcv</code> → PRE_ROUTING → LOCAL_IN → <code>tcp_v4_rcv</code>. No input route lookup.</td></tr>
+<tr><td><a href="#ch8">Two interfaces, one machine</a></td><td>Identical. The output device is overwritten with the loopback device at <code>route.c:2881</code> whatever interface the address sits on.</td></tr>
+<tr><td><a href="#ch8">Two unix sockets</a></td><td><code>unix_stream_sendmsg</code> → <code>sock_alloc_send_pskb</code> → <code>skb_copy_datagram_from_iter</code> → <code>__skb_queue_tail</code> → <code>sk_data_ready</code> → <code>unix_stream_read_generic</code>. No device, route, hook or qdisc.</td></tr>
+<tr><td><a href="#ch6">Out to the default gateway</a></td><td><code>tcp_sendmsg</code> → <code>ip_queue_xmit</code> → LOCAL_OUT → POST_ROUTING → <code>ip_finish_output2</code> → <code>neigh_resolve_output</code> → <code>arp_solicit</code> → <code>__dev_queue_xmit</code> → qdisc → <code>ndo_start_xmit</code>.</td></tr>
+<tr><td><a href="#ch9">Across a veth pair</a></td><td><code>veth_xmit</code> → <code>__dev_forward_skb2</code> → <code>skb_scrub_packet</code> → <code>eth_type_trans</code> → <code>__netif_rx</code> or <code>veth_xdp_rcv_skb</code> → <code>ip_rcv</code> → <code>ip_route_input_slow</code> in the peer namespace.</td></tr>
+<tr><td><a href="#ch10">Two veth pairs on a bridge</a></td><td><code>br_handle_frame</code> returns consumed → <code>br_handle_frame_finish</code> → <code>br_fdb_find_rcu</code> → <code>br_forward</code> → <code>__br_forward</code> → <code>br_dev_queue_push_xmit</code> → <code>dev_queue_xmit</code>. No IP hook unless <code>br_netfilter</code> is loaded.</td></tr>
+<tr><td><a href="#ch14">Pod to pod, one node</a></td><td><code>veth_xmit</code> → <code>cil_from_container</code> → <code>ipv4_local_delivery</code> → <code>ctx_redirect_peer</code> → <code>skb_do_redirect</code> → <code>another_round</code> → <code>ip_rcv</code> in the destination pod. Zero hooks.</td></tr>
+<tr><td><a href="#ch15">Pod to pod, two nodes</a></td><td>…<code>encap_and_redirect_lxc</code> → <code>cil_to_overlay</code> → <code>geneve_xmit</code> → <code>iptunnel_xmit</code> → LOCAL_OUT → POST_ROUTING → <code>cil_to_netdev</code> → wire → <code>cil_from_netdev</code> → PRE_ROUTING → LOCAL_IN → <code>udp_rcv</code> → <code>geneve_udp_encap_recv</code> → <code>gro_cells_receive</code> → <code>cil_from_overlay</code> → <code>skb_do_redirect</code>. Hooks see the outer packet only.</td></tr>
+<tr><td><a href="#ch8">Container to container, one pod</a></td><td>The first row again, inside the pod's namespace. The pod's veth pair and its BPF program are never involved.</td></tr>
+<tr><td><a href="#ch13">IPVS</a></td><td>PRE_ROUTING → routing returns <code>RTN_LOCAL</code> → LOCAL_IN → <code>ip_vs_in_hook</code> → <code>ip_vs_schedule</code> → <code>ip_vs_nat_xmit</code> → <code>ip_vs_nat_send_or_cont</code> → LOCAL_OUT → POST_ROUTING. No socket lookup.</td></tr>
+<tr><td><a href="#ch11">Bond</a></td><td>Receive: <code>bond_handle_frame</code> → <code>another_round</code> with the bond device. Transmit: <code>bond_start_xmit</code> → mode function → <code>bond_dev_queue_xmit</code> → a second <code>__dev_queue_xmit</code> on the slave.</td></tr>
+<tr><td><a href="#ch11">VRF</a></td><td><code>ip_rcv</code> → PRE_ROUTING → <code>l3mdev_ip_rcv</code> → <code>vrf_ip_rcv</code> → PRE_ROUTING <em>again</em> with the VRF device → routing in the VRF table → LOCAL_IN. Output runs LOCAL_OUT and POST_ROUTING twice each.</td></tr>
+<tr><td><a href="#ch12">macvlan and ipvlan</a></td><td><code>macvlan_handle_frame</code> keyed on the destination MAC, or <code>ipvlan_handle_frame</code> keyed on the destination IP; both set <code>skb->dev</code> and return <code>another_round</code>. On the bench the two traces differ by one line.</td></tr>
+</tbody>
+</table>
+<p>Three patterns cover almost all of it. A device either consumes the skb and re-queues it elsewhere, as the bridge and the BPF redirect do; or relabels it and sends the core round again, as the bond, VRF, macvlan and ipvlan do; or hands it to a receive function from inside a transmit function, as loopback and veth do. The rest is which field is read to choose.</p>
+
+<h3>Four pieces of machinery that change these answers</h3>
+<p><b>The flowtable.</b> <code>nf_flow_offload_ip_hook</code> (<code>net/netfilter/nf_flow_table_ip.c:807</code>) sits on the netdev ingress hook, ahead of everything in the chart. Once a forwarded connection has been offloaded, later packets are matched, rewritten and transmitted from that hook, so FORWARD and conntrack are skipped for the rest of the connection. The symptom is rule counters that stop climbing while traffic continues.</p>
+<p><b>tcx.</b> Chapter 3 met it; the ordering is worth pinning down. In <code>sch_handle_ingress</code>, <code>tcx_run</code> runs at <code>net/core/dev.c:4486</code> and the legacy <code>tc_run</code> at line 4490 executes only if tcx answered <code>TC_ACT_UNSPEC</code>. tcx programs therefore run first, attach as links, and several can share one device without clobbering each other.</p>
+<p><b>netkit.</b> The device Cilium moves to after veth. <code>netkit_xmit</code> (<code>drivers/net/netkit.c:92</code>) runs a BPF program <em>inside the transmit function</em> and then calls <code>__netif_rx</code> for the peer at line 121, one step earlier than a tc hook on a veth host end, removing a device from the path.</p>
+<p><b>BIG TCP and the ingress hook.</b> <code>gso_ipv4_max_size</code> (<code>include/linux/netdevice.h:2168</code>) carries segmentation-offload sizes past the old 64 KB ceiling, cutting how often everything above runs at all. <code>NF_INET_INGRESS</code> (<code>include/uapi/linux/netfilter.h:49</code>) gives nftables a hook at device ingress, before <code>ip_rcv</code>, where tc and XDP already were.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  A["frame on a device"] ==> B["XDP"]
+  B ==> C["tcx ingress, then legacy tc ingress<br/>dev.c 4486 then 4490"]
+  C ==> D["NF_INET_INGRESS<br/>and the flowtable hook"]
+  D ==> E["ip_rcv and the netfilter chart"]
+  C -.->|"BPF redirect"| Z["another device, chart skipped"]
+  D -.->|"offloaded flow"| Z
+  B -.->|"XDP_REDIRECT or XDP_DROP"| Z
+  style E fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style Z fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 16.1 — every exit built in front of the chart.</strong> Notice that three separate mechanisms reach the green box without the orange one. Each dotted arrow is a place your rules stop being consulted.</figcaption>
+</figure>
+
+<h3>What this document did not establish</h3>
+<p>Being honest about the gaps is more useful than pretending there are none.</p>
+<ul>
+<li><b>Unix sockets were not traced.</b> pwru filters on IP headers and a unix skb has none; the node has no <code>bpftrace</code>. The <code>bpftrace</code> block in that lab is labelled expected.</li>
+<li><b>IPVS was not exercised.</b> <code>ipvsadm</code> is absent and installing it was out of scope, so no virtual service existed. The <code>ip_vs</code> module does load on this kernel; it was loaded once, found inert, and unloaded.</li>
+<li><b>br_netfilter was not loaded.</b> Its hooks register globally and the sysctl defaults to on, which would have changed packet handling for the bridge carrying the live cluster. The plain bridge path was measured; that half is from the source.</li>
+<li><b>Host labs were not run.</b> Host-side work needs a root password, so those labs are written for you to run and their expected output is marked.</li>
+<li><b>VXLAN and native routing were not measured.</b> Both cluster configurations are in <code>lab/</code> and were deliberately not created.</li>
+<li><b>Diagrams were never rendered.</b> No browser on the bench. Their source was checked mechanically for the header line, entity escaping and participant aliases, and nothing more.</li>
+</ul>
+<p>One habit is worth taking away. Every claim here that turned out to be wrong was wrong the same way: a name or a line number remembered from an older kernel. The IPVS hooks were renamed, <code>skb_scrub_packet</code> does not clear what folklore says it clears, and a line number in the routing chapter was off by one. Checking a citation costs one <code>sed -n</code>.</p>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>Twelve scenarios reduce to three mechanisms: consume the skb and re-queue it elsewhere, relabel it and restart the core, or call a receive function from inside a transmit function. The netfilter chart is still an accurate map of the stack's middle, and four newer pieces of machinery give packets ways around it: the flowtable skips FORWARD after the first packet, tcx runs before legacy tc and attaches as a link, netkit runs BPF inside the transmit function and removes a device, and BIG TCP reduces how often any of this runs at all. What this document did not measure is listed above rather than glossed.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>flowtable</dt><dd>A netdev-ingress hook that rewrites and transmits packets of an already-seen forwarded connection, skipping FORWARD and conntrack.</dd>
+<dt>netkit</dt><dd>A device pair that runs a BPF program inside its transmit function and delivers to the peer with <code>__netif_rx</code>.</dd>
+<dt>BIG TCP</dt><dd>Raising the segmentation-offload size limit past 64 KB so fewer, larger units traverse the stack.</dd>
+<dt>NF_INET_INGRESS</dt><dd>A netfilter hook at device ingress, before <code>ip_rcv</code>, at the point tc and XDP already occupied.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Group these by the mechanism they use, and give the one function or verdict that identifies each group: bridge, bond, macvlan, veth, loopback, Cilium's same-node redirect.</p>
+<details class="ans"><summary>Answer</summary>
+<p>Three groups. Consume and re-queue: the bridge, identified by <code>RX_HANDLER_CONSUMED</code> followed by <code>br_dev_queue_push_xmit</code>, and Cilium's redirect, identified by <code>skb_do_redirect</code> returning <code>-EAGAIN</code>. Relabel and restart the core: bond and macvlan, identified by <code>RX_HANDLER_ANOTHER</code> and the <code>another_round</code> label at <code>net/core/dev.c:6017</code>. Receive from inside transmit: veth and loopback, identified by <code>__netif_rx</code> being called from <code>veth_xmit</code> and <code>loopback_xmit</code>.</p>
+<p>The near miss is putting Cilium's redirect in the second group because it also reaches <code>another_round</code>. It does, but by a different route: the tc hook's <code>TC_ACT_REDIRECT</code> case, not a receive handler verdict, and it changes the namespace as well as the device.</p>
+</details>
+<p>2. Predict the difference: the same pod-to-pod connection on a node using netkit instead of veth. Which functions from chapter 14's trace disappear, and which single one replaces them?</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>veth_xmit</code>, <code>__dev_forward_skb</code>, <code>__dev_forward_skb2</code> and the <code>enqueue_to_backlog</code> that follows them disappear, and <code>netkit_xmit</code> (<code>drivers/net/netkit.c:92</code>) replaces them. The BPF program runs inside the transmit function rather than at a tc hook on the far side of the pair, so the skb is not handed to the host device first; <code>netkit_xmit</code> calls <code>__netif_rx</code> for the peer directly at line 121. Chapter 14's capture counted one <code>veth_xmit</code> and one <code>enqueue_to_backlog</code> per packet, and both are what this removes.</p>
+<p>The near miss is "nothing changes, it is still a device pair". The pair remains, but the program's position moves one step earlier, and that is exactly the step being saved.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/nf_flowtable.html">Netfilter's flowtable infrastructure</a>, Linux kernel documentation. Short, with the configuration that creates the offload; read it before trusting a FORWARD counter on a router.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span>Jonathan Corbet, <a href="https://lwn.net/Articles/949960/">The BPF-programmable network device</a>, LWN, 6 November 2023. The introduction of netkit and why a tc hook on a veth pair was one step too late.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://lwn.net/Articles/934195/">BPF link support for tc BPF programs</a>, LWN. The tcx design and the attachment problems it was built to fix.</li>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://lwn.net/Articles/884104/">Going big with TCP packets</a>, LWN, 14 February 2022. BIG TCP, and the measurements that motivated raising the ceiling.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://github.com/cilium/pwru">pwru</a>, Cilium project. The tool every transcript here came from; read the filter flags, and note that the build used for this dossier takes a pcap expression rather than address flags.</li>
+</ul>
+</div>
+</section>

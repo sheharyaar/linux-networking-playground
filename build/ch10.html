@@ -1,0 +1,162 @@
+<section id="ch10" class="chapter">
+<span class="chnum">Chapter 10</span>
+<h2>The bridge, and Docker on it</h2>
+<p class="chmeta">~RT10 min · <span class="tag L2">L2</span> · <em>Spine:</em> chapter 9 delivered our skb into a namespace through a veth pair. Put the host end of two such pairs into a bridge and the skb stops at L2 instead of climbing to IP. This chapter is that stop: who steals the skb, where it is put down, and what changes when <code>br_netfilter</code> drags the IP hooks back into a path that had left them behind.</p>
+
+<h3>Two ways a receive handler can end the round</h3>
+<p>Chapter 3 walked <code>__netif_receive_skb_core</code> and named the receive-handler station. Now look at what the caller does with the answer (<code>net/core/dev.c:6097</code> to 6116):</p>
+<pre><code>rx_handler = rcu_dereference(skb->dev->rx_handler);
+if (rx_handler) {
+        switch (rx_handler(&skb)) {
+        case RX_HANDLER_CONSUMED:  ret = NET_RX_SUCCESS; goto out;
+        case RX_HANDLER_ANOTHER:   goto another_round;
+        case RX_HANDLER_EXACT:     deliver_exact = true; break;
+        case RX_HANDLER_PASS:      break;</code></pre>
+<p>Those first two verdicts are the difference between a bridge and every other master device in this document. A bridge answers <code>RX_HANDLER_CONSUMED</code>: it has taken ownership, the core stops, and nothing above L2 runs on this CPU pass. The bond, macvlan and ipvlan devices of the next two chapters answer <code>RX_HANDLER_ANOTHER</code>: they change <code>skb->dev</code> and send the core back to the top of its own function to redo the whole station list against the new device. Same station, two structurally different outcomes.</p>
+<p>The bridge registers its handler when a port is added, <code>netdev_rx_handler_register(dev, br_get_rx_handler(dev), p)</code> (<code>net/bridge/br_if.c:619</code>), and the handler is <code>br_handle_frame</code> (<code>net/bridge/br_input.c:339</code>).</p>
+
+<h3>Where the bridge puts the skb down</h3>
+<p><code>br_handle_frame</code> checks the port's spanning-tree state and, for a forwarding port, calls <code>nf_hook_bridge_pre</code> (<code>br_input.c:267</code>), which runs the NF_BR_PRE_ROUTING hook with <code>br_handle_frame_finish</code> (line 76) as its continuation. That is where the decisions are:</p>
+<ul>
+<li>Learning, line 144: <code>br_fdb_update(br, p, eth_hdr(skb)->h_source, vid, 0)</code> records the source MAC against the port it arrived on. That table is the <b>forwarding database</b>.</li>
+<li>Lookup, line 204: <code>dst = br_fdb_find_rcu(br, eth_hdr(skb)->h_dest, vid)</code>.</li>
+<li>A hit whose entry is flagged local means the frame is addressed to the bridge itself, so line 222 calls <code>br_pass_frame_up</code>.</li>
+<li>A hit on another port, line 226: <code>br_forward</code>.</li>
+<li>A miss, line 229: <code>br_flood</code>, which walks every port.</li>
+</ul>
+<p>Take the forwarding case. <code>br_forward</code> (<code>net/bridge/br_forward.c:144</code>) reaches <code>__br_forward</code> (line 73), and two lines there do the work: <code>indev = skb->dev</code> then <code>skb->dev = to->dev</code>. The skb is now labelled with the outgoing port. It then runs the NF_BR_FORWARD hook with <code>br_forward_finish</code> (line 63) as the continuation, which runs NF_BR_POST_ROUTING with <code>br_dev_queue_push_xmit</code> (line 33) as its continuation. That last function pushes the Ethernet header back on, checks the frame still fits, and calls <code>dev_queue_xmit(skb)</code> at line 53. The skb re-enters the transmit path of chapter 6 on a different device, without ever having reached IP.</p>
+<p>The bench shows all of it on one skb address, across three namespaces:</p>
+<pre><code>netns pp-l,  dev vl:24    ip_local_out ... veth_xmit > skb_scrub_packet > eth_type_trans
+netns root,  dev vl-br:23 __netif_rx > enqueue_to_backlog > __netif_receive_skb_one_core
+                          br_handle_frame_finish[bridge] > br_allowed_ingress[bridge]
+                          br_forward[bridge] > __br_forward[bridge] > br_handle_vlan[bridge]
+netns root,  dev vr-br:25 br_forward_finish[bridge] > br_dev_queue_push_xmit[bridge]
+                          skb_push > __dev_queue_xmit > ... > veth_xmit[veth]
+                          skb_scrub_packet > eth_type_trans
+netns pp-r,  dev vr:26    __netif_rx > enqueue_to_backlog > __netif_receive_skb ...</code></pre>
+<p>The device column flips from <code>vl-br</code> to <code>vr-br</code> exactly at <code>br_forward_finish</code>, which is the <code>skb->dev = to->dev</code> assignment becoming visible. And <code>grep -c nf_hook_slow</code> over that entire capture returns zero. A bridge forwarding an IP packet touches no netfilter hook at all. The bridge hook points are traversed, and on a stock host nothing is registered at them.</p>
+<p>Two details worth keeping. First, <code>br_handle_frame</code> never appears in the trace: its signature takes <code>struct sk_buff **pskb</code>, a double pointer, so pwru cannot read an skb out of it, and the first bridge function you see is the continuation. Second, flooding is the one place the bridge duplicates. <code>br_flood</code> (line 201) walks the port list calling <code>maybe_deliver</code> (line 176), which carries one port forward and calls <code>deliver_clone</code> (line 120) for the others; <code>deliver_clone</code> is a <code>skb_clone</code> and a recursive <code>__br_forward</code>. The last port gets the original. Local delivery is the mirror image: <code>br_pass_frame_up</code> (line 33) sets <code>skb->dev</code> to the bridge device itself and runs NF_BR_LOCAL_IN with <code>br_netif_receive_skb</code> (line 26) as the continuation, which calls <code>netif_receive_skb</code>. The core runs a second time, from the top, with the bridge as the device, and this time there is no receive handler so the frame climbs to IP.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["frame arrives on port vl-br<br/>__netif_receive_skb_core"] ==> B["rx_handler = br_handle_frame<br/>returns RX_HANDLER_CONSUMED"]
+  B ==> C["br_handle_frame_finish 76<br/>br_fdb_update learns the source"]
+  C ==> D{"br_fdb_find_rcu 204"}
+  D ==>|"entry flagged local"| E["br_pass_frame_up 33<br/>skb dev = the bridge device<br/>netif_receive_skb: the core runs again"]
+  D ==>|"entry on another port"| F["br_forward 144, __br_forward 73<br/>skb dev = to dev"]
+  D ==>|"no entry"| G["br_flood 201<br/>skb_clone for every port but the last"]
+  F ==> H["br_forward_finish 63<br/>br_dev_queue_push_xmit 33<br/>dev_queue_xmit on the new device"]
+  G ==> H
+  E ==> I["ip_rcv, PRE_ROUTING, the IP stack"]
+  style B fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style H fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 10.1 — the bridge as a stop rather than a station.</strong> Notice that the forwarding path never reaches the box on the right: the skb leaves on a new device from inside the receive handler. Only a frame addressed to the bridge itself climbs to IP, and it does so by re-entering the core.</figcaption>
+</figure>
+
+<h3>br_netfilter: putting the IP hooks back</h3>
+<p>Everything above is why a firewall rule written for <code>FORWARD</code> does not match traffic between two containers on one bridge. The <code>br_netfilter</code> module exists to change that, and it is worth being precise about how, because the mechanism is unusual.</p>
+<p>Loading the module registers <code>br_nf_ops</code> (<code>net/bridge/br_netfilter_hooks.c:1047</code>), six entries. Four sit on the bridge hooks: <code>br_nf_pre_routing</code> (line 483) at NF_BR_PRE_ROUTING, <code>br_nf_local_in</code> (line 585), <code>br_nf_forward</code> (line 769) at NF_BR_FORWARD, and <code>br_nf_post_routing</code> (line 925) at NF_BR_POST_ROUTING. Look at what the first one does once it has decided the frame carries IPv4 (lines 536 to 542):</p>
+<pre><code>NF_HOOK(NFPROTO_IPV4, NF_INET_PRE_ROUTING, state->net, state->sk, skb,
+        skb->dev, NULL,
+        br_nf_pre_routing_finish);
+
+return NF_STOLEN;</code></pre>
+<p>It calls the IPv4 PRE_ROUTING chain from inside a bridge hook, passing the bridge port as the input device, and then returns <code>NF_STOLEN</code> so the bridge code does not continue on its own. Your <code>nat</code> and <code>raw</code> and <code>filter</code> chains run, conntrack runs, and the bridge's own walk resumes afterwards in the continuation. <code>br_nf_forward_ip</code> (line 673) does the same for NF_INET_FORWARD and <code>br_nf_post_routing</code> (line 925) for NF_INET_POST_ROUTING. The remaining two entries of the array are <code>ip_sabotage_in</code>, registered on IPv4 and IPv6 PRE_ROUTING at the very first priority, whose job is to suppress a second, duplicate run of those chains when the frame later climbs to IP through <code>br_pass_frame_up</code>.</p>
+<p>The gate is a sysctl. <code>br_nf_pre_routing</code> starts with <code>if (!brnet->call_iptables &amp;&amp; !br_opt_get(br, BROPT_NF_CALL_IPTABLES)) return NF_ACCEPT</code> (lines 516 to 517), and <code>call_iptables</code> is <code>/proc/sys/net/bridge/bridge-nf-call-iptables</code> (<code>.procname</code> at line 1192), defaulted to 1 when a namespace is created (line 1225). That path exists only once the module is loaded, which is the whole reason Kubernetes installation guides tell you to load <code>br_netfilter</code> and then set the sysctl: with the module absent, writing the sysctl fails, and with it present but the sysctl at zero, bridged traffic bypasses every IP rule you wrote.</p>
+<p>On the machine this dossier was written on, the kind cluster's three nodes hang off a bridge called <code>br-kind-cilium</code>, and <code>ip -d link show</code> prints <code>nf_call_iptables 0</code> for it, with no <code>/proc/sys/net/bridge</code> directory at all. That is the unloaded state, and it is why the bench trace above has no hooks in it.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  P["frame on a bridge port"] ==> BP["NF_BR_PRE_ROUTING"]
+  BP ==> BNF["br_nf_pre_routing 483<br/>gate: bridge-nf-call-iptables"]
+  BNF -.->|"sysctl is 0"| SKIP["NF_ACCEPT<br/>bridge continues alone"]
+  BNF ==>|"sysctl is 1"| IPP["NF_INET_PRE_ROUTING<br/>your raw, conntrack, nat, filter chains<br/>in device = the bridge port"]
+  IPP ==> RET["NF_STOLEN, then br_nf_pre_routing_finish<br/>back into br_handle_frame_finish"]
+  RET ==> BF["NF_BR_FORWARD, br_nf_forward_ip 673<br/>calls NF_INET_FORWARD"]
+  BF ==> BPO["NF_BR_POST_ROUTING, br_nf_post_routing 925<br/>calls NF_INET_POST_ROUTING"]
+  style IPP fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style SKIP fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 10.2 — how br_netfilter calls the IP chains from a bridge hook.</strong> Notice the dotted path is the default on a host without the module: no IP rule sees the frame. The thick path is one bridge hook borrowing a whole IP chain and then stealing the skb back.</figcaption>
+</figure>
+
+<h3>Docker on the same machinery</h3>
+<p>Docker's default network is this chapter with names on it. <code>docker0</code> is a bridge; every container gets a veth pair with one end in the container's namespace as <code>eth0</code> and the other enslaved to <code>docker0</code>. Container to container on one network is the trace above. Container to the outside is different: the bridge has an IP address, the container's default route points at it, so the frame is addressed to the bridge's own MAC, the forwarding database entry is the local one, <code>br_pass_frame_up</code> runs, and the packet climbs to IP on the host and is routed and masqueraded like any other forwarded traffic.</p>
+<p>That is where Docker's iptables chains sit. It adds a <code>DOCKER</code> chain for published-port destination NAT and a <code>DOCKER-USER</code> chain placed before its own rules so that operator rules are not overwritten when Docker rewrites its own, plus a masquerade rule for traffic leaving the bridge subnet. All of that lives on the IP hooks, which means it applies to the routed path and, for bridged container-to-container traffic, only when <code>br_netfilter</code> is loaded and the sysctl is on. Turning that sysctl off is a real and occasionally deliberate act: it makes same-bridge traffic invisible to iptables, which is faster and which quietly disables any network policy implemented with iptables rules.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>iproute2</code>, <code>bridge</code> (part of <code>iproute2</code>), <code>curl</code>, <code>pwru</code>, and the <code>br_netfilter</code> module for the second half.</p>
+<pre><code>sudo lab/10-bridge.sh up      # pp-l vl 10.10.0.1 -- pp-br0 -- vr 10.10.0.2 pp-r
+
+# the forwarding database, before and after traffic
+bridge fdb show br pp-br0 | grep -v permanent
+
+# the whole path on one skb, three namespaces, and no hooks
+sudo pwru --kmods bridge,veth --output-meta 'tcp and host 10.10.0.2' &amp;
+sudo ip netns exec pp-l curl -s --max-time 2 http://10.10.0.2:9099/
+
+# now put the IP hooks back and run it again
+sudo modprobe br_netfilter
+cat /proc/sys/net/bridge/bridge-nf-call-iptables       # 1 by default
+sudo pwru --kmods bridge,br_netfilter,veth --output-meta 'tcp and host 10.10.0.2' &amp;
+sudo ip netns exec pp-l curl -s --max-time 2 http://10.10.0.2:9099/
+sudo lab/10-bridge.sh down</code></pre>
+<p>The first capture is real bench output and is reproduced above: one skb, three namespaces, zero <code>nf_hook_slow</code>. The second is <em>expected</em> rather than observed. <code>br_netfilter</code> was deliberately not loaded on the bench, because registering <code>br_nf_ops</code> is global and the default of 1 for <code>bridge-nf-call-iptables</code> would have changed packet handling for the bridge carrying the live cluster. Expect <code>br_nf_pre_routing</code>, then <code>nf_hook_slow</code> and the conntrack and chain functions of chapter 5, appearing between <code>br_handle_frame_finish</code> and <code>br_forward</code>.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A bridge port's receive handler returns <code>RX_HANDLER_CONSUMED</code>, so the core stops and the skb never climbs to IP on that pass. <code>br_handle_frame_finish</code> learns the source MAC into the forwarding database, looks up the destination, and either passes the frame up to the bridge device, forwards it to one port, or floods it by cloning to all but the last. Forwarding is <code>skb->dev = to->dev</code> followed by <code>dev_queue_xmit</code>, so the skb leaves on a new device from inside the receive handler; the bench capture shows one skb address across three namespaces and no netfilter hook at all. <code>br_netfilter</code> changes that by calling the IPv4 chains from inside the bridge hooks and returning <code>NF_STOLEN</code>, gated per namespace by <code>bridge-nf-call-iptables</code>. Docker's bridge network is this machinery with <code>docker0</code>, veth pairs and the <code>DOCKER</code> and <code>DOCKER-USER</code> chains on top.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>br_handle_frame</dt><dd>The bridge's receive handler, registered per port; it returns <code>RX_HANDLER_CONSUMED</code>.</dd>
+<dt>br_handle_frame_finish</dt><dd>The continuation after the bridge PRE_ROUTING hook, where learning and the forwarding decision happen.</dd>
+<dt>forwarding database</dt><dd>The bridge's MAC-to-port table, read by <code>br_fdb_find_rcu</code> and written by <code>br_fdb_update</code>; <code>bridge fdb show</code> prints it.</dd>
+<dt>br_forward, __br_forward</dt><dd>The one-port forwarding path; <code>__br_forward</code> performs the <code>skb->dev = to->dev</code> assignment.</dd>
+<dt>br_flood, deliver_clone</dt><dd>Delivery to every port for an unknown destination, cloning the skb for all but the last port.</dd>
+<dt>br_dev_queue_push_xmit</dt><dd>Pushes the Ethernet header back and calls <code>dev_queue_xmit</code> on the chosen port.</dd>
+<dt>br_pass_frame_up</dt><dd>Local delivery: set <code>skb->dev</code> to the bridge device and re-enter <code>netif_receive_skb</code>.</dd>
+<dt>NF_BR_ hooks</dt><dd>The bridge family's own hook points, PRE_ROUTING, FORWARD, LOCAL_IN and POST_ROUTING, which ebtables and nftables bridge chains attach to.</dd>
+<dt>br_netfilter</dt><dd>The module that calls the IPv4 and IPv6 chains from inside the bridge hooks and returns <code>NF_STOLEN</code>.</dd>
+<dt>bridge-nf-call-iptables</dt><dd>The per namespace sysctl gating that behaviour; it exists only once <code>br_netfilter</code> is loaded.</dd>
+<dt>ip_sabotage_in</dt><dd>The <code>br_netfilter</code> entry on IP PRE_ROUTING that suppresses a duplicate chain run when a bridged frame later climbs to IP.</dd>
+<dt>DOCKER, DOCKER-USER</dt><dd>Docker's own iptables chains for published-port destination NAT and for operator rules that Docker will not rewrite.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Two containers on one Docker bridge talk to each other. Your <code>iptables -I FORWARD -j DROP</code> rule does nothing. Name the verdict that explains it, and the two conditions that would make the rule start working.</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>RX_HANDLER_CONSUMED</code> explains it. <code>br_handle_frame</code> returns that verdict at <code>net/core/dev.c:6104</code>, the core stops, and the frame is forwarded from inside the handler by <code>br_dev_queue_push_xmit</code> without ever reaching <code>ip_rcv</code> or the FORWARD hook. The two conditions are the <code>br_netfilter</code> module being loaded, which registers <code>br_nf_forward_ip</code> to call <code>NF_INET_FORWARD</code> (<code>net/bridge/br_netfilter_hooks.c:673</code>), and <code>bridge-nf-call-iptables</code> being 1 in that namespace. The bench capture without the module contains zero <code>nf_hook_slow</code> calls.</p>
+<p>The near miss is "the rule is in the wrong chain, it should be INPUT". Chain choice is not the problem; no IP chain of any name runs for this frame.</p>
+</details>
+<p>2. Trace the path: a frame arrives on a bridge port addressed to the bridge's own MAC address. How many times does <code>__netif_receive_skb_core</code> run for it, with which device each time?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Twice: once with the port as <code>skb->dev</code> and once with the bridge device. The first pass finds the port's receive handler, which consumes the skb; <code>br_handle_frame_finish</code> finds a forwarding-database entry flagged local and calls <code>br_pass_frame_up</code> (<code>net/bridge/br_input.c:33</code>), which sets <code>skb->dev</code> to the bridge device and calls <code>netif_receive_skb</code> through <code>br_netif_receive_skb</code> (line 26). The bridge device has no receive handler, so the second pass runs the whole station list and reaches <code>ip_rcv</code>.</p>
+<p>The near miss is "once, the handler just passes it up". <code>RX_HANDLER_PASS</code> would do that, but the bridge returns <code>CONSUMED</code> and re-enters the core from the top, which is why a tap on the bridge device sees the frame separately from a tap on the port.</p>
+</details>
+<p>3. Predict the trace: an unknown unicast frame arrives on a bridge with four ports. How many skbs exist by the time it has left, and which function creates them?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Three, and <code>deliver_clone</code> creates the extra two. The destination is not in the forwarding database, so <code>br_handle_frame_finish</code> calls <code>br_flood</code> (<code>net/bridge/br_forward.c:201</code>), which walks the port list through <code>maybe_deliver</code> (line 176). The ingress port is skipped by <code>should_deliver</code>, leaving three egress ports; <code>maybe_deliver</code> carries one port forward and calls <code>deliver_clone</code> (line 120) for the earlier ones, so two <code>skb_clone</code> calls happen and the last port receives the original.</p>
+<p>The near miss is "four, one per port". The ingress port never receives the frame back, and the final port reuses the original rather than getting a clone of its own.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/bridge.html">Ethernet Bridging</a>, Linux kernel documentation. Short; the section on <code>br_netfilter</code> and its sysctls is the one to read after this chapter.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man8/bridge.8.html">bridge(8)</a>, Linux manual page. The <code>fdb</code> and <code>link</code> subcommands, which is how you read the forwarding database and the port states this chapter traces.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.docker.com/engine/network/drivers/bridge/">Bridge network driver</a>, Docker documentation. What Docker builds on top of the machinery above, including the default bridge and user-defined bridges.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.docker.com/engine/network/packet-filtering-firewalls/">Packet filtering and firewalls</a>, Docker documentation. The authority for the <code>DOCKER</code> and <code>DOCKER-USER</code> chains and where they sit relative to your own rules.</li>
+</ul>
+</div>
+</section>

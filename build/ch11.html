@@ -1,0 +1,162 @@
+<section id="ch11" class="chapter">
+<span class="chnum">Chapter 11</span>
+<h2>Master devices: bond and VRF</h2>
+<p class="chmeta">~RT11 min · <span class="tag L2">L2</span> <span class="tag L3">L3</span> · <em>Spine:</em> the bridge of chapter 10 answered <code>RX_HANDLER_CONSUMED</code> and our skb never climbed to IP. The two devices in this chapter answer the other verdict. They relabel the skb and send the core round again, once at L2 and once at L3, and the visible cost is that the hooks you know run twice.</p>
+
+<h3>The bond: one skb, two passes, both directions</h3>
+<p>A bond enslaves its members the same way a bridge enslaves ports, <code>netdev_rx_handler_register(slave_dev, bond_handle_frame, new_slave)</code> (<code>drivers/net/bonding/bond_main.c:2234</code>). The handler (line 1603) opens with its default answer already chosen, <code>int ret = RX_HANDLER_ANOTHER</code> at line 1610, and ends with two statements that matter: <code>skb->dev = bond->dev</code>, then that return. The core's <code>another_round</code> label sends it back to the top of the station list with the new device, so tc ingress, the receive handler check and the protocol demux all run a second time, and this time the device has no handler.</p>
+<p>The bench shows the swap as a single line boundary. Sending to a bonded peer and watching the reply come back:</p>
+<pre><code>dev pp-s1:28     __netif_rx > netif_rx_internal > enqueue_to_backlog >
+                 __netif_receive_skb > __netif_receive_skb_one_core
+dev pp-bond0:31  qdisc_pkt_len_segs_init > skb_ensure_writable > ip_rcv >
+                 ip_rcv_core > sock_wfree > nf_hook_slow > ...</code></pre>
+<p>Same skb address on both lines; the device column changes in between. <code>ip_rcv</code> and every netfilter rule after it see <code>pp-bond0</code>, so <code>iif</code> matches name the bond and never the slave. That is the point of the device.</p>
+<p>Two things happen before the swap. <code>recv_probe</code>, a function pointer on the bond (<code>include/net/bonding.h:226</code>), is called first if set; it is <code>bond_3ad_lacpdu_recv</code> for LACP mode (set at line 4394) and <code>bond_rcv_validate</code> for the ARP monitor (line 4388), and it is how control frames are consumed before the data path sees them. Then <code>bond_should_deliver_exact_match</code> (line 1589) checks whether this slave is inactive; in active-backup mode the standby slave still receives broadcast traffic, and returning <code>RX_HANDLER_EXACT</code> restricts delivery to packet sockets bound to that exact device rather than letting it into the stack twice.</p>
+<p>Transmit is the mirror. <code>bond_start_xmit</code> (line 5596) calls <code>__bond_start_xmit</code> (line 5558), which is one switch on <code>BOND_MODE(bond)</code>:</p>
+<pre><code>case BOND_MODE_ROUNDROBIN:   return bond_xmit_roundrobin(skb, dev);
+case BOND_MODE_ACTIVEBACKUP: return bond_xmit_activebackup(skb, dev);
+case BOND_MODE_8023AD:       ... fallthrough;
+case BOND_MODE_XOR:          return bond_3ad_xor_xmit(skb, dev);
+case BOND_MODE_BROADCAST:    return bond_xmit_broadcast(skb, dev, true);</code></pre>
+<p>Each of those picks a slave and calls <code>bond_dev_queue_xmit</code> (line 297), which sets <code>skb->dev</code> to the slave and calls <code>dev_queue_xmit</code> again. So the transmit path of chapter 6 runs twice for one packet, and the trace says so plainly:</p>
+<pre><code>dev pp-bond0:31  __dev_queue_xmit > netdev_core_pick_tx > bond_select_queue[bonding] >
+                 dev_hard_start_xmit > bond_start_xmit[bonding] > bond_dev_queue_xmit[bonding]
+dev pp-s1:28     __dev_queue_xmit > ... > dev_hard_start_xmit > veth_xmit[veth]</code></pre>
+<p>This matters for queueing. The bond device itself normally carries no queueing discipline, and the second <code>__dev_queue_xmit</code> is where the slave's real one runs. A shaper attached to the bond is in the wrong place; it belongs on the slaves, or the bond needs an explicit qdisc of its own.</p>
+<p>For the modes that spread traffic, the slave is chosen by <code>bond_xmit_hash</code> (line 4287) over <code>__bond_xmit_hash</code> (line 4253), and the <b>transmit hash policy</b> decides which bytes go into the hash: <code>BOND_XMIT_POLICY_LAYER2</code> uses the MAC addresses, <code>LAYER34</code> the addresses and ports, <code>LAYER23</code> the MACs and IP addresses, with encapsulation-aware variants (<code>include/uapi/linux/if_bonding.h:92</code> to 97). A layer-2 policy between two routers puts every flow on one slave, because every frame carries the same pair of MAC addresses, and that is the commonest reason a bond delivers the bandwidth of exactly one member.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  subgraph TX["transmit: two passes"]
+    T1["__dev_queue_xmit on pp-bond0<br/>bond has no qdisc"] ==> T2["bond_start_xmit 5596<br/>__bond_start_xmit 5558: switch on mode"]
+    T2 ==> T3["bond_xmit_hash 4287 picks a slave<br/>or activebackup uses the current one"]
+    T3 ==> T4["bond_dev_queue_xmit 297<br/>skb dev = slave"]
+    T4 ==> T5["__dev_queue_xmit again<br/>the slave's qdisc runs here"]
+  end
+  subgraph RX["receive: one restart"]
+    R1["frame on pp-s1<br/>__netif_receive_skb_core"] ==> R2["bond_handle_frame 1603<br/>recv_probe for LACPDU or ARP<br/>skb dev = bond dev"]
+    R2 ==> R3["RX_HANDLER_ANOTHER<br/>goto another_round"]
+    R3 ==> R4["the station list again, device = pp-bond0<br/>then ip_rcv: iif is the bond"]
+  end
+  style T5 fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style R3 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 11.1 — the bond swaps the device twice, once per direction.</strong> Notice that the highlighted transmit box is where a shaper has to live: the first pass has no queueing discipline, so a qdisc on the bond device shapes nothing.</figcaption>
+</figure>
+
+<h3>The VRF: the same trick one layer up</h3>
+<p>A VRF device does at L3 what the bond does at L2, and the machinery is a different hook. <code>ip_rcv_finish</code> (<code>net/ipv4/ip_input.c:478</code>) calls <code>l3mdev_ip_rcv(skb)</code> at line 486, before the routing decision at line 490. For an enslaved device that reaches <code>vrf_l3_rcv</code> (<code>drivers/net/vrf.c:1379</code>) and then <code>vrf_ip_rcv</code> (line 1340), whose first three statements are the whole idea:</p>
+<pre><code>skb->dev = vrf_dev;
+skb->skb_iif = vrf_dev->ifindex;
+IPCB(skb)->flags |= IPSKB_L3SLAVE;</code></pre>
+<p>and whose last statement is <code>vrf_rcv_nfhook(NFPROTO_IPV4, NF_INET_PRE_ROUTING, skb, vrf_dev)</code>. That helper (line 1132) calls <code>nf_hook</code> for PRE_ROUTING a second time, with the VRF device as the input device. PRE_ROUTING has already run once, back in <code>ip_rcv</code>, with the enslaved device. The bench counts both:</p>
+<pre><code>dev pp-ve:34   ip_rcv > ip_rcv_core > nf_hook_slow      <-- PRE_ROUTING, device pp-ve
+dev pp-ve:34   vrf_l3_rcv[vrf]
+dev pp-vrf:32  nf_hook_slow                             <-- PRE_ROUTING again, device pp-vrf
+dev pp-vrf:32  ip_rcv_finish_core > ip_route_input_noref > ip_route_input_slow
+dev pp-vrf:32  ip_local_deliver > nf_hook_slow > tcp_v4_rcv</code></pre>
+<p>A rule written once in PRE_ROUTING therefore fires twice for a VRF-enslaved packet, once per device. A counter doubles. A <code>notrack</code> or a NAT rule written without an interface match is applied to both passes. This is the single most surprising thing about running a firewall on a VRF host, and it falls straight out of the two lines above.</p>
+<p>The table selection is a routing rule rather than code. <code>ip rule show</code> on the bench lists <code>1000: from all lookup [l3mdev-table]</code>, a rule whose action is to consult the table belonging to whichever VRF the packet is associated with; that number comes from <code>vrf_fib_table</code> (line 1119), which returns the device's <code>tb_id</code>. The effect is visible in the table itself:</p>
+<pre><code># ip route show table 10
+10.12.0.0/24 dev pp-ve proto kernel scope link src 10.12.0.1
+local 10.12.0.1 dev pp-ve proto kernel scope host src 10.12.0.1</code></pre>
+<p>Even the <code>local</code> entry moved out of the global local table into table 10, which is why an address inside a VRF is unreachable from outside it without an explicit route.</p>
+<p>Output is symmetric and produces four hook calls for one packet. <code>vrf_l3_out</code> (line 945) reaches <code>vrf_ip_out</code> (line 926), which takes the direct path <code>vrf_ip_out_direct</code> (line 905) when the VRF has the default queueing discipline. That function sets <code>skb->dev = vrf_dev</code> at line 911 and runs LOCAL_OUT with the VRF device at line 913; <code>vrf_output_direct</code> (line 876) then runs POST_ROUTING with it at line 884; <code>vrf_finish_direct</code> hands the skb back, and the ordinary <code>__ip_local_out</code> and <code>ip_output</code> run LOCAL_OUT and POST_ROUTING again with the real device. The trace shows exactly four:</p>
+<pre><code>dev 0          ip_local_out > __ip_local_out > vrf_l3_out[vrf]
+dev pp-vrf:32  nf_hook_slow       <-- LOCAL_OUT, VRF device
+dev pp-vrf:32  nf_hook_slow       <-- POST_ROUTING, VRF device
+dev pp-vrf:32  vrf_finish_direct[vrf]
+dev pp-vrf:32  nf_hook_slow       <-- LOCAL_OUT again
+dev pp-ve:34   nf_hook_slow       <-- POST_ROUTING, real device
+dev pp-ve:34   ip_finish_output > ... > veth_xmit[veth]</code></pre>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  A["frame on the enslaved device pp-ve"] ==> B["ip_rcv<br/>PRE_ROUTING, in device = pp-ve"]
+  B ==> C["ip_rcv_finish 478<br/>l3mdev_ip_rcv 486"]
+  C ==> D["vrf_ip_rcv 1340<br/>skb dev = pp-vrf<br/>IPSKB_L3SLAVE"]
+  D ==> E["vrf_rcv_nfhook 1132<br/>PRE_ROUTING again, in device = pp-vrf"]
+  E ==> F["ip_rcv_finish_core<br/>l3mdev fib rule picks table 10"]
+  F ==> G["LOCAL_IN, tcp_v4_rcv<br/>socket must accept a VRF bound connection"]
+  style E fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 11.2 — why PRE_ROUTING runs twice on a VRF host.</strong> Notice the highlighted box is a second call to a chain that already ran, with a different input device. A counter rule with no <code>iif</code> match counts the same packet twice, which the bench confirmed.</figcaption>
+</figure>
+
+<h3>Sockets and the VRF</h3>
+<p>A VRF only steers packets that are associated with it, and for locally generated traffic that association comes from the socket. <code>ip vrf exec pp-vrf curl ...</code> is the usual way, and it works by putting the process in a cgroup whose BPF program sets <code>SO_BINDTODEVICE</code> to the VRF on every socket it creates. A server is the harder half: a socket bound to the wildcard address in the default VRF does not accept connections arriving through one unless <code>net.ipv4.tcp_l3mdev_accept</code> is 1 (<code>net/ipv4/sysctl_net_ipv4.c:895</code>), with <code>udp_l3mdev_accept</code> (line 1198) as its datagram counterpart. Leaving those at zero and binding one listener per VRF is the stricter arrangement; turning them on gives you one listener serving every VRF, with the input device as the only way to tell clients apart.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>iproute2</code>, <code>curl</code>, <code>pwru</code>. The <code>bonding</code> and <code>vrf</code> modules autoload when the devices are created.</p>
+<pre><code>sudo lab/11-bond-vrf.sh up        # pp-bond0 10.11.0.1 and pp-vrf table 10 with pp-ve 10.12.0.1
+
+# the bond: two __dev_queue_xmit for one packet, and the device swap on receive
+sudo pwru --kmods bonding,veth,bridge --output-meta 'tcp and host 10.11.0.2' &amp;
+curl -s --max-time 2 -o /dev/null http://10.11.0.2:9099/
+cat /proc/net/bonding/pp-bond0 | grep -E 'Currently Active|Bonding Mode'
+
+# the VRF: count PRE_ROUTING calls with and without an iif match
+ip rule show | grep l3mdev
+ip route show table 10
+sudo pwru --kmods vrf,veth --output-meta 'tcp and host 10.12.0.2' &amp;
+sudo ip vrf exec pp-vrf curl -s --max-time 2 -o /dev/null http://10.12.0.2:9099/
+
+sudo lab/11-bond-vrf.sh down</code></pre>
+<p>Every transcript quoted in this chapter is real bench output from exactly these steps. Expect two <code>__dev_queue_xmit</code> lines with different devices for the bond, and four <code>nf_hook_slow</code> lines on VRF output against two on a plain device.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A bond's receive handler sets <code>skb->dev</code> to the bond and returns <code>RX_HANDLER_ANOTHER</code>, so the core restarts its station list and <code>ip_rcv</code> sees the bond rather than the slave; <code>recv_probe</code> takes LACP and ARP-monitor frames out first. On transmit, a mode function picks a slave and <code>bond_dev_queue_xmit</code> calls <code>dev_queue_xmit</code> a second time, which is why the slave holds the queueing discipline that matters. A VRF does the same at L3 through <code>l3mdev_ip_rcv</code>, called from <code>ip_rcv_finish</code> before the routing decision: <code>vrf_ip_rcv</code> relabels the skb, marks it <code>IPSKB_L3SLAVE</code> and calls PRE_ROUTING a second time with the VRF device, and the output path calls LOCAL_OUT and POST_ROUTING twice each. Table selection is the <code>l3mdev</code> routing rule, and even the local address entry lives in the VRF table. Locally generated traffic joins a VRF through the socket, with <code>tcp_l3mdev_accept</code> deciding whether one listener can serve several.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>bond_handle_frame</dt><dd>The bond's receive handler; it sets <code>skb->dev</code> to the bond and returns <code>RX_HANDLER_ANOTHER</code>.</dd>
+<dt>recv_probe</dt><dd>The bond's hook for control frames, set to the LACPDU or ARP-monitor receiver, called before the data path.</dd>
+<dt>bond_should_deliver_exact_match</dt><dd>The inactive-slave test that answers <code>RX_HANDLER_EXACT</code> so a standby member does not deliver traffic twice.</dd>
+<dt>bond_start_xmit, __bond_start_xmit</dt><dd>The bond transmit entry and the switch on bonding mode that picks a slave-selection function.</dd>
+<dt>bond_dev_queue_xmit</dt><dd>Sets <code>skb->dev</code> to the chosen slave and re-enters <code>dev_queue_xmit</code>, giving one packet two transmit passes.</dd>
+<dt>bond_xmit_hash, transmit hash policy</dt><dd>The slave-selection hash and the choice of which header fields feed it, from MAC-only to addresses and ports.</dd>
+<dt>l3mdev</dt><dd>The layer-3 master device framework a VRF plugs into, with its own receive hook and routing rule.</dd>
+<dt>l3mdev_ip_rcv, vrf_ip_rcv</dt><dd>The call from <code>ip_rcv_finish</code> into the VRF, and the function that relabels the skb and re-runs PRE_ROUTING.</dd>
+<dt>IPSKB_L3SLAVE</dt><dd>The flag marking an skb as having arrived through an l3mdev slave.</dd>
+<dt>vrf_l3_out, vrf_ip_out_direct</dt><dd>The output side, which runs LOCAL_OUT and POST_ROUTING with the VRF device before the real device repeats them.</dd>
+<dt>l3mdev routing rule</dt><dd>The <code>from all lookup [l3mdev-table]</code> rule that sends a lookup to the VRF's own table.</dd>
+<dt>tcp_l3mdev_accept</dt><dd>The sysctl deciding whether a socket outside a VRF may accept connections arriving through one.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You attach a token bucket shaper to <code>bond0</code> and it has no effect on throughput. Explain why, and say where the shaper has to go.</p>
+<details class="ans"><summary>Answer</summary>
+<p>The bond device's queueing discipline is bypassed because the packet is re-queued on the slave, and the slave's qdisc is the one that runs. <code>bond_dev_queue_xmit</code> (<code>drivers/net/bonding/bond_main.c:297</code>) sets <code>skb->dev</code> to the chosen slave and calls <code>dev_queue_xmit</code> a second time, which the bench trace shows as two <code>__dev_queue_xmit</code> lines with different devices for one skb. Attach the shaper to each slave, or give the bond an explicit qdisc and accept that the slave still has its own.</p>
+<p>The near miss is "the bond is a virtual device so it has no qdisc at all". It has one, the default; the problem is that the second pass gets the last word.</p>
+</details>
+<p>2. Predict the count: you add <code>nft add rule inet f prerouting counter</code> on a host with one VRF, and send one packet in through a VRF-enslaved interface. What does the counter read, and what would make it read one?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Two, and an interface match makes it one. PRE_ROUTING runs once from <code>ip_rcv</code> with the enslaved device, then <code>ip_rcv_finish</code> calls <code>l3mdev_ip_rcv</code> (<code>net/ipv4/ip_input.c:486</code>), <code>vrf_ip_rcv</code> sets <code>skb->dev</code> to the VRF device (<code>drivers/net/vrf.c:1340</code>) and <code>vrf_rcv_nfhook</code> (line 1132) calls the same hook again. The bench capture shows two <code>nf_hook_slow</code> lines with different devices. Adding <code>iif "pp-ve"</code> or <code>iif "pp-vrf"</code> selects one pass.</p>
+<p>The near miss is "two, because the packet was forwarded". No forwarding happened; this is one packet delivered locally, counted twice on the same hook.</p>
+</details>
+<p>3. Both devices relabel <code>skb->dev</code> and both make the stack repeat work. Name the difference in where each one intervenes, and what that means for a packet socket attached to the underlying member.</p>
+<details class="ans"><summary>Answer</summary>
+<p>The bond intervenes at L2 inside <code>__netif_receive_skb_core</code> and the VRF at L3 inside <code>ip_rcv_finish</code>. The bond's receive handler runs before the protocol demux and returns <code>RX_HANDLER_ANOTHER</code>, so the entire station list including taps and tc ingress repeats with the bond device. The VRF hook runs after <code>ip_rcv</code> and after PRE_ROUTING, so the L2 stations run only once, on the enslaved device. A packet socket on the slave therefore sees bonded traffic normally, and a packet socket on a VRF-enslaved device sees everything because the VRF never took the frame away from it.</p>
+<p>The near miss is "both are receive handlers". Only the bond registers one; the VRF uses the <code>l3mdev</code> hook, which is why their costs land on different layers.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/bonding.html">Linux Ethernet Bonding Driver HOWTO</a>, Linux kernel documentation. Long; read the mode descriptions and the <code>xmit_hash_policy</code> section, which is where a disappointing bond is usually explained.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/vrf.html">Virtual Routing and Forwarding (VRF)</a>, Linux kernel documentation. The setup examples and the section on applications; read it before building anything with <code>ip vrf exec</code>.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://man7.org/linux/man-pages/man8/ip-vrf.8.html">ip-vrf(8)</a>, Linux manual page. What <code>ip vrf exec</code> actually does to a process, which is the part people guess wrong.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://man7.org/linux/man-pages/man8/ip-rule.8.html">ip-rule(8)</a>, Linux manual page. The rule table this chapter's <code>l3mdev</code> entry lives in, and the priorities around it.</li>
+</ul>
+</div>
+</section>

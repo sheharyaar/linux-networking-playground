@@ -1,0 +1,131 @@
+<section id="ch3" class="chapter">
+<span class="chnum">Chapter 3</span>
+<h2>L2 receive: taps, tc ingress, the receive handler, and the protocol demux</h2>
+<p class="chmeta">~RT3 min · <span class="tag L2">L2</span> · <em>Spine:</em> our skb has come through one of the two doors and reached <code>__netif_receive_skb_core</code>. This chapter is that single function, station by station. When it ends, the skb is in the hands of <code>ip_rcv</code>.</p>
+
+<h3>One function, six stations</h3>
+<p>Every frame the kernel receives, from a NIC, a veth, the loopback device or a tunnel, passes through <code>__netif_receive_skb_core</code> (<code>net/core/dev.c:5986</code>). It is about two hundred lines long and its shape is a loop with a label at the top, <code>another_round</code> (line 6017), that two of the stations jump back to after rewriting <code>skb-&gt;dev</code>. The stations, in order:</p>
+<table>
+<thead><tr><th>Station</th><th>Lines</th><th>Who lives there</th><th>What it may do</th></tr></thead>
+<tbody>
+<tr><td>Generic XDP</td><td>6023 to 6035</td><td>An XDP program attached with <code>xdpgeneric</code></td><td>Drop, transmit, redirect; chapter 2</td></tr>
+<tr><td>Taps</td><td>6048 to 6057</td><td>Packet sockets: tcpdump, Wireshark, DHCP clients</td><td>Copy the frame; never change the path</td></tr>
+<tr><td>tc ingress</td><td>6062 to 6070</td><td>tcx BPF programs, then classic tc filters and actions</td><td>Drop, redirect to another device, mark, loop back</td></tr>
+<tr><td>VLAN</td><td>6091</td><td>802.1Q sub-devices</td><td>Rewrite <code>skb-&gt;dev</code> to the VLAN device, loop back</td></tr>
+<tr><td>Receive handler</td><td>6097 to 6116</td><td>Bridge, bond, macvlan, ipvlan, team</td><td>Take the frame away, or rewrite <code>skb-&gt;dev</code> and loop back</td></tr>
+<tr><td>Protocol demux</td><td>6160 to 6177</td><td><code>ip_rcv</code>, <code>arp_rcv</code>, <code>ipv6_rcv</code></td><td>Hand the skb to L3</td></tr>
+</tbody>
+</table>
+<p>The order is the content of this chapter. Taps come before tc, so tcpdump sees frames that tc will drop. tc comes before the receive handler, so a tc program can steal a frame from a bridge. The receive handler comes before the protocol demux, so a bridge port's frames never reach the host's IP layer unless the bridge itself hands them up. Diagram 0.1 drew this as one box called "L2 receive"; the rest of the chapter opens the box.</p>
+
+<h3>Taps: how tcpdump gets its copy</h3>
+<p>A <b>packet socket</b>, <code>socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL))</code>, registers a <b>packet type</b> handler on the <code>ptype_all</code> list, either the namespace's list or a single device's list if the socket is bound to one. You can see the registration: <code>/proc/net/ptype</code> in the bench namespace reads <code>ALL vb packet_rcv</code> while the tap is open. The loop at lines 6048 to 6057 walks both lists and calls <code>deliver_skb</code> (line 2486) for each entry. <code>deliver_skb</code> does not clone. It increments <code>skb-&gt;users</code> and calls the handler; the handler, <code>packet_rcv</code>, makes its own clone with <code>skb_clone</code> for the socket's receive queue and drops its reference. The trace on the bench reads <code>deliver_skb</code>, <code>packet_rcv</code>, <code>skb_push</code>, <code>skb_clone</code>, <code>consume_skb</code>, and then the original skb carries on to the next station with the same address.</p>
+<p><b>Promiscuous mode</b> is a different mechanism that people fold into the same word. It is a device flag, <code>IFF_PROMISC</code>, that tells the card to accept frames whose destination MAC is not its own. tcpdump turns it on by default. Such a frame arrives at the taps like any other, but <code>eth_type_trans</code> has set <code>skb-&gt;pkt_type</code> to <code>PACKET_OTHERHOST</code>, and <code>ip_rcv_core</code> drops it on that field at <code>net/ipv4/ip_input.c:508</code>, after the taps have had their copy. So tcpdump sees the neighbour's traffic and the local IP stack never does.</p>
+<p>Transmit has a mirror tap. <code>xmit_one</code> (<code>net/core/dev.c:3878</code>) calls <code>dev_queue_xmit_nit</code> (line 2549) right before it calls the driver, and that function does clone (line 2575). Two consequences: tcpdump's timestamp for an outgoing packet is taken after the queueing discipline, not when the application sent it; and a frame dropped by tc on egress, which runs earlier in <code>__dev_queue_xmit</code> at line 4812, is never seen by tcpdump on the sending device. Ingress taps see tc drops; egress taps do not.</p>
+
+<h3>tc ingress: two mechanisms, one station</h3>
+<p><b>tc ingress</b> is the station at lines 6062 to 6070, compiled in under <code>CONFIG_NET_INGRESS</code> and skipped by a static key until some device has an ingress attachment. The function is <code>sch_handle_ingress</code> (line 4465), and it hosts two mechanisms that run in a fixed order. First <b>tcx</b>, the BPF link attachment point added in Linux 6.6: a per-device array of BPF programs run in sequence by <code>tcx_run</code> (line 4444), each returning a code that says continue to the next program or stop with a verdict. Second, only if every tcx program said <code>TC_ACT_UNSPEC</code> (lines 4484 to 4491), the <b>classic tc chain</b>: <code>tc_run</code> walks the filters attached to the device's <code>clsact</code> queueing discipline through <code>tcf_classify</code>, and each matching filter runs its actions. A <code>matchall</code> filter with a <code>pass</code> action, the simplest possible, appears in the trace as <code>tc_run</code>, <code>tcf_classify</code>, <code>mall_classify</code>, <code>tcf_action_exec</code>, <code>tcf_gact_act</code>. BPF programs attached the classic way, with <code>tc filter add ... bpf</code>, live in this second chain as a <code>cls_bpf</code> filter.</p>
+<p>The <b>tc verdict</b> decides what the station does with the skb. <code>TC_ACT_OK</code> continues to the next station. <code>TC_ACT_SHOT</code> frees the skb. <code>TC_ACT_REDIRECT</code> means a program has already handed the skb to another device with the <code>bpf_redirect</code> helper, and the loop must let go of it; this is the verdict Cilium's programs return when they move a packet straight into a pod's veth, and chapter 14 shows the whole path. <code>TC_ACT_RECLASSIFY</code> and a device rewrite jump to <code>another_round</code> (line 6070). Egress has the same station in <code>__dev_queue_xmit</code>, <code>sch_handle_egress</code> (line 4529), with the same tcx-first ordering (lines 4543 to 4549).</p>
+
+<h3>VLAN and the receive handler: rewrite the device and go around again</h3>
+<p>Two stations share one trick. <code>vlan_do_receive</code> (line 6091) checks whether the frame carries an 802.1Q tag, or whether the card stripped one into the skb's metadata. If so it finds the VLAN sub-device for that tag, sets <code>skb-&gt;dev</code> to it, strips the tag, and jumps to <code>another_round</code>. The frame is now "from" the VLAN device, and the taps run again for it, which is why tcpdump on <code>eth0.100</code> and on <code>eth0</code> both see the frame.</p>
+<p>The <b>receive handler</b> station (lines 6097 to 6116) is the one you met in the prologue: <code>rx_handler = rcu_dereference(skb-&gt;dev-&gt;rx_handler)</code>. A device gets one when a bridge, bond, macvlan, ipvlan or team driver claims it through <code>netdev_rx_handler_register</code>. Any tap that was still pending is delivered first (lines 6099 to 6102), so tcpdump on a bridge port sees the frame before the bridge does. Then the handler runs and returns one of four codes. <code>RX_HANDLER_CONSUMED</code>: the handler owns the skb now, and the loop exits; this is a bridge forwarding a frame to another port, and the host's IP stack is never involved. <code>RX_HANDLER_ANOTHER</code>: the handler rewrote <code>skb-&gt;dev</code>, typically to the master device, and the loop jumps to <code>another_round</code>; this is a bond or a macvlan presenting the frame as its own. <code>RX_HANDLER_EXACT</code>: continue, but deliver only to protocol handlers bound to this exact device. <code>RX_HANDLER_PASS</code>: continue as if there were no handler. Chapters 10 to 12 are, mechanically, three different bodies for this one function pointer.</p>
+
+<h3>The demux: picking the L3 handler</h3>
+<p>The last station hands the skb to L3. <code>deliver_ptype_list_skb</code> (lines 6160 to 6177) looks up <code>skb-&gt;protocol</code> in the <code>ptype_base</code> hash: <code>0x0800</code> maps to <code>ip_rcv</code>, <code>0x0806</code> to <code>arp_rcv</code>, <code>0x86dd</code> to <code>ipv6_rcv</code>, all visible in <code>/proc/net/ptype</code>. The loop uses a small trick worth knowing because it shapes traces: it does not call each handler as it finds it. It remembers the previous match in <code>pt_prev</code> and delivers it only when it finds the next one, so the last handler receives the skb without a reference-count bump and owns it outright. If no handler matches, the skb is freed with a drop reason of unhandled protocol.</p>
+<p>One more shape appears in traces and confuses people. When the skb arrived through the GRO door as part of a batch, the core uses the list variant of this loop, groups the skbs by protocol, and calls <code>ip_list_rcv</code> instead of <code>ip_rcv</code>. pwru cannot probe a function whose argument is a list rather than an skb, so such a trace shows <code>ip_rcv_core</code> with no <code>ip_rcv</code> before it. The native XDP trace of chapter 2 had exactly that shape. Same code, different door.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  IN["__netif_receive_skb, one skb"] ==> AR["another_round<br/>line 6017"]
+  AR ==> GX["generic XDP<br/>6023 to 6035"]
+  GX ==> TAP["taps: ptype_all, deliver_skb<br/>6048 to 6057<br/>tcpdump copies here"]
+  TAP ==> TC["tc ingress: tcx_run, then tc_run<br/>6062 to 6070"]
+  TC -.->|"TC_ACT_REDIRECT or reclassify"| AR
+  TC -->|"TC_ACT_SHOT"| DROP1["kfree_skb"]
+  TC ==> VLAN["vlan_do_receive<br/>6091"]
+  VLAN -.->|"tag found: skb dev = vlan device"| AR
+  VLAN ==> RXH["receive handler<br/>6097 to 6116"]
+  RXH -->|"CONSUMED: bridge took it"| OUT1["loop exits"]
+  RXH -.->|"ANOTHER: skb dev = bond or macvlan"| AR
+  RXH ==> DEMUX["ptype_base by skb protocol<br/>6160 to 6177"]
+  DEMUX ==> IP["ip_rcv"]
+  DEMUX --> ARP["arp_rcv"]
+  DEMUX --> V6["ipv6_rcv"]
+  style TAP fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 3.1 — the stations of <code>__netif_receive_skb_core</code> in order, with the two loops back.</strong> Notice that the tap station is above tc and above the receive handler: tcpdump on a bridge port sees a frame the bridge then takes away, and sees a frame tc then drops. Dotted edges are the device rewrites that send the same skb around again under a new name.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Put a tap and a tc filter on the receiving veth and watch them appear in order.</p>
+<pre><code>sudo lab/09-veth.sh up                       # if not already up
+sudo ip netns exec pp-b cat /proc/net/ptype   # ip_rcv, arp_rcv, ipv6_rcv, no ALL entry yet
+# a packet socket bound to vb, held open for 40 seconds
+sudo ip netns exec pp-b python3 -c 'import socket,time
+s=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(3)); s.bind(("vb",0)); time.sleep(40)' &amp;
+sudo ip netns exec pp-b cat /proc/net/ptype   # now: ALL  vb  packet_rcv
+# a classic tc filter that matches everything and passes it
+sudo ip netns exec pp-b tc qdisc add dev vb clsact
+sudo ip netns exec pp-b tc filter add dev vb ingress pref 10 matchall action pass
+# trace with the classifier and action modules included
+sudo pwru --kmods veth,cls_matchall,act_gact 'tcp and host 10.9.0.2 and port 8080'
+# then, in another terminal, one request
+sudo ip netns exec pp-a curl -s -o /dev/null http://10.9.0.2:8080/</code></pre>
+<p>Expected order for the SYN on the receive side: <code>__netif_receive_skb_one_core</code>, <code>deliver_skb</code>, <code>packet_rcv</code>, <code>skb_clone</code>, <code>consume_skb</code>, <code>tc_run</code>, <code>tcf_classify</code>, <code>mall_classify</code>, <code>tcf_action_exec</code>, <code>tcf_gact_act</code>, <code>ip_rcv</code>. Change the action to <code>drop</code> and the trace stops at <code>tcf_gact_act</code>, but the packet socket still got its copy.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p><code>__netif_receive_skb_core</code> is a loop of six stations. Generic XDP first. Then the taps, where packet sockets get a clone and promiscuous frames are seen before IP drops them. Then tc ingress, tcx programs before classic filters, whose verdict can drop, redirect or loop. Then VLAN untagging and the receive handler, both of which may rewrite <code>skb-&gt;dev</code> and go around again, or, for a bridge, take the frame out of the loop entirely. Last, the protocol demux by <code>skb-&gt;protocol</code> to <code>ip_rcv</code>. Egress has a mirror tap and a mirror tc station, in the opposite order, so egress tc drops are invisible to tcpdump.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>__netif_receive_skb_core</dt><dd>The one function every received skb passes through; a loop of stations with an <code>another_round</code> label.</dd>
+<dt>packet socket, packet type, ptype_all</dt><dd>An <code>AF_PACKET</code> socket registers a handler on the list of taps; <code>packet_rcv</code> clones the skb for it.</dd>
+<dt>deliver_skb</dt><dd>Bumps <code>skb-&gt;users</code> and calls one tap or protocol handler.</dd>
+<dt>promiscuous mode, PACKET_OTHERHOST</dt><dd>Accept frames for other MACs; they reach the taps and are dropped by IP on <code>pkt_type</code>.</dd>
+<dt>dev_queue_xmit_nit</dt><dd>The transmit tap, cloned just before the driver is called.</dd>
+<dt>tc ingress, clsact</dt><dd>The station at lines 6062 to 6070; <code>clsact</code> is the queueing discipline that holds classic ingress and egress filters.</dd>
+<dt>tcx</dt><dd>BPF link attachment for tc programs, run first by <code>tcx_run</code>; classic filters run only if it returns unspecified.</dd>
+<dt>tc verdict</dt><dd><code>TC_ACT_OK</code>, <code>TC_ACT_SHOT</code>, <code>TC_ACT_REDIRECT</code>, <code>TC_ACT_RECLASSIFY</code>.</dd>
+<dt>vlan_do_receive</dt><dd>Untag and rewrite <code>skb-&gt;dev</code> to the VLAN sub-device, then loop.</dd>
+<dt>RX_HANDLER_CONSUMED, ANOTHER, EXACT, PASS</dt><dd>The four return codes of a receive handler; consumed exits the loop, another loops with a new device.</dd>
+<dt>ptype_base, pt_prev</dt><dd>The protocol hash keyed by <code>skb-&gt;protocol</code>, and the deferred-delivery trick that gives the last handler the skb without a clone.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You add <code>tc filter add dev vb ingress matchall action drop</code>. Does <code>tcpdump -i vb</code> still show the dropped frames? Then you move the same drop to <code>egress</code> on the sender's device <code>va</code>. Does <code>tcpdump -i va</code> show them?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Yes on ingress, no on egress. On receive the tap loop (<code>net/core/dev.c:6048</code> to 6057) runs before <code>sch_handle_ingress</code> (line 6067), so the packet socket has cloned the frame before tc drops it. On transmit the order is reversed: <code>sch_handle_egress</code> runs inside <code>__dev_queue_xmit</code> at line 4812, and the transmit tap <code>dev_queue_xmit_nit</code> is called much later from <code>xmit_one</code> at line 3885, just before the driver. A frame dropped by egress tc never reaches the tap.</p>
+<p>The near miss is assuming symmetry, "tcpdump is at L2 so it sees both". The two taps are at different depths on purpose: receive taps see what arrived, transmit taps see what is about to leave.</p>
+</details>
+<p>2. A pwru trace of a frame arriving on a bond slave shows <code>deliver_skb</code>, <code>packet_rcv</code>, then <code>bond_handle_frame</code>, then <code>deliver_skb</code> and <code>packet_rcv</code> again, then <code>ip_rcv</code>. Two tcpdump processes are running. Which devices are they bound to, and why did the frame pass the taps twice?</p>
+<details class="ans"><summary>Answer</summary>
+<p>One is bound to the slave, one to the bond. The bond's receive handler returned <code>RX_HANDLER_ANOTHER</code> after setting <code>skb-&gt;dev</code> to the bond device, and the loop jumped to <code>another_round</code> (line 6107 to 6017). On the second pass the frame is "from" the bond, so the bond's per-device tap list matches and the bond-bound packet socket gets its clone. The slave-bound socket got its clone on the first pass, before the handler ran, because pending taps are delivered at lines 6099 to 6102 before the handler is called.</p>
+<p>The near miss is "the frame was duplicated". It is the same skb, same address in the trace, going around the loop twice under two names. Each pass produced one clone for one socket.</p>
+</details>
+<p>3. A frame arrives on a bridge port. Its destination MAC belongs to a host on another port. Trace the path through the stations of this chapter and say which station the frame never reaches.</p>
+<details class="ans"><summary>Answer</summary>
+<p>Generic XDP if attached, then the taps on the port device, then tc ingress on the port, then the receive handler, which is <code>br_handle_frame</code> because the port is enslaved to the bridge. The bridge looks up the destination MAC, forwards the frame out the other port, and returns <code>RX_HANDLER_CONSUMED</code> (line 6104), so the loop exits. The frame never reaches the protocol demux at lines 6160 to 6177, and <code>ip_rcv</code> never runs for it in the bridge's namespace. Chapter 10 traces the forwarding half.</p>
+<p>The near miss is "the bridge forwards after IP has seen it, because the netfilter chart shows bridge and IP hooks together". The chart's IP hooks appear on a bridged path only when the <code>br_netfilter</code> module is loaded, and even then they are called from inside the bridge code, not from <code>ip_rcv</code>.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man7/packet.7.html">packet(7)</a>, Linux manual page. The first two pages: socket types, <code>ETH_P_ALL</code>, binding to a device, and the promiscuous membership option.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/packet_mmap.html">Packet MMAP</a>, kernel documentation. How tcpdump avoids a copy per frame with a shared ring; skim once, it explains why capture is cheap.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://man7.org/linux/man-pages/man8/tc-bpf.8.html">tc-bpf(8)</a>, Linux manual page. The classic way to attach a BPF classifier; read the direct-action paragraph.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span>Daniel Borkmann, <a href="https://github.com/torvalds/linux/commit/e420bed025071a623d2720a92bc2245c84757ecb">bpf: Add fd-based tcx multi-prog infra with link support</a>, Linux 6.6 merge commit (GitHub mirror), and the series cover letter <a href="https://lwn.net/Articles/938632/">BPF link support for tc BPF programs</a> (LWN mirror). The commit message is the tcx design document; read it before chapter 14.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://www.tcpdump.org/manpages/pcap-filter.7.html">pcap-filter(7)</a>, tcpdump.org. The filter language pwru borrows; keep it open when a filter matches nothing.</li>
+</ul>
+</div>
+</section>

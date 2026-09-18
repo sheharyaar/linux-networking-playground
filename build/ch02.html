@@ -1,0 +1,114 @@
+<section id="ch2" class="chapter">
+<span class="chnum">Chapter 2</span>
+<h2>XDP: the hook that runs before the skb exists</h2>
+<p class="chmeta">~RT2 min · <span class="tag BPF">BPF</span> · <em>Spine:</em> our skb is about to be built inside the driver's poll. One program type is allowed to see the frame before that happens, and it is the reason a packet can be dropped for almost nothing. The veth chapter depends on what this one says about copying, so we take the detour now.</p>
+
+<h3>A program on the raw buffer</h3>
+<p><b>XDP</b>, the eXpress Data Path, is a BPF program type that a driver runs on a received frame while the frame is still just bytes in a DMA buffer. The program does not receive an skb, because none has been allocated. It receives an <b>xdp_buff</b> (<code>include/net/xdp.h:86</code>): pointers to the start and end of the frame data, a pointer to a small metadata area in front of the data, the size of the buffer, and a reference to the receive queue it came from. That is the whole world the program can see.</p>
+<p>It returns one of five <b>verdicts</b>, the <code>enum xdp_action</code> at <code>include/uapi/linux/bpf.h:6576</code>. <code>XDP_PASS</code> lets the driver continue and build the skb. <code>XDP_DROP</code> hands the buffer straight back to the ring for reuse. <code>XDP_TX</code> sends the same buffer back out of the same device, which is how a load balancer answers from the card. <code>XDP_REDIRECT</code> hands the buffer to another device, another CPU, or a user-space socket. <code>XDP_ABORTED</code> is a drop that also fires a tracepoint, meant for program errors.</p>
+<p>Here is the absence list, and it is the reason XDP exists. At the moment the program runs there is no skb, no <code>protocol</code> field, no device lookup, no namespace check, no tap, no tc, no netfilter hook, no route, no socket. A frame dropped by XDP has cost the card one DMA write and the CPU one descriptor read and one program run. Everything in chapters 3 to 7 has been skipped. This is wonderful for a flood filter and useless for anything that needs to know what the packet means to a socket.</p>
+
+<h3>Three places to attach the same program</h3>
+<p>The same program object can be attached in three <b>modes</b>, chosen with <code>ip link set dev DEV xdp</code>, <code>xdpgeneric</code> or <code>xdpoffload</code>, all routed through <code>dev_xdp_install</code> (<code>net/core/dev.c:10327</code>).</p>
+<p><b>Native XDP</b> means the driver itself calls the program from inside its poll, on the DMA buffer, before it builds an skb. In <code>igb</code> that call sits in the receive loop of chapter 1, between reading the descriptor and <code>igb_build_skb</code>. Only drivers written for it support it. <b>Offloaded XDP</b> means the card's own processor runs the program and the host never sees dropped frames at all; a handful of cards do this. <b>Generic XDP</b> is the fallback for every other device: the skb is built as usual, and the core runs the program on it at the very top of the L2 receive loop, at <code>net/core/dev.c:6023</code> to 6035, through <code>do_xdp_generic</code> (line 5670).</p>
+<p>Generic mode has to fake the environment native mode gets for free. <code>netif_receive_generic_xdp</code> (line 5590) pushes the Ethernet header back into view (line 6604), then checks whether the skb is cloned, is not linear, or has less than <code>XDP_PACKET_HEADROOM</code>, 256 bytes, of free space in front of the data (lines 5607 to 5610). If any of those hold, <code>netif_skb_check_for_xdp</code> (line 5565) calls <code>pskb_expand_head</code> and <code>skb_linearize</code> (lines 5575 to 5588), which allocate a new head buffer and copy the bytes into it. Only then does <code>bpf_prog_run_generic_xdp</code> run. So generic XDP can be slower than no XDP: the program is cheap, the copy that makes room for it is not. On the veth bench the trace reads exactly that way: <code>__netif_receive_skb_one_core</code>, <code>pskb_expand_head</code>, <code>skb_release_data</code>, <code>bpf_prog_run_generic_xdp</code>, then the tc and IP stations of chapter 3.</p>
+<p>One consequence of the position matters for debugging. Generic XDP runs at line 6026, and the tap loop that feeds packet sockets starts at line 6048. A frame dropped by a generic XDP program is never seen by <code>tcpdump</code> on that device. Native XDP drops are invisible even earlier.</p>
+
+<h3>Redirect: leaving without an skb</h3>
+<p><code>XDP_REDIRECT</code> is the verdict that turned XDP from a filter into a forwarding plane. The program calls the <code>bpf_redirect</code> or <code>bpf_redirect_map</code> helper (<code>net/core/filter.c:4717</code>) naming a target, and after the program returns, the driver calls <code>xdp_do_redirect</code> (line 4593). That function first converts the <code>xdp_buff</code> into an <b>xdp_frame</b> (<code>include/net/xdp.h:294</code>, conversion at line 430), a compact record stored in the buffer's own headroom so the frame can be queued without allocating anything. Then it looks at the target type.</p>
+<p>A <b>devmap</b> target (<code>kernel/bpf/devmap.c:552</code>) queues the frame for another device's transmit function, so a frame can enter one card and leave another with no skb ever existing. A <b>cpumap</b> target (<code>kernel/bpf/cpumap.c:793</code>) queues the frame for another CPU, where a kernel thread builds an skb from it with <code>xdp_build_skb_from_frame</code> (<code>net/core/xdp.c:849</code>) and enters the normal receive path there. That is receive packet steering done before the skb rather than after it. An <b>AF_XDP</b> socket target copies or maps the frame into a user-space ring, and the kernel network stack never touches it again; that is the kernel-bypass path, and this document only names it.</p>
+
+<h3>Native XDP on a veth: the copy you did not order</h3>
+<p>A veth supports native XDP, and this is where the chapter earns its place in the spine. A veth does not receive DMA buffers; it receives skbs from its peer. So to run a native XDP program it must turn an skb into an <code>xdp_buff</code>, and it does so in <code>veth_xdp_rcv_skb</code> (<code>drivers/net/veth.c:790</code>) by calling <code>veth_convert_skb_to_xdp_buff</code> (line 751). Read the test at the top of that function, lines 758 to 760: if the skb is shared, if its head is locked, if it is not linear, or if it has less than 256 bytes of headroom, then <code>skb_pp_cow_data</code> (<code>net/core/skbuff.c:942</code>) allocates a fresh page-pool buffer, copies the bytes into it, builds a <strong>new skb</strong> around it with <code>napi_build_skb</code>, copies the header fields across, and frees the old skb with <code>consume_skb</code>.</p>
+<p>A TCP segment always trips that test. TCP transmits a clone of the skb it keeps for retransmission (<code>net/ipv4/tcp_output.c:1563</code>), and a clone's head is locked because the data is shared with the original. So on the bench, with our program attached natively to the receiving end, the trace shows the first skb entering <code>veth_xdp_rcv_skb</code> and dying four lines later in <code>kfree_skbmem</code>. The XDP program line then appears against an address that matches no skb, because it is the address of the <code>xdp_buff</code>. And a second skb, with a new address, appears at <code>eth_type_trans</code> and continues through <code>gro_receive_skb</code> into the stack. Hold on to this. It is the one case in which a veth creates a new skb, and chapter 9 will point back here.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  subgraph native["Native XDP, inside the driver poll"]
+    N1["frame in DMA buffer"] ==> N2["XDP program on xdp_buff"] ==> N3{"verdict"}
+    N3 ==>|"PASS"| N4["build skb, GRO, core loop"]
+    N3 -->|"DROP"| N5["buffer back to the ring"]
+    N3 -->|"TX"| N6["same device transmit"]
+    N3 -->|"REDIRECT"| N7["xdp_frame to devmap, cpumap or AF_XDP"]
+  end
+  subgraph generic["Generic XDP, top of the core loop"]
+    G1["skb already built"] ==> G2["expand head to 256 bytes<br/>linearize if needed"] ==> G3["XDP program on xdp_buff over the skb"] ==> G4{"verdict"}
+    G4 ==>|"PASS"| G5["taps, tc, receive handler, IP"]
+    G4 -->|"DROP"| G6["kfree_skb, tcpdump never saw it"]
+  end
+  style N5 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style G2 fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 2.1 — native and generic XDP compared.</strong> Notice that the native drop hands a buffer back to the ring with no allocation ever made, while the generic path may have to copy the skb head before the program can even run. The same program object runs in both; only the cost differs.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Build the smallest useful program, attach it both ways on the veth bench, and watch where the skb dies.</p>
+<pre><code>cd lab/02-xdp &amp;&amp; clang -O2 -g -target bpf -c xdp_pass.c -o xdp_pass.o
+sudo lab/09-veth.sh up
+# native on the receiving end, then trace with the XDP program included
+sudo ip netns exec pp-b ip link set dev vb xdp obj lab/02-xdp/xdp_pass.o sec xdp
+sudo pwru --kmods veth --filter-trace-xdp 'tcp and host 10.9.0.2 and port 8080'
+# in another terminal
+sudo ip netns exec pp-b python3 -m http.server 8080 --bind 10.9.0.2 &amp;
+sudo ip netns exec pp-a curl -s -o /dev/null http://10.9.0.2:8080/
+# how many frames did the program see
+sudo bpftool map dump name xdp_count
+# swap to generic and trace again
+sudo ip netns exec pp-b ip link set dev vb xdp off
+sudo ip netns exec pp-b ip link set dev vb xdpgeneric obj lab/02-xdp/xdp_pass.o sec xdp</code></pre>
+<p>In the native trace the SYN's first skb ends with <code>veth_xdp_rcv_skb</code>, <code>consume_skb</code>, <code>kfree_skbmem</code>; a line named after the program follows, tagged <code>[bpf](xdp)</code>; then a new skb address starts at <code>eth_type_trans</code>. In the generic trace one skb runs all the way through, and <code>pskb_expand_head</code> appears just before <code>bpf_prog_run_generic_xdp</code>. On your Wi-Fi card only generic mode attaches, because the driver has no native hook.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>XDP runs a BPF program on an <code>xdp_buff</code> before any skb exists, and returns pass, drop, transmit, redirect or abort. Native mode runs it in the driver poll on the DMA buffer; generic mode runs it at the top of the L2 loop, after building the skb and after copying its head if the headroom is short; offload runs it on the card. Redirect converts the buffer to an <code>xdp_frame</code> and queues it to another device, another CPU, or a user-space socket. On a veth, native XDP converts the incoming skb and, for any cloned skb, copies it into a page-pool buffer and builds a new skb, freeing the old one.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>XDP</dt><dd>eXpress Data Path: a BPF program run on a received frame before the skb is built.</dd>
+<dt>xdp_buff</dt><dd>The program's view of the frame: data start and end, metadata area, buffer size, receive queue.</dd>
+<dt>XDP verdict</dt><dd><code>XDP_PASS</code>, <code>XDP_DROP</code>, <code>XDP_TX</code>, <code>XDP_REDIRECT</code>, <code>XDP_ABORTED</code>.</dd>
+<dt>native, generic, offload</dt><dd>Where the program runs: in the driver poll, at the top of the core receive loop, or on the card.</dd>
+<dt>XDP_PACKET_HEADROOM</dt><dd>The 256 bytes of free space in front of the data that a program is promised; generic mode copies to get it.</dd>
+<dt>xdp_frame</dt><dd>An <code>xdp_buff</code> converted for queueing, stored in the buffer's own headroom.</dd>
+<dt>devmap, cpumap</dt><dd>Redirect targets: another device's transmit path, or another CPU that builds the skb there.</dd>
+<dt>AF_XDP</dt><dd>A socket that receives redirected frames in user space with no skb; named here only.</dd>
+<dt>skb_pp_cow_data</dt><dd>Copy an skb's bytes into a page-pool buffer and build a new skb; what veth does before native XDP on a cloned skb.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. A colleague attaches a generic XDP program that drops all UDP to port 53 on <code>eth0</code>, then runs <code>tcpdump -i eth0 port 53</code> to confirm and sees nothing at all, including the queries that should be arriving. They conclude the program is dropping everything. What is the mistake?</p>
+<details class="ans"><summary>Answer</summary>
+<p>The program may be working exactly as written; <code>tcpdump</code> cannot see what generic XDP drops. Generic XDP runs at <code>net/core/dev.c:6023</code> to 6035, and the tap loop that feeds packet sockets starts at line 6048, after it. A dropped frame never reaches the taps. To confirm the drop, read the program's own counters with <code>bpftool map dump</code>, or use <code>pwru --filter-trace-xdp</code>, which prints the program run and its verdict.</p>
+<p>The near miss is "tcpdump sees everything the NIC receives because it runs at L2". It sees everything that reaches the tap loop. Native and generic XDP both sit before it, and so does a hardware drop.</p>
+</details>
+<p>2. Predict the value: a TCP segment crosses a veth pair whose receiving end has a native XDP program attached. How many skbs are allocated for that segment on the receive side, and which line of code decides it?</p>
+<details class="ans"><summary>Answer</summary>
+<p>One new skb, so two in total counting the one that arrived. <code>veth_convert_skb_to_xdp_buff</code> (<code>drivers/net/veth.c:758</code> to 760) tests whether the skb is shared, head-locked, non-linear or short on headroom. A TCP segment is transmitted as a clone (<code>net/ipv4/tcp_output.c:1563</code>), and a clone's head is locked, so the test passes and <code>skb_pp_cow_data</code> (<code>net/core/skbuff.c:942</code>) builds a new skb and frees the old one with <code>consume_skb</code>.</p>
+<p>The near miss is "zero, because the program returned PASS and nothing was dropped". The copy is not about the verdict. It happens before the program runs, to give it a private, linear, roomy buffer. An ICMP echo from <code>ping</code> is not cloned and has enough headroom, so it would pass the test and keep its skb.</p>
+</details>
+<p>3. In a pwru trace with <code>--filter-trace-xdp</code>, the line naming the XDP program carries an address that appears nowhere else in the trace, before or after. Is the tracer confused?</p>
+<details class="ans"><summary>Answer</summary>
+<p>No. pwru's first column is the address of the object passed to the probed function. For every kernel function that is an skb. For an XDP program it is the <code>xdp_buff</code>, because at that moment there is no skb to print. On a veth the buffer lives on the stack of <code>veth_xdp_rcv_skb</code> (<code>drivers/net/veth.c:790</code>, the <code>vxbuf</code> local), so its address is reused by every frame and matches no skb group.</p>
+<p>The near miss is treating the address as a new skb and concluding that XDP allocated one. XDP allocates nothing. The new skb, when there is one, is built afterwards by <code>skb_pp_cow_data</code> and shows up as its own group starting at <code>eth_type_trans</code>.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span>Høiland-Jørgensen et al., <a href="http://borkmann.ch/paper/2018_xdp.pdf">The eXpress Data Path: Fast Programmable Packet Processing in the Operating System Kernel</a>, ACM CoNEXT 2018 (open-access PDF; the source and data are at <a href="https://github.com/tohojo/xdp-paper">github.com/tohojo/xdp-paper</a>). Read sections 2 and 3 for the design; the benchmarks are dated.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://github.com/xdp-project/xdp-tutorial">XDP Programming Hands-On Tutorial</a>. Do the basic lessons if you want to write more than the pass program; each lesson is an hour.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.kernel.org/bpf/map_devmap.html">BPF_MAP_TYPE_DEVMAP and BPF_MAP_TYPE_DEVMAP_HASH</a> and <a href="https://docs.kernel.org/bpf/map_cpumap.html">BPF_MAP_TYPE_CPUMAP</a>, kernel documentation. Short; they define the two redirect targets precisely.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.kernel.org/networking/af_xdp.html">AF_XDP</a>, kernel documentation. Only if you want the user-space path; the overview section is enough to place it.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.cilium.io/en/stable/reference-guides/bpf/index.html">BPF and XDP Reference Guide</a>, Cilium documentation. The XDP and tc sections of the program types chapter; long, and the best written explanation of the two hook points side by side.</li>
+</ul>
+</div>
+</section>

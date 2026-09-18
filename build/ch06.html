@@ -1,0 +1,138 @@
+<section id="ch6" class="chapter">
+<span class="chnum">Chapter 6</span>
+<h2>Transmit: from sendmsg to the wire, through the default gateway</h2>
+<p class="chmeta">~RT6 min · <span class="tag L3">L3</span> · <em>Spine:</em> our skb has been delivered, and the server is answering. The reply is a new skb, born in the socket layer rather than in a ring. This chapter follows it down to the driver, and it is also scenario 4: the destination is not on the local link, so the packet has to find the default gateway's MAC address first.</p>
+
+<h3>Born in the socket, transmitted as a clone</h3>
+<p>A <code>write()</code> on a TCP socket ends in <code>tcp_sendmsg</code> (<code>net/ipv4/tcp.c:1446</code>) and <code>tcp_sendmsg_locked</code> (line 1116), which copy the user's bytes into skbs on the socket's <b>write queue</b>. Each skb is allocated with enough headroom for every header that will be added below it, so that no layer needs to reallocate. <code>tcp_push</code> (line 740) hands control to <code>tcp_write_xmit</code> (<code>net/ipv4/tcp_output.c:2964</code>), which decides how many segments the congestion window and pacing allow to leave now, and calls <code>__tcp_transmit_skb</code> (line 1536) for each.</p>
+<p>Here is the fact three earlier chapters leaned on. At line 1563, <code>__tcp_transmit_skb</code> <em>clones</em> the skb. The original stays on the write queue until the peer acknowledges it, because TCP may need to retransmit. The clone, sharing the same data buffer, is what travels. That shared buffer is why <code>ip_forward</code> had to copy the header before touching the TTL, and why a native XDP program on a veth forced a copy before it could run. TCP then writes the TCP header into the clone's headroom and calls the address family's transmit function, <code>icsk_af_ops-&gt;queue_xmit</code> (lines 1716 to 1718), which for IPv4 is <code>ip_queue_xmit</code>.</p>
+
+<h3>Route first, then LOCAL_OUT, then POST_ROUTING</h3>
+<p><code>ip_queue_xmit</code> (<code>net/ipv4/ip_output.c:545</code>) leads to <code>__ip_queue_xmit</code> (line 462). Its first job is the route, and for a connected TCP socket it does not look one up: the route was resolved at <code>connect()</code> time and cached on the socket, and the cached <code>dst_entry</code> is reused for every segment. Then it writes the IP header and calls <code>ip_local_out</code> (line 125), which reaches <code>__ip_local_out</code> (line 102). That function calls the LOCAL_OUT hook (lines 121 to 123) with <code>dst_output</code> as the continuation, and <code>dst_output</code> (<code>include/net/dst.h:468</code>) is the same indirect call chapter 4 met, through the route's <code>output</code> pointer, which <code>rt_dst_alloc</code> set to <code>ip_output</code> (<code>net/ipv4/route.c:1691</code>).</p>
+<p>Notice the order. The chart shows a routing decision before LOCAL_OUT, and here is why: the route is needed to choose the source address and the outgoing device, so it has to exist before any hook that might read them. A LOCAL_OUT rule that rewrites the destination therefore forces a second lookup, which netfilter does explicitly, and that is the one place the chart's "reroute check" comes from.</p>
+<p><code>ip_output</code> (line 427) calls the POST_ROUTING hook (lines 437 to 440) with <code>ip_finish_output</code> (line 317) as the continuation. This is where a forwarded packet from chapter 4 joined us: <code>ip_forward_finish</code> also ended in <code>dst_output</code>, so locally generated and forwarded packets share everything from here down, and POST_ROUTING is the one hook that sees both. <code>__ip_finish_output</code> (line 296) fragments the packet if it is larger than the path allows and is not marked for hardware segmentation (<code>ip_fragment</code>, line 312), then calls <code>ip_finish_output2</code> (line 199).</p>
+
+<h3>The neighbour: finding a MAC address</h3>
+<p>The IP layer knows the next hop but not its MAC address. <code>ip_finish_output2</code> asks the route for the <b>neighbour</b> entry at line 230: <code>ip_neigh_for_gw</code> returns the entry for the gateway if the route has one, or for the destination itself if it is on the local link. A neighbour entry, <code>struct neighbour</code>, is one row of the table <code>ip neigh</code> prints: an IP address, a MAC address, and a state from the set at <code>include/uapi/linux/neighbour.h:63</code> onward: <code>INCOMPLETE</code> while resolution is in progress, <code>REACHABLE</code> when confirmed, <code>STALE</code> when old but usable, and a few more.</p>
+<p><code>neigh_output</code> (<code>include/net/neighbour.h:547</code>) has a fast path: if the entry is connected and has a cached hardware header, it copies the pre-built 14-byte Ethernet header in front of the IP header and calls <code>dev_queue_xmit</code>. Otherwise <code>neigh_resolve_output</code> (<code>net/core/neighbour.c:1596</code>) calls <code>__neigh_event_send</code> (line 1202). For an entry with no address yet, that function sets the state to <code>INCOMPLETE</code> (line 1224), parks the skb on the entry's <code>arp_queue</code> (line 1265), bounded by <code>unres_qlen_bytes</code>, and calls <code>neigh_probe</code> (line 1084). <code>neigh_probe</code> clones the parked skb, only to lend it to <code>arp_solicit</code> (<code>net/ipv4/arp.c:333</code>) so the ARP request can copy its source address, and <code>arp_solicit</code> builds and sends a separate ARP request skb.</p>
+<p>When the reply arrives, <code>arp_rcv</code> (line 967) and <code>arp_process</code> (line 702) update the entry to <code>REACHABLE</code> with the learned MAC address, and the update loop sends every parked skb through the entry's output function. In the bench trace of a SYN to a gateway with an empty neighbour table, that is exactly the shape: <code>neigh_resolve_output</code>, <code>__neigh_event_send</code>, <code>skb_clone</code>, then the ARP exchange, then <code>neigh_resolve_output</code> again for the same skb address, <code>eth_header</code>, <code>skb_push</code> growing the length from 60 to 74, and <code>__dev_queue_xmit</code>. The SYN was never dropped. It waited.</p>
+
+<h3>The queueing discipline, and when it is skipped</h3>
+<p><code>__dev_queue_xmit</code> (<code>net/core/dev.c:4771</code>) is the device layer's transmit entry, and its stations mirror chapter 3's in reverse. First tc egress, <code>sch_handle_egress</code> (line 4812), tcx programs then classic filters. Then <code>netdev_core_pick_tx</code> (line 4830) picks a <b>transmit queue</b>: multi-queue cards have one ring per CPU or per flow hash, and this is where the choice is made. Then the test at line 4834: <code>if (q-&gt;enqueue)</code>.</p>
+<p>A <b>queueing discipline</b>, or <b>qdisc</b>, is the object between the stack and the driver that decides which packet leaves next and holds the ones that cannot leave yet. Every device has a root qdisc. Virtual devices such as veth, <code>lo</code> and bridges have <code>noqueue</code>, whose <code>enqueue</code> pointer is NULL, so the test fails and the code goes straight to <code>dev_hard_start_xmit</code> (line 4878): there is nothing to queue behind. Real cards have a real qdisc, <code>fq_codel</code> on most modern distributions, <code>pfifo_fast</code> historically, and <code>mq</code> as a parent with one child per transmit queue, and the code enters <code>__dev_xmit_skb</code> (line 4185).</p>
+<p>Even then, most packets never sit in the queue. At lines 4200 to 4218 there is a bypass: if the qdisc allows it and is empty, and no other CPU is running it, the skb goes directly to <code>sch_direct_xmit</code> (<code>net/sched/sch_generic.c:344</code>) without being enqueued. The bench trace with <code>fq_codel</code> on the client's veth shows precisely <code>netdev_core_pick_tx</code> then <code>sch_direct_xmit</code>, with no enqueue function between them. The queue only fills when the driver says its ring is full and stops the queue, or when packets arrive faster than the link drains. Then <code>enqueue</code> is called, and <code>__qdisc_run</code> (line 440) dequeues in batches of <code>dev_tx_weight</code>, 64 packets, through <code>qdisc_restart</code> (line 418) and <code>sch_direct_xmit</code>, until the ring is full again or the qdisc is empty. <code>tc -s qdisc show</code> reports the backlog and drops; this is where latency under load accumulates, and why the qdisc you choose matters.</p>
+
+<h3>The driver, segmentation, and the last tap</h3>
+<p>Before the driver sees the skb, <code>validate_xmit_skb</code> runs. Its most important job is <b>GSO</b>, generic segmentation offload: TCP is allowed to build one skb of up to 64 KB and mark it with the segment size, so that the whole stack processes one packet instead of forty. <code>netif_skb_features</code> asks whether the device can segment in hardware, <b>TSO</b>. If it can, the big skb goes down as is. If it cannot, <code>skb_gso_segment</code> splits it here, into MSS-sized skbs, after the qdisc has already counted it as one packet. A veth advertises every segmentation feature, so a 64 KB skb crosses a veth pair intact, and tcpdump on either end shows a 64 KB "packet" that never existed on any wire.</p>
+<p>Then <code>dev_hard_start_xmit</code> (line 3895) and <code>xmit_one</code> (line 3878): the transmit tap for packet sockets at line 3885, and finally <code>netdev_start_xmit</code>, which is the device's <code>ndo_start_xmit</code>. For an Ethernet driver that means mapping the skb's buffers for DMA, writing transmit descriptors into the transmit ring at its <code>next_to_use</code> slot, and telling the card there is work. The skb is not freed here. It is freed later, when the card reports the descriptor done and the driver's poll function, <code>igb_clean_tx_irq</code> in our example, walks the completed descriptors and calls <code>napi_consume_skb</code>. That is when the clone dies and <code>tcp_wfree</code> credits the sender's socket. For <code>lo</code> and veth there is no completion: <code>ndo_start_xmit</code> hands the skb straight to the receive path, and chapters 8 and 9 pick it up alive.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["write on a TCP socket<br/>tcp_sendmsg, write queue"] ==> B["tcp_write_xmit, __tcp_transmit_skb<br/>clone the skb, tcp_output.c 1563"]
+  B ==> C["ip_queue_xmit<br/>cached route on the socket"]
+  C ==> D["__ip_local_out<br/>LOCAL_OUT hook, ip_output.c 121"]
+  D ==> E["dst_output: ip_output<br/>POST_ROUTING hook, 437"]
+  F["forwarded packet<br/>ip_forward_finish, chapter 4"] ==> E
+  E ==> G["ip_finish_output2 199<br/>neighbour lookup"]
+  G -.->|"no MAC yet"| H["arp_queue, arp_solicit<br/>wait for arp_process"]
+  H -.-> G
+  G ==> I["__dev_queue_xmit 4771<br/>tc egress, pick tx queue"]
+  I ==>|"noqueue: veth, lo, bridge"| K["dev_hard_start_xmit 3895"]
+  I ==>|"real qdisc"| J["__dev_xmit_skb 4185<br/>bypass if empty, else enqueue and __qdisc_run"]
+  J ==> K
+  K ==> L["validate_xmit_skb: GSO split unless TSO<br/>xmit_one: transmit tap 3885"]
+  L ==> M["ndo_start_xmit<br/>NIC: tx ring, DMA, completion frees the clone<br/>veth and lo: straight into the receive path"]
+  style B fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style J fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 6.1 — the transmit tower.</strong> Notice where the forwarded path joins: at <code>ip_output</code>, so POST_ROUTING is the one hook both locally generated and forwarded packets pass. The dotted loop at the neighbour is the ARP wait; the qdisc box is the only place a packet can be held for a long time.</figcaption>
+</figure>
+
+<figure class="dia">
+<div class="mermaid">
+sequenceDiagram
+  participant IP as ip_finish_output2
+  participant N as neighbour entry for the gateway
+  participant ARP as arp_solicit and arp_process
+  participant DEV as __dev_queue_xmit
+  IP->>N: neigh_output, entry has no MAC
+  N->>N: state INCOMPLETE, park the SYN on arp_queue, neighbour.c 1265
+  N->>ARP: neigh_probe clones the SYN for arp_solicit, 1084
+  ARP-->>ARP: ARP request out, ARP reply in, arp_rcv, arp_process
+  ARP->>N: neigh_update: state REACHABLE, MAC learned
+  N->>IP: send every parked skb through neigh_resolve_output
+  IP->>DEV: eth_header, skb_push 14 bytes, dev_queue_xmit
+  Note over IP,DEV: next packet: cached header, neigh_hh_output, no ARP
+</div>
+<figcaption><strong>Diagram 6.2 — first packet to a gateway with an empty neighbour table.</strong> Notice that the SYN is parked, not dropped, and that its clone is only a source-address donor for the ARP request. Every later packet to the same gateway takes the one-line cached-header path.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Scenario 4 in a clean namespace: the router lab's client reaches the server through its default gateway <code>10.5.1.1</code>. Give it a real qdisc, forget the gateway's MAC, and trace ARP and TCP together.</p>
+<pre><code>sudo ip netns exec pp-c ip route get 10.5.2.2          # via 10.5.1.1 dev c0
+sudo ip netns exec pp-c tc qdisc add dev c0 root fq_codel
+sudo ip netns exec pp-c ip neigh flush dev c0
+sudo pwru --kmods veth --filter-netns /run/netns/pp-c 'arp or (tcp and port 8080)'
+# another terminal
+sudo ip netns exec pp-c curl -s -o /dev/null http://10.5.2.2:8080/
+sudo ip netns exec pp-c ip neigh show dev c0            # 10.5.1.1 lladdr ... REACHABLE
+sudo ip netns exec pp-c tc -s qdisc show dev c0         # sent packets, backlog 0, no drops
+# on your laptop the same shape ends in the Wi-Fi driver
+GW=$(ip route show default | awk '{print $3; exit}'); sudo ip neigh flush dev wlan0
+sudo pwru "arp or (icmp and host $GW)" &amp; sleep 5; ping -c1 $GW &gt;/dev/null; wait</code></pre>
+<p>Look for three things in the SYN's lines: <code>__neigh_event_send</code> followed by <code>skb_clone</code> and the ARP functions before the SYN reappears at <code>eth_header</code>; the length growing from 60 to 74 at <code>skb_push</code>; and <code>sch_direct_xmit</code> right after <code>netdev_core_pick_tx</code>, the qdisc bypass, with no enqueue in between.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>TCP transmits a clone and keeps the original for retransmission. The route is cached on the socket, so LOCAL_OUT runs after a routing decision that already happened; POST_ROUTING is called by <code>ip_output</code>, where forwarded packets join. <code>ip_finish_output2</code> resolves the next hop's MAC through the neighbour table, parking the packet and sending ARP when the entry is incomplete. <code>__dev_queue_xmit</code> runs tc egress, picks a transmit queue, skips the qdisc entirely for noqueue devices, bypasses it when it is empty, and otherwise enqueues and drains through <code>__qdisc_run</code>. <code>validate_xmit_skb</code> segments large skbs unless the device offloads it, the transmit tap copies, and the driver writes descriptors; the clone is freed on completion.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>write queue</dt><dd>The socket's list of unacknowledged skbs; TCP transmits clones of them.</dd>
+<dt>ip_queue_xmit, __ip_local_out</dt><dd>Attach the cached route, write the IP header, call LOCAL_OUT, then <code>dst_output</code>.</dd>
+<dt>ip_output, ip_finish_output2</dt><dd>POST_ROUTING hook, then fragmentation or segmentation decisions, then the neighbour step.</dd>
+<dt>neighbour entry, NUD states</dt><dd>One row of <code>ip neigh</code>: address, MAC, and INCOMPLETE, REACHABLE, STALE and friends.</dd>
+<dt>arp_queue, neigh_probe, arp_solicit</dt><dd>Where an unresolved packet waits, the function that triggers resolution, the function that sends the ARP request.</dd>
+<dt>__dev_queue_xmit, netdev_core_pick_tx</dt><dd>The device transmit entry; tc egress, then choose the transmit queue.</dd>
+<dt>queueing discipline, qdisc, noqueue</dt><dd>The object that orders and holds packets before the driver; virtual devices have none.</dd>
+<dt>qdisc bypass, __qdisc_run, sch_direct_xmit</dt><dd>Skip an empty qdisc; otherwise drain it in batches of 64 to the driver.</dd>
+<dt>GSO, TSO</dt><dd>Build one large skb and segment it late, in software or in the card.</dd>
+<dt>ndo_start_xmit, transmit completion</dt><dd>The driver's entry that writes descriptors, and the later poll that frees the skb.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. A transmit trace on a device with <code>fq_codel</code> shows <code>netdev_core_pick_tx</code> followed immediately by <code>sch_direct_xmit</code>, and never any <code>fq_codel_enqueue</code>. A colleague says the qdisc is misconfigured and not being used. What is happening?</p>
+<details class="ans"><summary>Answer</summary>
+<p>The bypass is working as designed. <code>__dev_xmit_skb</code> (<code>net/core/dev.c:4200</code> to 4218) checks whether the qdisc allows bypass, is empty, and is not being run by another CPU; if so it calls <code>sch_direct_xmit</code> without enqueueing. The enqueue function runs only when a packet cannot leave immediately: the driver has stopped the queue because its ring is full, or another CPU holds the qdisc. Generate a burst larger than the ring, or look at <code>tc -s qdisc show</code> under load, and the enqueue and <code>__qdisc_run</code> lines appear.</p>
+<p>The near miss is "an empty qdisc still enqueues and dequeues each packet". That was true of older kernels and is the reason the bypass flag exists; a trace on 7.2 shows the bypass on every idle link.</p>
+</details>
+<p>2. The first connection to a new gateway shows the SYN reaching <code>__neigh_event_send</code>, then <code>skb_clone</code>, then ARP functions, and only afterwards <code>__dev_queue_xmit</code> for that same skb address. Where was the SYN in between, what was the clone for, and when would it have been dropped instead?</p>
+<details class="ans"><summary>Answer</summary>
+<p>It was parked on the neighbour entry's <code>arp_queue</code> (<code>net/core/neighbour.c:1265</code>) while the entry was <code>INCOMPLETE</code>. The clone was made by <code>neigh_probe</code> (line 1084) and lent to <code>arp_solicit</code> so the ARP request could take its source address; it is freed right after. Once <code>arp_process</code> updates the entry, the parked skb is sent through <code>neigh_resolve_output</code>, which is why the same address reappears at <code>eth_header</code>. It would have been dropped, with reason <code>NEIGH_QUEUEFULL</code>, if the queue already held more than <code>unres_qlen_bytes</code> of unresolved packets, or if resolution failed after the configured number of probes.</p>
+<p>The near miss is "the SYN was dropped and TCP retransmitted it". Retransmission would show a second skb allocation and a one-second gap; here the same skb continues within milliseconds.</p>
+</details>
+<p>3. tcpdump on one end of a veth pair shows a single 64 KB TCP segment. The same data captured on a physical Ethernet NIC of another machine appears as 44 segments of 1,448 bytes. Which function made the difference, and where in the transmit path does tcpdump take its copy?</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>validate_xmit_skb</code>, through <code>netif_skb_features</code>. A veth advertises all segmentation offloads, so the 64 KB GSO skb TCP built is not split in software and crosses the pair intact; a card without TSO, or a path that segmented earlier, yields wire-sized segments. tcpdump's transmit copy is taken in <code>xmit_one</code> (<code>net/core/dev.c:3885</code>), after <code>validate_xmit_skb</code> has run, so it sees whatever the device will receive: one giant skb on the veth, MSS-sized segments where software GSO split them.</p>
+<p>The near miss is "tcpdump on the veth is buggy". It is accurate: no wire is involved, and the 64 KB skb is the real object the peer's receive path gets. Turn off the features with <code>ethtool -K veth0 tso off gso off</code> and the capture changes to 1,448-byte segments, because the split now happens before the tap.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://man7.org/linux/man-pages/man7/arp.7.html">arp(7)</a>, Linux manual page. The neighbour cache sysctls: <code>unres_qlen_bytes</code>, <code>base_reachable_time_ms</code>, <code>gc_stale_time</code>; five minutes.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://www.rfc-editor.org/rfc/rfc826">RFC 826: An Ethernet Address Resolution Protocol</a>, D. Plummer, 1982. Short, and still exactly what <code>arp_solicit</code> sends.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/segmentation-offloads.html">Segmentation Offloads</a>, kernel documentation. The TSO and GSO sections explain the 64 KB skb and when it is split.</li>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.kernel.org/networking/scaling.html">Scaling in the Linux Networking Stack</a>, kernel documentation. The XPS section is the transmit-queue choice <code>netdev_core_pick_tx</code> makes.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-sending-data/">Monitoring and Tuning the Linux Networking Stack: Sending Data</a>, Packagecloud, 2017. Third-party and older, but the only long walk through qdiscs and drivers with every counter named; read after the lab.</li>
+</ul>
+</div>
+</section>

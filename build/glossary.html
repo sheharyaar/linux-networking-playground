@@ -1,0 +1,228 @@
+<section id="glossary" class="card">
+<h2>Glossary</h2>
+<p>Every term defined in the document, grouped by the chapter that introduces it and in reading order. A term appears once, under the chapter where it is first defined; if you meet it earlier than that, it was being named rather than taught. Each heading links back to its chapter.</p>
+<h3 id="gloss-ch0">Chapter 0 · Prologue &middot; <a href="#ch0">The chart, the skb, and the tracer</a></h3>
+<dl class="glossdl">
+<dt>skb, socket buffer</dt><dd><code>struct sk_buff</code>: the metadata block describing one packet, pointing at a separate data buffer.</dd>
+<dt>net_device</dt><dd>Any interface the kernel can transmit through, real or virtual, with an <code>ndo_start_xmit</code> function.</dd>
+<dt>receive handler</dt><dd>A function pointer on a device, consulted in the L2 receive loop; bridges, bonds and macvlan use it to take frames.</dd>
+<dt>network namespace, netns</dt><dd>A private copy of devices, routes, netfilter tables and sockets. Printed as an inode by pwru.</dd>
+<dt>netfilter hook</dt><dd>One of five points where IP code calls <code>nf_hook</code> with a continuation; entries are walked in priority order.</dd>
+<dt>verdict</dt><dd>What a function on a hook's list returns: accept, drop, stolen, queue.</dd>
+<dt>kprobe</dt><dd>A breakpoint at a function entry that runs a program and lets the function continue.</dd>
+<dt>pwru</dt><dd>Kprobe-based tracer printing one line per skb per kernel function, filtered with tcpdump syntax.</dd>
+<dt>bpftrace</dt><dd>One-line kprobe programs on functions you name.</dd>
+<dt>nft monitor trace</dt><dd>Rule-by-rule report of chains an skb with <code>nf_trace</code> set passes through.</dd>
+<dt>ftrace function_graph</dt><dd>Kernel call-tree tracer with timing, driven through tracefs.</dd>
+</dl>
+<h3 id="gloss-ch1">Chapter 1 &middot; <a href="#ch1">Birth of an skb: the NIC, the interrupt, NAPI, and the backlog</a></h3>
+<dl class="glossdl">
+<dt>receive ring, descriptor</dt><dd>Circular array of records, each pointing at a buffer; the card writes frame lengths into them.</dd>
+<dt>DMA</dt><dd>The card writing frame bytes into RAM without the CPU.</dd>
+<dt>page pool</dt><dd>Per-ring recycling allocator of DMA-mapped page fragments for receive buffers.</dd>
+<dt>hardirq</dt><dd>The interrupt handler proper; runs with interrupts off; here it only schedules NAPI.</dd>
+<dt>softirq, NET_RX_SOFTIRQ</dt><dd>Deferred work with interrupts on; the receive softirq's handler is <code>net_rx_action</code>.</dd>
+<dt>NAPI, poll, weight</dt><dd>Interrupt once, then poll the ring up to <code>weight</code> (64) frames per call.</dd>
+<dt>budget, time squeeze</dt><dd><code>net_rx_action</code>'s limits: 300 packets or 2,000 us; exceeding them increments <code>time_squeeze</code>.</dd>
+<dt>GRO</dt><dd>Generic receive offload: merging consecutive same-flow segments into one skb inside the poll.</dd>
+<dt>backlog, softnet_data</dt><dd>Per-CPU queue <code>input_pkt_queue</code> plus a fake NAPI; filled by <code>netif_rx</code>, drained by <code>process_backlog</code>.</dd>
+<dt>netif_rx</dt><dd>The entry for callers already holding an skb; queues into the backlog.</dd>
+<dt>RSS, RPS</dt><dd>Hardware and software spreading of flows across CPUs; RPS uses another CPU's backlog.</dd>
+</dl>
+<h3 id="gloss-ch2">Chapter 2 &middot; <a href="#ch2">XDP: the hook that runs before the skb exists</a></h3>
+<dl class="glossdl">
+<dt>XDP</dt><dd>eXpress Data Path: a BPF program run on a received frame before the skb is built.</dd>
+<dt>xdp_buff</dt><dd>The program's view of the frame: data start and end, metadata area, buffer size, receive queue.</dd>
+<dt>XDP verdict</dt><dd><code>XDP_PASS</code>, <code>XDP_DROP</code>, <code>XDP_TX</code>, <code>XDP_REDIRECT</code>, <code>XDP_ABORTED</code>.</dd>
+<dt>native, generic, offload</dt><dd>Where the program runs: in the driver poll, at the top of the core receive loop, or on the card.</dd>
+<dt>XDP_PACKET_HEADROOM</dt><dd>The 256 bytes of free space in front of the data that a program is promised; generic mode copies to get it.</dd>
+<dt>xdp_frame</dt><dd>An <code>xdp_buff</code> converted for queueing, stored in the buffer's own headroom.</dd>
+<dt>devmap, cpumap</dt><dd>Redirect targets: another device's transmit path, or another CPU that builds the skb there.</dd>
+<dt>AF_XDP</dt><dd>A socket that receives redirected frames in user space with no skb; named here only.</dd>
+<dt>skb_pp_cow_data</dt><dd>Copy an skb's bytes into a page-pool buffer and build a new skb; what veth does before native XDP on a cloned skb.</dd>
+</dl>
+<h3 id="gloss-ch3">Chapter 3 &middot; <a href="#ch3">L2 receive: taps, tc ingress, the receive handler, and the protocol demux</a></h3>
+<dl class="glossdl">
+<dt>__netif_receive_skb_core</dt><dd>The one function every received skb passes through; a loop of stations with an <code>another_round</code> label.</dd>
+<dt>packet socket, packet type, ptype_all</dt><dd>An <code>AF_PACKET</code> socket registers a handler on the list of taps; <code>packet_rcv</code> clones the skb for it.</dd>
+<dt>deliver_skb</dt><dd>Bumps <code>skb-&gt;users</code> and calls one tap or protocol handler.</dd>
+<dt>promiscuous mode, PACKET_OTHERHOST</dt><dd>Accept frames for other MACs; they reach the taps and are dropped by IP on <code>pkt_type</code>.</dd>
+<dt>dev_queue_xmit_nit</dt><dd>The transmit tap, cloned just before the driver is called.</dd>
+<dt>tc ingress, clsact</dt><dd>The station at lines 6062 to 6070; <code>clsact</code> is the per-device holder of classic ingress and egress filters.</dd>
+<dt>tcx</dt><dd>BPF link attachment for tc programs, run first by <code>tcx_run</code>; classic filters run only if it returns unspecified.</dd>
+<dt>tc verdict</dt><dd><code>TC_ACT_OK</code>, <code>TC_ACT_SHOT</code>, <code>TC_ACT_REDIRECT</code>, <code>TC_ACT_RECLASSIFY</code>.</dd>
+<dt>vlan_do_receive</dt><dd>Untag and rewrite <code>skb-&gt;dev</code> to the VLAN sub-device, then loop.</dd>
+<dt>RX_HANDLER_CONSUMED, ANOTHER, EXACT, PASS</dt><dd>The four return codes of a receive handler; consumed exits the loop, another loops with a new device.</dd>
+<dt>ptype_base, pt_prev</dt><dd>The protocol hash keyed by <code>skb-&gt;protocol</code>, and the deferred-delivery trick that gives the last handler the skb without a clone.</dd>
+</dl>
+<h3 id="gloss-ch4">Chapter 4 &middot; <a href="#ch4">L3 receive: ip_rcv, PREROUTING, and the routing decision</a></h3>
+<dl class="glossdl">
+<dt>ip_rcv_core</dt><dd>Header validation, scratch-space reset and <code>skb_orphan</code>; the function before the PRE_ROUTING hook.</dd>
+<dt>skb_orphan, destructor</dt><dd>Detaching an skb from its owning socket by running the socket's accounting callback (<code>tcp_wfree</code>, <code>sock_edemux</code>).</dd>
+<dt>early demux</dt><dd>Looking up an established socket before routing so its cached route can be reused.</dd>
+<dt>ip_route_input_slow, fib_lookup</dt><dd>The normal input route lookup: policy rules pick a table, the FIB trie gives the longest prefix match.</dd>
+<dt>FIB</dt><dd>Forwarding information base: the routing table as the kernel stores it, a level-compressed trie.</dd>
+<dt>RTN_LOCAL, RTN_UNICAST</dt><dd>Route types: one of my addresses, or somebody else's.</dd>
+<dt>dst_entry, skb_dst</dt><dd>The route object attached to the skb, carrying the <code>input</code> and <code>output</code> function pointers and the next hop.</dd>
+<dt>dst_input, dst_output</dt><dd>The indirect calls through the route's pointers; the routing diamond of the chart.</dd>
+<dt>fib_validate_source, rp_filter</dt><dd>Reverse-path check on the source address at input.</dd>
+<dt>ip_local_deliver, ip_protocol_deliver_rcu</dt><dd>Door one: LOCAL_IN hook, then dispatch by protocol number to <code>tcp_v4_rcv</code> and friends.</dd>
+<dt>ip_forward, skb_cow, ip_forward_finish</dt><dd>Door two: TTL check, private header, FORWARD hook, then the route's output function.</dd>
+<dt>ip_error</dt><dd>The input function of a route that cannot be forwarded; counts <code>IpInAddrErrors</code> and drops silently when forwarding is off.</dd>
+</dl>
+<h3 id="gloss-ch5">Chapter 5 &middot; <a href="#ch5">Netfilter and conntrack: hooks, priorities, tuples, and NAT</a></h3>
+<dl class="glossdl">
+<dt>hook entry, priority</dt><dd>A function pointer plus an integer; entries are walked in ascending order by <code>nf_hook_slow</code>.</dd>
+<dt>base chain</dt><dd>An nftables chain bound to a hook and priority; registered as one hook entry running <code>nft_do_chain</code>.</dd>
+<dt>tuple</dt><dd>Source address, destination address, protocol, source port, destination port; the conntrack key.</dd>
+<dt>conntrack entry, nf_conn</dt><dd>The tracked connection: original and reply tuples, status bits, timeout.</dd>
+<dt>reply tuple</dt><dd>The tuple a returning packet must match; rewritten by NAT, mirror of the original otherwise.</dd>
+<dt>ctinfo: NEW, ESTABLISHED, RELATED, ESTABLISHED_REPLY</dt><dd>The classification packed into <code>skb-&gt;_nfct</code> next to the entry pointer.</dd>
+<dt>unconfirmed, nf_confirm</dt><dd>An entry exists but is not in the hash table until the last entry at POST_ROUTING or LOCAL_IN inserts it.</dd>
+<dt>nf_nat_inet_fn</dt><dd>The one function behind all four NAT hook entries: run nat chains on the first packet, then rewrite from the mapping.</dd>
+<dt>nf_nat_setup_info, nf_nat_manip_pkt</dt><dd>Choose the mapping and store it in the reply tuple; rewrite one packet's header and checksums.</dd>
+<dt>nftrace, nf_trace</dt><dd>The bit a rule sets on the skb so every later chain reports its rule walk to <code>nft monitor trace</code>.</dd>
+</dl>
+<h3 id="gloss-ch6">Chapter 6 &middot; <a href="#ch6">Transmit: from sendmsg to the wire, through the default gateway</a></h3>
+<dl class="glossdl">
+<dt>write queue</dt><dd>The socket's list of unacknowledged skbs; TCP transmits clones of them.</dd>
+<dt>ip_queue_xmit, __ip_local_out</dt><dd>Attach the cached route, write the IP header, call LOCAL_OUT, then <code>dst_output</code>.</dd>
+<dt>ip_output, ip_finish_output2</dt><dd>POST_ROUTING hook, then fragmentation or segmentation decisions, then the neighbour step.</dd>
+<dt>neighbour entry, NUD states</dt><dd>One row of <code>ip neigh</code>: address, MAC, and INCOMPLETE, REACHABLE, STALE and friends.</dd>
+<dt>arp_queue, neigh_probe, arp_solicit</dt><dd>Where an unresolved packet waits, the function that triggers resolution, the function that sends the ARP request.</dd>
+<dt>__dev_queue_xmit, netdev_core_pick_tx</dt><dd>The device transmit entry; tc egress, then choose the transmit queue.</dd>
+<dt>queueing discipline, qdisc, noqueue</dt><dd>The object that orders and holds packets before the driver; virtual devices have none.</dd>
+<dt>qdisc bypass, __qdisc_run, sch_direct_xmit</dt><dd>Skip an empty qdisc; otherwise drain it in batches of 64 to the driver.</dd>
+<dt>GSO, TSO</dt><dd>Build one large skb and segment it late, in software or in the card.</dd>
+<dt>ndo_start_xmit, transmit completion</dt><dd>The driver's entry that writes descriptors, and the later poll that frees the skb.</dd>
+</dl>
+<h3 id="gloss-ch7">Chapter 7 &middot; <a href="#ch7">The socket is a file: from sk_receive_queue to recvmsg</a></h3>
+<dl class="glossdl">
+<dt>struct socket, struct sock</dt><dd>The file-facing half with <code>ops</code> and a wait queue, and the protocol half with queues, limits and callbacks.</dd>
+<dt>sockfs, socket_file_ops, private_data</dt><dd>The pseudo-filesystem giving sockets inodes; the file operations table; the pointer from file to socket.</dd>
+<dt>sock_recvmsg, inet_recvmsg, tcp_recvmsg</dt><dd>The three indirect calls from a read to TCP.</dd>
+<dt>request socket, accept queue</dt><dd>The mini-socket a SYN creates, and the queue of completed connections <code>accept()</code> drains.</dd>
+<dt>sk_receive_queue</dt><dd>Queue one: in-order data waiting for <code>recvmsg</code>.</dd>
+<dt>out_of_order_queue</dt><dd>Queue two: a tree of segments that arrived ahead of a gap.</dd>
+<dt>socket backlog, sk_backlog</dt><dd>Queue three: segments that arrived while a process held the socket lock; drained by <code>__release_sock</code>.</dd>
+<dt>sock_owned_by_user</dt><dd>The test that picks queue three over queue one.</dd>
+<dt>sk_rcvbuf, sk_rmem_alloc, truesize</dt><dd>The receive memory limit, the running total, and the unit both are measured in.</dd>
+<dt>sk_data_ready, sock_def_readable, sk_wq</dt><dd>The wakeup callback, its default, and the wait queue readers and epoll sit on.</dd>
+<dt>sock_rfree</dt><dd>The receive destructor that returns memory to the socket when the reader frees an skb.</dd>
+</dl>
+<h3 id="gloss-ch8">Chapter 8 &middot; <a href="#ch8">Two programs on one host: lo, same pod, unix sockets</a></h3>
+<dl class="glossdl">
+<dt>loopback_xmit</dt><dd>The loopback driver's transmit function: orphan the skb, pin the route, run <code>eth_type_trans</code>, call <code>__netif_rx</code>.</dd>
+<dt>skb_dst_force</dt><dd>Takes a real reference on the skb's route so it stays valid across the transmit and receive boundary.</dd>
+<dt>skb_valid_dst</dt><dd>The test <code>ip_rcv_finish_core</code> uses to decide whether an input route lookup is needed at all.</dd>
+<dt>PACKET_OUTGOING, PACKET_LOOPBACK</dt><dd>The <code>pkt_type</code> a tap sees on the transmit side, and the one <code>dev_loopback_xmit</code> sets for multicast self-copies so packet sockets discard it.</dd>
+<dt>unix_stream_sendmsg, unix_dgram_sendmsg</dt><dd>The unix socket send paths: allocate an skb, copy the payload, queue it on the peer.</dd>
+<dt>unix_stream_read_generic</dt><dd>The unix socket read path, draining the peer's <code>sk_receive_queue</code>.</dd>
+<dt>sock_alloc_send_pskb</dt><dd>The allocator charging an outgoing skb to the sender's send buffer, which is where unix socket backpressure comes from.</dd>
+<dt>abstract socket</dt><dd>A unix socket whose name begins with a zero byte; it lives in a per namespace hash table rather than on a filesystem.</dd>
+<dt>SCM_RIGHTS, SOCK_SEQPACKET</dt><dd>File descriptors carried in <code>UNIXCB(skb).fp</code>, and the unix socket type with record boundaries plus connections.</dd>
+</dl>
+<h3 id="gloss-ch9">Chapter 9 &middot; <a href="#ch9">veth: the mystery, resolved</a></h3>
+<dl class="glossdl">
+<dt>veth_xmit</dt><dd>The veth transmit function: find the peer, pick a door, forward the same skb.</dd>
+<dt>veth_forward_skb</dt><dd>The three-line function holding both doors, <code>__netif_rx</code> and <code>veth_xdp_rx</code>.</dd>
+<dt>veth_skb_is_eligible_for_gro</dt><dd>The test that reads the sending device's segmentation offload to decide whether aggregating is worth it.</dd>
+<dt>veth_xdp_rcv_skb</dt><dd>The NAPI-side receive function, which runs GRO and enters the IP layer without the backlog.</dd>
+<dt>__dev_forward_skb, ____dev_forward_skb</dt><dd>The shared handoff used by veth and by BPF redirect: check, scrub, then <code>eth_type_trans</code>.</dd>
+<dt>__is_skb_forwardable</dt><dd>The up-and-MTU check, with GSO skbs exempted from the length test.</dd>
+<dt>skb_scrub_packet</dt><dd>Erases the state a packet may not carry into another device or namespace: route, conntrack, input index, and the mark when crossing namespaces.</dd>
+<dt>xnet</dt><dd>The argument telling <code>skb_scrub_packet</code> that the two devices are in different network namespaces.</dd>
+</dl>
+<h3 id="gloss-ch10">Chapter 10 &middot; <a href="#ch10">The bridge, and Docker on it</a></h3>
+<dl class="glossdl">
+<dt>br_handle_frame</dt><dd>The bridge's receive handler, registered per port; it returns <code>RX_HANDLER_CONSUMED</code>.</dd>
+<dt>br_handle_frame_finish</dt><dd>The continuation after the bridge PRE_ROUTING hook, where learning and the forwarding decision happen.</dd>
+<dt>forwarding database</dt><dd>The bridge's MAC-to-port table, read by <code>br_fdb_find_rcu</code> and written by <code>br_fdb_update</code>; <code>bridge fdb show</code> prints it.</dd>
+<dt>br_forward, __br_forward</dt><dd>The one-port forwarding path; <code>__br_forward</code> performs the <code>skb->dev = to->dev</code> assignment.</dd>
+<dt>br_flood, deliver_clone</dt><dd>Delivery to every port for an unknown destination, cloning the skb for all but the last port.</dd>
+<dt>br_dev_queue_push_xmit</dt><dd>Pushes the Ethernet header back and calls <code>dev_queue_xmit</code> on the chosen port.</dd>
+<dt>br_pass_frame_up</dt><dd>Local delivery: set <code>skb->dev</code> to the bridge device and re-enter <code>netif_receive_skb</code>.</dd>
+<dt>NF_BR_ hooks</dt><dd>The bridge family's own hook points, PRE_ROUTING, FORWARD, LOCAL_IN and POST_ROUTING, which ebtables and nftables bridge chains attach to.</dd>
+<dt>br_netfilter</dt><dd>The module that calls the IPv4 and IPv6 chains from inside the bridge hooks and returns <code>NF_STOLEN</code>.</dd>
+<dt>bridge-nf-call-iptables</dt><dd>The per namespace sysctl gating that behaviour; it exists only once <code>br_netfilter</code> is loaded.</dd>
+<dt>ip_sabotage_in</dt><dd>The <code>br_netfilter</code> entry on IP PRE_ROUTING that suppresses a duplicate chain run when a bridged frame later climbs to IP.</dd>
+<dt>DOCKER, DOCKER-USER</dt><dd>Docker's own iptables chains for published-port destination NAT and for operator rules that Docker will not rewrite.</dd>
+</dl>
+<h3 id="gloss-ch11">Chapter 11 &middot; <a href="#ch11">Master devices: bond and VRF</a></h3>
+<dl class="glossdl">
+<dt>bond_handle_frame</dt><dd>The bond's receive handler; it sets <code>skb->dev</code> to the bond and returns <code>RX_HANDLER_ANOTHER</code>.</dd>
+<dt>recv_probe</dt><dd>The bond's hook for control frames, set to the LACPDU or ARP-monitor receiver, called before the data path.</dd>
+<dt>bond_should_deliver_exact_match</dt><dd>The inactive-slave test that answers <code>RX_HANDLER_EXACT</code> so a standby member does not deliver traffic twice.</dd>
+<dt>bond_start_xmit, __bond_start_xmit</dt><dd>The bond transmit entry and the switch on bonding mode that picks a slave-selection function.</dd>
+<dt>bond_dev_queue_xmit</dt><dd>Sets <code>skb->dev</code> to the chosen slave and re-enters <code>dev_queue_xmit</code>, giving one packet two transmit passes.</dd>
+<dt>bond_xmit_hash, transmit hash policy</dt><dd>The slave-selection hash and the choice of which header fields feed it, from MAC-only to addresses and ports.</dd>
+<dt>l3mdev</dt><dd>The layer-3 master device framework a VRF plugs into, with its own receive hook and routing rule.</dd>
+<dt>l3mdev_ip_rcv, vrf_ip_rcv</dt><dd>The call from <code>ip_rcv_finish</code> into the VRF, and the function that relabels the skb and re-runs PRE_ROUTING.</dd>
+<dt>IPSKB_L3SLAVE</dt><dd>The flag marking an skb as having arrived through an l3mdev slave.</dd>
+<dt>vrf_l3_out, vrf_ip_out_direct</dt><dd>The output side, which runs LOCAL_OUT and POST_ROUTING with the VRF device before the real device repeats them.</dd>
+<dt>l3mdev routing rule</dt><dd>The <code>from all lookup [l3mdev-table]</code> rule that sends a lookup to the VRF's own table.</dd>
+<dt>tcp_l3mdev_accept</dt><dd>The sysctl deciding whether a socket outside a VRF may accept connections arriving through one.</dd>
+</dl>
+<h3 id="gloss-ch12">Chapter 12 &middot; <a href="#ch12">macvlan and ipvlan</a></h3>
+<dl class="glossdl">
+<dt>lower device</dt><dd>The existing device a macvlan or ipvlan is built on; it owns the receive-handler slot they take over.</dd>
+<dt>macvlan_handle_frame, macvlan_hash_lookup</dt><dd>The macvlan receive handler and the destination-MAC lookup that picks the upper device.</dd>
+<dt>macvlan modes</dt><dd><code>private</code>, <code>vepa</code>, <code>bridge</code>, <code>passthru</code> and <code>source</code>: whether and how two upper devices on one lower may talk.</dd>
+<dt>promiscuous lower device</dt><dd>The consequence of a macvlan having its own address: the lower device must accept frames not addressed to it.</dd>
+<dt>ipvlan_handle_frame, ipvlan_addr_lookup</dt><dd>The ipvlan receive handler and the destination-IP lookup that picks the upper device.</dd>
+<dt>ipvlan_get_L3_hdr</dt><dd>The parse step that makes ipvlan a layer-3 demultiplexer; the one line that differs from macvlan in a bench trace.</dd>
+<dt>ipvlan l2, l3, l3s modes</dt><dd>Demultiplex before IP; route on the parent with the parent's output chains; or swap the device inside a LOCAL_IN hook so the parent's conntrack runs first.</dd>
+<dt>ipvlan_process_v4_outbound</dt><dd>The l3-mode output path that does its own route lookup and calls <code>ip_local_out</code> in the parent's namespace.</dd>
+<dt>ipvlan_nf_input</dt><dd>The l3s device swap, registered at <code>NF_INET_LOCAL_IN</code> with priority <code>INT_MAX</code>.</dd>
+</dl>
+<h3 id="gloss-ch13">Chapter 13 &middot; <a href="#ch13">IPVS: the NAT that hides in INPUT</a></h3>
+<dl class="glossdl">
+<dt>virtual service, real server</dt><dd>The address and port clients connect to, and the backends it is balanced across.</dd>
+<dt>director</dt><dd>The host running IPVS, which owns the virtual address as a local address.</dd>
+<dt>ip_vs_in_hook, ip_vs_out_hook</dt><dd>The two family-agnostic hook functions in 7.2, replacing the older per-family names; request direction and reply direction.</dd>
+<dt>ip_vs_ops4</dt><dd>The registration array: two entries on LOCAL_IN, two on LOCAL_OUT, two on FORWARD, with priorities placed around the NAT priorities.</dd>
+<dt>ip_vs_schedule</dt><dd>Finds the service and calls the scheduler module once per connection to pick a real server.</dd>
+<dt>struct ip_vs_conn</dt><dd>The per-connection record holding client, virtual and real addresses and the <code>packet_xmit</code> function pointer.</dd>
+<dt>packet_xmit</dt><dd>The forwarding method stored in the connection: masquerade, direct routing or tunnelling.</dd>
+<dt>ip_vs_nat_xmit</dt><dd>The masquerading method: rewrite the destination, fix checksums, then re-inject.</dd>
+<dt>ip_vs_nat_send_or_cont</dt><dd>The re-injection: set <code>ipvs_property</code>, call the LOCAL_OUT hooks, then <code>dst_output</code>, and report the skb as stolen.</dd>
+<dt>ipvs_property</dt><dd>The skb bit marking a packet IPVS already owns, so the hooks do not act on it again.</dd>
+<dt>direct routing, tunnelling</dt><dd>Forwarding methods that rewrite only the destination MAC, or add an outer IP header, so replies bypass the director.</dd>
+<dt>kube-ipvs0</dt><dd>The dummy device kube-proxy puts every service address on, purely to make the routing decision answer local.</dd>
+</dl>
+<h3 id="gloss-ch14">Chapter 14 &middot; <a href="#ch14">Cilium on one node: the tc hook takes over</a></h3>
+<dl class="glossdl">
+<dt>cil_from_container</dt><dd>Cilium's program on the tcx ingress of the host end of a pod veth pair; it sees packets leaving that pod.</dd>
+<dt>ipcache</dt><dd>The map from IP address to security identity that tells the program what the destination is.</dd>
+<dt>security identity</dt><dd>The number Cilium assigns to a set of labels; policy is written between identities rather than addresses.</dd>
+<dt>policy_can_egress4</dt><dd>The policy check inside the sender's program, before any forwarding decision.</dd>
+<dt>ipv4_local_delivery</dt><dd>The same-node delivery path; it rewrites both MAC addresses for the destination endpoint.</dd>
+<dt>redirect_ep, ctx_redirect_peer</dt><dd>Cilium's choice between an ordinary redirect and the peer redirect, and the helper that performs the second.</dd>
+<dt>bpf_redirect_peer, skb_do_redirect</dt><dd>The BPF helper and the kernel function that swap <code>skb->dev</code> to the veth peer and report <code>-EAGAIN</code>.</dd>
+<dt>ndo_get_peer_dev</dt><dd>The device operation that names a virtual device's other end, letting the redirect work without knowing about veth.</dd>
+<dt>cilium_host, cilium_net</dt><dd>The extra veth pair carrying traffic between the node itself and pods, with <code>cil_from_host</code> and <code>cil_to_host</code> attached.</dd>
+<dt>endpoint routes</dt><dd>The alternative mode that delivers with host routes and a <code>cil_to_container</code> program instead of a peer redirect.</dd>
+<dt>SKB_DROP_REASON_TC_INGRESS</dt><dd>The drop reason a tc program's denial is recorded under, visible in a pwru trace.</dd>
+</dl>
+<h3 id="gloss-ch15">Chapter 15 &middot; <a href="#ch15">Cilium across nodes and to the world</a></h3>
+<dl class="glossdl">
+<dt>encap_and_redirect_lxc</dt><dd>The tunnel branch of the sender's program; it sets the tunnel key and redirects to the tunnel device.</dd>
+<dt>ctx_set_encap_info4, tunnel key</dt><dd>The call that writes the remote node address and the tunnel identifier the encapsulation will use.</dd>
+<dt>tunnel identifier</dt><dd>The VXLAN or Geneve identifier field, carrying the sender's security identity so the far node need not look it up.</dd>
+<dt>cilium_geneve</dt><dd>The tunnel device the sender redirects to; its egress program is <code>cil_to_overlay</code> and its ingress one <code>cil_from_overlay</code>.</dd>
+<dt>outer packet, inner packet</dt><dd>The node-to-node UDP datagram, and the pod-to-pod packet carried inside it; netfilter sees only the first.</dd>
+<dt>geneve_udp_encap_recv</dt><dd>The receive callback on the tunnel's UDP socket; it strips the outer headers and hands the skb to the tunnel device.</dd>
+<dt>gro_cells_receive</dt><dd>How the tunnel device re-enters the receive path after decapsulation.</dd>
+<dt>cil_from_netdev, cil_to_netdev</dt><dd>The programs on the physical device's tcx ingress and egress.</dd>
+<dt>fib_redirect_v4</dt><dd>The native-routing and host-routing branch: do a route lookup in BPF and redirect to the resulting device.</dd>
+<dt>pass_to_stack</dt><dd>The branch that hands the packet to the host stack instead, used when host routing is off.</dd>
+<dt>handle_nat_fwd, snat_v4_nat</dt><dd>Cilium's BPF masquerade, performed in the physical device's egress program with state in a BPF map.</dd>
+</dl>
+<h3 id="gloss-ch16">Chapter 16 · Epilogue &middot; <a href="#ch16">Epilogue: traps, fast paths, what came next</a></h3>
+<dl class="glossdl">
+<dt>flowtable</dt><dd>A netdev-ingress hook that rewrites and transmits packets of an already-seen forwarded connection, skipping FORWARD and conntrack.</dd>
+<dt>netkit</dt><dd>A device pair that runs a BPF program inside its transmit function and delivers to the peer with <code>__netif_rx</code>.</dd>
+<dt>BIG TCP</dt><dd>Raising the segmentation-offload size limit past 64 KB so fewer, larger units traverse the stack.</dd>
+<dt>NF_INET_INGRESS</dt><dd>A netfilter hook at device ingress, before <code>ip_rcv</code>, at the point tc and XDP already occupied.</dd>
+</dl>
+</section>

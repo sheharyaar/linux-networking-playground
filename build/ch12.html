@@ -1,0 +1,141 @@
+<section id="ch12" class="chapter">
+<span class="chnum">Chapter 12</span>
+<h2>macvlan and ipvlan</h2>
+<p class="chmeta">~RT12 min · <span class="tag L2">L2</span> · <em>Spine:</em> the bond of chapter 11 put many devices under one. These two put many devices on top of one, and they answer the same receive-handler verdict as the bond. The whole difference between them is which field of our skb the handler looks at, and the bench names the function that looks.</p>
+
+<h3>One lower device, one handler</h3>
+<p>Both drivers work by taking over the receive handler of a device you already have, which they call the lower device. <code>macvlan_port_create</code> registers <code>macvlan_handle_frame</code> (<code>drivers/net/macvlan.c:1279</code>); <code>ipvlan_port_create</code> registers <code>ipvlan_handle_frame</code> (<code>drivers/net/ipvlan/ipvlan_main.c:84</code>). Both then answer <code>RX_HANDLER_ANOTHER</code> after changing <code>skb->dev</code>, exactly like the bond.</p>
+<p>That shared mechanism has a consequence you meet within a minute of experimenting. Trying to put an ipvlan on a lower device that already carries a macvlan fails on the bench:</p>
+<pre><code># ip link add pp-iv0 link pp-lo0 type ipvlan mode l2
+RTNETLINK answers: Device or resource busy</code></pre>
+<p><code>netdev_rx_handler_register</code> (<code>net/core/dev.c:5909</code>) opens with <code>if (netdev_is_rx_handler_busy(dev)) return -EBUSY</code> (lines 5913 to 5914). There is one handler pointer per device, so a device can be a bridge port, or a bond slave, or a macvlan lower, or an ipvlan lower, and never two of those at once. That single field explains most of the "device or resource busy" messages people hit when stacking virtual devices.</p>
+
+<h3>The one line that differs</h3>
+<p>Set the two up on separate lower devices and look at what the kernel reports before sending anything:</p>
+<pre><code>lower pp-lo0  a2:b7:4b:50:89:6a   promiscuity 1     macvlan lower
+macvlan       12:19:80:52:7e:cc                     its own address
+lower pp-lo2  d2:61:13:ff:1b:54   promiscuity 0     ipvlan lower
+ipvlan        d2:61:13:ff:1b:54                     the same address as the lower</code></pre>
+<p>A <b>macvlan</b> is a new station on the wire. It gets its own MAC address, and because the lower device must now accept frames addressed to an address that is not its own, the lower device is put into promiscuous mode. An <b>ipvlan</b> shares the lower device's MAC address entirely and the lower device is left alone.</p>
+<p>Now send one TCP segment to each and compare the traces. They are identical except for a single line, and that line is the answer to the whole chapter:</p>
+<pre><code>macvlan, one skb:
+  dev pp-lo0:36  __netif_rx > enqueue_to_backlog > __netif_receive_skb_one_core
+  dev pp-lo0:36  macvlan_forward_source[macvlan]
+  dev pp-mv0:40  qdisc_pkt_len_segs_init > skb_ensure_writable > ...
+
+ipvlan, one skb:
+  dev pp-lo2:39  __netif_rx > enqueue_to_backlog > __netif_receive_skb_one_core
+  dev pp-lo2:39  ipvlan_get_L3_hdr[ipvlan]
+  dev pp-iv0:41  qdisc_pkt_len_segs_init > skb_ensure_writable > ...</code></pre>
+<p>The macvlan driver's first move is to look at Ethernet addresses; <code>macvlan_handle_frame</code> (line 460) hashes the destination MAC through <code>macvlan_hash_lookup</code> (line 125) to find which upper device owns it. The ipvlan driver's first move is to parse the network header; <code>ipvlan_handle_frame</code> (<code>ipvlan_core.c:781</code>) calls <code>ipvlan_get_L3_hdr</code> (line 149) and then <code>ipvlan_addr_lookup</code> (line 366) to find which upper device owns that IP address. One demultiplexes on layer 2, one on layer 3, and the trace prints the function that does it.</p>
+<p>Neither <code>macvlan_handle_frame</code> nor <code>ipvlan_handle_frame</code> appears in the trace itself, for the reason chapter 10 and chapter 11 met: a receive handler takes <code>struct sk_buff **pskb</code>, and pwru has no skb argument to read. The helper each one calls first is visible, and conveniently it is the one that differs.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  F["frame arrives on the lower device"] ==> H{"which driver owns the rx_handler?<br/>one slot only, dev.c 5913"}
+  H ==>|"macvlan"| M1["macvlan_handle_frame 460<br/>macvlan_hash_lookup 125<br/>key: destination MAC"]
+  H ==>|"ipvlan"| I1["ipvlan_handle_frame 781<br/>ipvlan_get_L3_hdr 149<br/>ipvlan_addr_lookup 366<br/>key: destination IP"]
+  M1 ==> S["skb dev = the upper device<br/>RX_HANDLER_ANOTHER, goto another_round"]
+  I1 ==> S
+  S ==> U["the station list again, then ip_rcv<br/>with the upper device as iif"]
+  style M1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style I1 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 12.1 — the same handler slot, two different keys.</strong> Notice that everything after the coloured boxes is identical, including the verdict. On the bench the two traces differ by exactly one line, and it is the line inside a coloured box.</figcaption>
+</figure>
+
+<h3>macvlan modes, and where the traffic actually goes</h3>
+<p>Because a macvlan is a station with its own address, the question of whether two of them on one lower device can talk to each other has several answers, which is what the modes are (<code>include/uapi/linux/if_link.h:1229</code> to 1234, and <code>ip-link(8)</code> documents all five):</p>
+<table>
+<thead><tr><th>Mode</th><th>Between two upper devices on one lower</th></tr></thead>
+<tbody>
+<tr><td><code>private</code></td><td>Never, even if the switch would reflect the frame back.</td></tr>
+<tr><td><code>vepa</code></td><td>Only if the switch reflects it; the frame goes out and must come back. This is what a hairpin-capable switch is for.</td></tr>
+<tr><td><code>bridge</code></td><td>Directly in the kernel, without touching the lower device.</td></tr>
+<tr><td><code>passthru</code></td><td>One upper device takes the lower device over entirely, including its MAC.</td></tr>
+<tr><td><code>source</code></td><td>Receive only frames from a configured list of source MAC addresses.</td></tr>
+</tbody>
+</table>
+<p>The transmit side is <code>macvlan_start_xmit</code> (line 585) and <code>macvlan_queue_xmit</code> (line 545), where bridge mode short-circuits to a sibling and everything else hands the frame to the lower device with the macvlan's own source address on it.</p>
+
+<h3>ipvlan modes, and the hook the last one adds</h3>
+<p>ipvlan has three modes and they differ in how much of the stack runs on the upper device. <code>ipvlan_handle_frame</code> switches on the port mode at <code>ipvlan_core.c:787</code>.</p>
+<p><b>l2</b> behaves like the macvlan comparison above, demultiplexing by address and delivering into the upper device before IP.</p>
+<p><b>l3</b> changes the transmit side in a way worth being precise about. <code>ipvlan_xmit_mode_l3</code> (line 603) first checks whether the destination is another ipvlan on the same lower device, and if so delivers it directly. Otherwise, line 627, it calls <code>ipvlan_skb_crossing_ns(skb, ipvlan->phy_dev)</code>, moving the skb onto the parent device, and <code>ipvlan_process_outbound</code> (line 536) strips the Ethernet header before <code>ipvlan_process_v4_outbound</code> (line 428) performs its own route lookup with <code>ip_route_output_flow</code> (line 449) and calls <code>ip_local_out</code> (line 460). The comment above that code says it plainly: the packet is processed further in the network namespace of the main device. So an l3-mode ipvlan's outbound traffic runs the <em>parent's</em> LOCAL_OUT and POST_ROUTING chains, not the container's, and the container has no usable link layer of its own.</p>
+<p><b>l3s</b> exists because l3 mode bypasses the parent's connection tracking on the way in. In l3s, <code>ipvlan_handle_frame</code> returns <code>RX_HANDLER_PASS</code> (line 793) and does nothing. The device swap moves to a netfilter hook instead: <code>ipvlan_nf_input</code> (<code>ipvlan_l3s.c:95</code>) is registered at <code>NF_INET_LOCAL_IN</code> with priority <code>INT_MAX</code> (<code>ipvl_nfops</code>, lines 117 to 131), and it sets <code>skb->dev = addr->master->dev</code> at line 104. The consequence is exact: in l3s the parent's PRE_ROUTING, its routing decision and its INPUT chain all run with the <em>lower</em> device, conntrack sees the packet normally, and only at the very end of LOCAL_IN does the skb become the ipvlan device's.</p>
+
+<h3>Choosing between them</h3>
+<p>The rule follows from the MAC addresses in the first measurement. Use macvlan when each endpoint may have its own address on the wire: it gets real DHCP, it appears as a separate host to the rest of the network, and switch port security must be configured to allow several addresses per port. Use ipvlan when exactly one MAC is permitted. The kernel documentation names three such cases: a switch that allows one address per port, a switch whose address table would be exhausted, and untrusted namespaces where letting a container choose its own source MAC is a risk.</p>
+<p>Wi-Fi is the case most readers meet first, and the machine this dossier was written on has exactly one physical interface, <code>wlan0</code>. Both drivers will let you create the device, since each only requires the lower device to be Ethernet-like (<code>macvlan.c:1256</code>, <code>ipvlan_main.c:567</code>). The failure is above the kernel: an 802.11 station is associated with the access point under one address, and frames the station sends with a different source address are not forwarded. So macvlan on a laptop's wireless interface builds cleanly and then drops everything, and ipvlan is the one that works. Most cloud network interfaces behave the same way for the same reason, which is why cloud CNI plugins reach for ipvlan or for routed setups rather than macvlan.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>iproute2</code>, <code>curl</code>, <code>pwru</code>. The <code>macvlan</code> and <code>ipvlan</code> modules autoload. The lab uses veth lower devices so it is safe on a laptop; point it at a real interface only if you know the switch allows it.</p>
+<pre><code>sudo lab/12-macvlan-ipvlan.sh up
+
+# the whole difference, before any traffic
+ip -br link show pp-lo0; ip -br link show pp-mv0      # different MACs
+ip -br link show pp-lo2; ip -br link show pp-iv0      # the same MAC
+ip -d link show pp-lo0 | grep -o 'promiscuity [0-9]*' # 1
+ip -d link show pp-lo2 | grep -o 'promiscuity [0-9]*' # 0
+
+# one handler slot per device
+sudo ip link add pp-x link pp-lo0 type ipvlan mode l2   # Device or resource busy
+
+# the two traces differ by one line
+sudo pwru --kmods macvlan,ipvlan,veth --output-meta 'tcp and (host 10.13.0.1 or host 10.14.0.2)' &amp;
+sudo ip netns exec pp-sw curl -s --max-time 2 -o /dev/null http://10.13.0.1:9099/
+sudo ip netns exec pp-sw curl -s --max-time 2 -o /dev/null http://10.14.0.2:9099/
+sudo lab/12-macvlan-ipvlan.sh down</code></pre>
+<p>Every number and transcript in this chapter came from exactly these steps on the bench. If you repoint the lab at a wireless interface, the devices will still be created and the traffic will disappear, which is the lesson rather than a broken lab.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>macvlan and ipvlan both seize the lower device's single receive-handler slot, so a device can carry only one of them and only one of bridging or bonding as well; the second attempt returns <code>EBUSY</code> from <code>net/core/dev.c:5913</code>. A macvlan gives each upper device its own MAC address and puts the lower device in promiscuous mode; an ipvlan shares the lower device's address and leaves it alone. Both then set <code>skb->dev</code> and answer <code>RX_HANDLER_ANOTHER</code>, and on the bench the two receive traces differ by exactly one function: <code>macvlan_forward_source</code> against <code>ipvlan_get_L3_hdr</code>. macvlan's five modes decide whether siblings may talk without the wire. ipvlan's l3 mode moves the route lookup and the output chains to the parent, and l3s moves the device swap into a LOCAL_IN netfilter hook so the parent's conntrack sees the packet first. Choose macvlan when the wire permits many addresses, ipvlan when it permits one.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>lower device</dt><dd>The existing device a macvlan or ipvlan is built on; it owns the receive-handler slot they take over.</dd>
+<dt>macvlan_handle_frame, macvlan_hash_lookup</dt><dd>The macvlan receive handler and the destination-MAC lookup that picks the upper device.</dd>
+<dt>macvlan modes</dt><dd><code>private</code>, <code>vepa</code>, <code>bridge</code>, <code>passthru</code> and <code>source</code>: whether and how two upper devices on one lower may talk.</dd>
+<dt>promiscuous lower device</dt><dd>The consequence of a macvlan having its own address: the lower device must accept frames not addressed to it.</dd>
+<dt>ipvlan_handle_frame, ipvlan_addr_lookup</dt><dd>The ipvlan receive handler and the destination-IP lookup that picks the upper device.</dd>
+<dt>ipvlan_get_L3_hdr</dt><dd>The parse step that makes ipvlan a layer-3 demultiplexer; the one line that differs from macvlan in a bench trace.</dd>
+<dt>ipvlan l2, l3, l3s modes</dt><dd>Demultiplex before IP; route on the parent with the parent's output chains; or swap the device inside a LOCAL_IN hook so the parent's conntrack runs first.</dd>
+<dt>ipvlan_process_v4_outbound</dt><dd>The l3-mode output path that does its own route lookup and calls <code>ip_local_out</code> in the parent's namespace.</dd>
+<dt>ipvlan_nf_input</dt><dd>The l3s device swap, registered at <code>NF_INET_LOCAL_IN</code> with priority <code>INT_MAX</code>.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You have a working macvlan on <code>eth0</code>. You now try to add <code>eth0</code> to a bridge and it fails. Name the field that is in the way and the function that reports it.</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>dev->rx_handler</code>, reported by <code>netdev_rx_handler_register</code> (<code>net/core/dev.c:5909</code>), which returns <code>-EBUSY</code> at lines 5913 to 5914 when <code>netdev_is_rx_handler_busy(dev)</code> is true. There is one handler pointer per <code>net_device</code>, the macvlan already owns it, and the bridge needs the same slot for <code>br_handle_frame</code>. The bench reproduced this as <code>RTNETLINK answers: Device or resource busy</code> when adding an ipvlan to a lower device that already had a macvlan.</p>
+<p>The near miss is "a device cannot have two masters". Bonding and VLANs stack fine in other combinations; the hard limit is the single handler slot, not the idea of a master.</p>
+</details>
+<p>2. Your laptop has one wireless interface. You create a macvlan on it, give it an address on the local subnet, and nothing works, with no error anywhere. Explain, and say which driver to use instead.</p>
+<details class="ans"><summary>Answer</summary>
+<p>The access point drops the frames because they carry a source MAC it has not associated, and ipvlan is the fix. Both drivers accept any Ethernet-like lower device (<code>drivers/net/macvlan.c:1256</code>, <code>ipvlan_main.c:567</code>), so creation succeeds and the kernel reports nothing wrong. An 802.11 station is associated under exactly one address, and a macvlan by design transmits with its own; an ipvlan shares the lower device's address, which the bench confirmed as identical MACs and <code>promiscuity 0</code> on the lower device.</p>
+<p>The near miss is "turn on promiscuous mode and it will work". Promiscuous mode governs what the interface accepts on receive; the problem here is the source address on transmit, which the access point rejects.</p>
+</details>
+<p>3. Trace the path: a packet arrives for an ipvlan in l3s mode. At which point does <code>skb->dev</code> become the ipvlan device, and what does the parent's INPUT chain see?</p>
+<details class="ans"><summary>Answer</summary>
+<p>At the end of LOCAL_IN, and the INPUT chain sees the lower device. In l3s, <code>ipvlan_handle_frame</code> returns <code>RX_HANDLER_PASS</code> (<code>ipvlan_core.c:793</code>) and does nothing, so PRE_ROUTING, the routing decision and the whole INPUT chain run with the lower device as <code>iif</code>. The swap happens in <code>ipvlan_nf_input</code> (<code>ipvlan_l3s.c:95</code>), registered at <code>NF_INET_LOCAL_IN</code> with priority <code>INT_MAX</code> so it runs after every other entry, and it assigns <code>skb->dev = addr->master->dev</code> at line 104.</p>
+<p>The near miss is "l3s is l3 with conntrack turned on". Conntrack is not a switch here; it works because the packet is allowed to traverse the parent's normal input path first, and the late priority is what makes that possible.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/ipvlan.html">IPVLAN Driver HOWTO</a>, Linux kernel documentation. Short and the best statement of when to choose ipvlan; it names the three switch-side reasons directly.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man8/ip-link.8.html">ip-link(8)</a>, Linux manual page. The full macvlan mode list with one-line definitions; the ipvlan entry is thin, so use the HOWTO above for its modes.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.docker.com/engine/network/drivers/macvlan/">Macvlan network driver</a>, Docker documentation. The operational view, including the warning that your network equipment must accept several MAC addresses on one port and that most cloud providers block it.</li>
+</ul>
+</div>
+</section>

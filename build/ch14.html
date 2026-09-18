@@ -1,0 +1,195 @@
+<section id="ch14" class="chapter">
+<span class="chnum">Chapter 14</span>
+<h2>Cilium on one node: the tc hook takes over</h2>
+<p class="chmeta">~RT14 min · <span class="tag BPF">BPF</span> · <em>Spine:</em> chapter 9 sent our skb through a veth pair and the receive half ran again in the peer's namespace. Attach one BPF program to the host end of that pair and the second half of the journey disappears: the skb is handed to the destination pod's device from inside the first namespace's softirq, and the netfilter chart is never entered.</p>
+
+<h3>The bench, and what is configured</h3>
+<p>Everything in this chapter and the next was measured on a three-node kind cluster running a Cilium fork at <code>v1.19.6-vpc.18</code>. The configuration matters because it decides which branches run:</p>
+<pre><code>Routing:        Network: Tunnel [geneve]   Host: BPF
+Attach Mode:    TCX
+Device Mode:    veth
+Masquerading:   BPF  [eth0]  10.128.0.64/27
+KubeProxyReplacement: True</code></pre>
+<p>Two throwaway pods on one node, a client at <code>10.128.0.66</code> and an nginx server at <code>10.128.0.82</code>, and one HTTP request between them. Programs are attached with <b>tcx</b>, the newer attachment point chapter 3 introduced, and <code>cil_from_container</code> sits on the <em>ingress</em> side of the host end of each pod's veth pair. Ingress on the host end means packets <em>leaving</em> the pod, which reads backwards until you remember the pair swaps direction.</p>
+
+<h3>One redirect, and everything it skips</h3>
+<p>Here is the measured path for one SYN. Three namespace inodes appear: the client pod, the node, and the server pod. One skb address appears throughout.</p>
+<pre><code>netns 4026534894  eth0:42            ip_local_out > ip_output > ip_finish_output2 >
+                                     __dev_queue_xmit > dev_hard_start_xmit >
+                                     veth_xmit[veth] > __dev_forward_skb2 >
+                                     skb_scrub_packet > eth_type_trans
+netns 4026533157  ~09ac2395bb83:43   __netif_rx > netif_rx_internal > enqueue_to_backlog >
+                                     __netif_receive_skb_one_core >
+                                     cil_from_container[bpf](tc) >
+                                     skb_ensure_writable x7 > skb_do_redirect
+netns 4026534754  eth0:44            skb_scrub_packet > ip_rcv > ip_rcv_core > ...</code></pre>
+<p>Compare that against chapter 9's veth trace and the difference is a whole half. There, the skb went <code>veth_xmit</code> into the peer, through the backlog, up through <code>ip_rcv</code>, through a routing decision, and out again through a second veth pair. Here the last line of the node's work is <code>skb_do_redirect</code>, and the next line is already inside the destination pod.</p>
+<p>The counts over the whole twelve-packet capture make it precise:</p>
+<table>
+<thead><tr><th>Function</th><th>Times called, 12 packets</th><th>What that means</th></tr></thead>
+<tbody>
+<tr><td><code>veth_xmit</code></td><td>12</td><td>One veth crossing per packet, pod to host. The destination pod's veth pair is never used.</td></tr>
+<tr><td><code>enqueue_to_backlog</code></td><td>12</td><td>The per-CPU backlog is entered once, not twice.</td></tr>
+<tr><td><code>cil_from_container</code></td><td>12</td><td>One BPF program runs; no other Cilium program is involved.</td></tr>
+<tr><td><code>skb_do_redirect</code></td><td>12</td><td>One redirect per packet.</td></tr>
+<tr><td><code>nf_hook_slow</code></td><td>0</td><td>No netfilter hook is entered anywhere, in any namespace.</td></tr>
+</tbody>
+</table>
+<p>That zero is the headline. The host's PRE_ROUTING, FORWARD and POST_ROUTING chains, conntrack, and any iptables rule you have written are not skipped by policy or by a rule that accepts early; they are never reached, because the skb leaves the host's receive path before <code>ip_rcv</code>.</p>
+
+<h3>How the jump is made</h3>
+<p>Inside Cilium, the path is a chain of tail calls ending in one helper. <code>cil_from_container</code> (<code>bpf/bpf_lxc.c:2212</code>) tail-calls <code>tail_handle_ipv4</code> (line 2157), which reaches <code>handle_ipv4_from_lxc</code> (line 1591). That function looks the destination up in the <b>ipcache</b>, a map from address to <b>security identity</b>, checks egress policy with <code>policy_can_egress4</code>, and calls <code>ipv4_forward_to_destination</code> (line 1187). When the destination is an endpoint on this node, that reaches <code>ipv4_local_delivery</code> (<code>bpf/lib/local_delivery.h:229</code>), which rewrites the source and destination MAC addresses to the pair the destination pod expects (line 242) and then reaches <code>redirect_ep</code> (line 82):</p>
+<pre><code>if (!use_fast_redirect)
+        return (int)ctx_redirect(ctx, ifindex, 0);
+if (from_tunnel)
+        ctx_change_type(ctx, PACKET_HOST);
+return ctx_redirect_peer(ctx, ifindex, 0);</code></pre>
+<p><code>ctx_redirect_peer</code> is the <code>bpf_redirect_peer</code> helper, and it is the one that matters. The kernel side is <code>skb_do_redirect</code> (<code>net/core/filter.c:2519</code>), whose peer branch begins at line 2531:</p>
+<pre><code>if (flags &amp; BPF_F_PEER) {
+        if (unlikely(!skb_at_tc_ingress(skb)))    goto out_drop;
+        dev = skb_get_peer_dev(dev);
+        if (unlikely(!dev || !(dev->flags &amp; IFF_UP) ||
+                     net_eq(net, dev_net(dev))))  goto out_drop;
+        skb->dev = dev;
+        dev_sw_netstats_rx_add(dev, skb->len);
+        skb_scrub_packet(skb, false);
+        return -EAGAIN;
+}</code></pre>
+<p>Four things in nine lines. <code>skb_get_peer_dev</code> (line 2509) calls the device's <code>ndo_get_peer_dev</code>, which is how a veth device names its other end without the caller knowing anything about veth. The namespace test at line 2537 is a <em>drop</em> condition: the peer must be in a different network namespace, so this helper cannot be used to shortcut within one namespace. <code>skb->dev</code> is set to the peer at line 2539. And <code>skb_scrub_packet(skb, false)</code> at line 2541 passes <code>false</code> for the cross-namespace flag, which by chapter 9's table means the route and the conntrack pointer are dropped but <code>skb->mark</code> is kept, even though the namespace really is changing. Cilium relies on that mark surviving.</p>
+<p>The return value is the trick. <code>-EAGAIN</code> is not an error; it is a message to the caller. In <code>sch_handle_ingress</code> (<code>net/core/dev.c:4493</code>):</p>
+<pre><code>case TC_ACT_REDIRECT:
+        __skb_push(skb, skb->mac_len);
+        if (skb_do_redirect(skb) == -EAGAIN) {
+                __skb_pull(skb, skb->mac_len);
+                *another = true;
+                break;
+        }</code></pre>
+<p>and in <code>__netif_receive_skb_core</code>, line 6069, <code>if (another) goto another_round;</code> jumps back to the label at line 6017. This is the same <code>another_round</code> the bond and macvlan of the last two chapters use. The skb re-enters the station list from the top with a new device, that device is the destination pod's <code>eth0</code>, and because that device lives in another namespace the rest of the receive path runs there. No new softirq, no queue, no second driver.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  subgraph P1["client pod namespace"]
+    A["ip_local_out, OUTPUT, POST_ROUTING"] ==> B["veth_xmit on the pod eth0"]
+  end
+  subgraph N["node namespace"]
+    C["__netif_rx, backlog, core"] ==> D["tcx ingress on the lxc device<br/>cil_from_container bpf_lxc.c 2212"]
+    D ==> E["ipcache lookup, policy_can_egress4<br/>ipv4_local_delivery local_delivery.h 229<br/>rewrite both MAC addresses"]
+    E ==> F["redirect_ep 82: ctx_redirect_peer"]
+    F ==> G["skb_do_redirect filter.c 2531<br/>ndo_get_peer_dev, skb dev = peer<br/>skb_scrub_packet false, return EAGAIN"]
+  end
+  subgraph P2["server pod namespace"]
+    H["another_round with the pod eth0<br/>ip_rcv, LOCAL_IN, tcp_v4_rcv"]
+  end
+  B ==> C
+  G ==> H
+  SKIP["never reached: the node's ip_rcv,<br/>PRE_ROUTING, FORWARD, POST_ROUTING,<br/>conntrack, the second veth pair,<br/>a second trip through the backlog"]
+  G -.-> SKIP
+  style F fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style G fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style SKIP fill:#f4f6f8,stroke:#999,stroke-dasharray: 4 4
+</div>
+<figcaption><strong>Diagram 14.1 — pod to pod on one node, with what is bypassed drawn in.</strong> Notice that the greyed box is not a fast path through the stack; it is the stack, not entered. The measured capture contains zero <code>nf_hook_slow</code> calls and only one <code>veth_xmit</code> per packet.</figcaption>
+</figure>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  IN["packet arrives on the lxc device"] ==> TCX["tcx ingress: cil_from_container"]
+  TCX ==> PRE["PRE_ROUTING"]
+  PRE ==> RT["routing decision"]
+  RT ==> FWD["FORWARD"]
+  FWD ==> POST["POST_ROUTING"]
+  POST ==> OUT["the destination pod"]
+  TCX ==>|"ctx_redirect_peer<br/>the only path taken"| OUT
+  style TCX fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style PRE fill:#f4f6f8,stroke:#bbb,color:#999
+  style RT fill:#f4f6f8,stroke:#bbb,color:#999
+  style FWD fill:#f4f6f8,stroke:#bbb,color:#999
+  style POST fill:#f4f6f8,stroke:#bbb,color:#999
+</div>
+<figcaption><strong>Diagram 14.2 — the netfilter chart for this packet, with the unvisited stations greyed.</strong> Notice that there is no branch, no early accept and no rule involved. The grey boxes are where a rule of yours would have matched on a cluster without this datapath.</figcaption>
+</figure>
+
+<h3>The same program, deciding the other way</h3>
+<p>Policy is enforced in the same program, before any of that. The cluster carries a policy admitting only one security group to a particular server, and a client outside that group produces a trace with the same opening and a different last line:</p>
+<pre><code>netns 4026533157  ~96ba345865a7:13  cil_from_container[bpf](tc) >
+                                    skb_ensure_writable x7 >
+                                    sk_skb_reason_drop(SKB_DROP_REASON_TC_INGRESS)</code></pre>
+<p>The client's <code>curl</code> reports a timeout. The packet is freed inside the tc hook with a drop reason the kernel exposes to tracing, and it never reaches the destination pod, the host stack, or a counter in any iptables chain. Both the permit and the deny happen in the same place, which is the point of doing policy here rather than in the chart.</p>
+
+<h3>Host to pod, and pod to host</h3>
+<p>Traffic between the node itself and a pod cannot use the peer redirect, because the host end of the journey is the node's own namespace. Cilium builds a second veth pair for that, <code>cilium_host</code> and <code>cilium_net</code>, and attaches programs to both ends: <code>cil_from_host</code> on <code>cilium_host</code> egress, <code>cil_to_host</code> on <code>cilium_host</code> ingress and on <code>cilium_net</code> ingress. <code>cilium_host</code> carries the node's router address and has ARP disabled. In the cross-node capture of the next chapter, <code>cil_to_host</code> and <code>cil_from_host</code> appear twenty-five times each, which is the health and node-local traffic using exactly this pair.</p>
+<p>One configuration option changes the shape of everything above, and it is worth naming because a great deal of older writing assumes it. With endpoint routes enabled, Cilium also attaches <code>cil_to_container</code> to the <em>egress</em> side of each pod's veth pair and installs a per-pod route in the host, so packets are delivered by the host's routing table rather than by a peer redirect, and ingress policy runs in that second program. The bench cluster has endpoint routes off, which is why no <code>cil_to_container</code> appears in any capture and why ingress policy is resolved by a tail call inside the sender's program instead.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Cluster lab. Prerequisites: a kind cluster with Cilium and kube-proxy replacement, <code>kubectl</code>, <code>docker</code>, and <code>pwru</code> copied into the node. Nothing here changes the cluster.</p>
+<pre><code>lab/14-cilium.sh status            # routing mode, attach mode, host routing, masquerade
+lab/14-cilium.sh progs             # which program is on which device
+
+# two pods on one node, then the redirect
+kubectl -n pp-demo get pod -o wide
+docker exec -d kind-worker timeout 40 /usr/local/bin/pwru \
+  --filter-trace-tc --kmods veth --output-meta \
+  'tcp and host 10.128.0.82 and port 80' &gt; /tmp/cil14.txt
+kubectl -n pp-demo exec pp-cli -- curl -s -o /dev/null http://10.128.0.82/
+
+# the three counts that make the point
+docker exec kind-worker grep -c nf_hook_slow /tmp/cil14.txt      # 0
+docker exec kind-worker grep -c veth_xmit /tmp/cil14.txt         # one per packet
+docker exec kind-worker grep -c skb_do_redirect /tmp/cil14.txt   # one per packet</code></pre>
+<p>Every transcript and every count in this chapter is real output from exactly these commands. Note that <code>pwru</code> run inside one kind node sees the whole host kernel, so the namespace column distinguishes the nodes rather than the capture being limited to one.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>Cilium attaches <code>cil_from_container</code> with tcx to the ingress side of the host end of each pod's veth pair, so it sees every packet leaving that pod. For a destination on the same node the program looks up the ipcache, checks egress policy, rewrites both MAC addresses in <code>ipv4_local_delivery</code>, and calls <code>ctx_redirect_peer</code>. The kernel's <code>skb_do_redirect</code> finds the peer device through <code>ndo_get_peer_dev</code>, requires it to be in another namespace, sets <code>skb->dev</code>, scrubs the skb while keeping the mark, and returns <code>-EAGAIN</code>, which makes <code>__netif_receive_skb_core</code> restart at <code>another_round</code> with the destination pod's device. The measured result for twelve packets is one veth crossing each, one backlog entry each, and zero netfilter hook calls anywhere. A denied packet is freed in the same program with <code>SKB_DROP_REASON_TC_INGRESS</code>. Node-to-pod traffic uses the separate <code>cilium_host</code> and <code>cilium_net</code> pair, and enabling endpoint routes would replace the peer redirect with host routing plus a second program on the pod's veth egress.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>cil_from_container</dt><dd>Cilium's program on the tcx ingress of the host end of a pod veth pair; it sees packets leaving that pod.</dd>
+<dt>ipcache</dt><dd>The map from IP address to security identity that tells the program what the destination is.</dd>
+<dt>security identity</dt><dd>The number Cilium assigns to a set of labels; policy is written between identities rather than addresses.</dd>
+<dt>policy_can_egress4</dt><dd>The policy check inside the sender's program, before any forwarding decision.</dd>
+<dt>ipv4_local_delivery</dt><dd>The same-node delivery path; it rewrites both MAC addresses for the destination endpoint.</dd>
+<dt>redirect_ep, ctx_redirect_peer</dt><dd>Cilium's choice between an ordinary redirect and the peer redirect, and the helper that performs the second.</dd>
+<dt>bpf_redirect_peer, skb_do_redirect</dt><dd>The BPF helper and the kernel function that swap <code>skb->dev</code> to the veth peer and report <code>-EAGAIN</code>.</dd>
+<dt>ndo_get_peer_dev</dt><dd>The device operation that names a virtual device's other end, letting the redirect work without knowing about veth.</dd>
+<dt>cilium_host, cilium_net</dt><dd>The extra veth pair carrying traffic between the node itself and pods, with <code>cil_from_host</code> and <code>cil_to_host</code> attached.</dd>
+<dt>endpoint routes</dt><dd>The alternative mode that delivers with host routes and a <code>cil_to_container</code> program instead of a peer redirect.</dd>
+<dt>SKB_DROP_REASON_TC_INGRESS</dt><dd>The drop reason a tc program's denial is recorded under, visible in a pwru trace.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Predict the count: you run a capture over ten pod-to-pod packets on one Cilium node with BPF host routing on, and count <code>veth_xmit</code>, <code>enqueue_to_backlog</code> and <code>nf_hook_slow</code>. Give all three numbers and justify each.</p>
+<details class="ans"><summary>Answer</summary>
+<p>Ten, ten and zero. <code>veth_xmit</code> runs once per packet for the hop out of the source pod; the destination pod is entered by <code>skb_do_redirect</code> setting <code>skb->dev</code>, so its veth pair is never driven. <code>enqueue_to_backlog</code> runs once, for that same hop. <code>nf_hook_slow</code> is zero because the redirect happens in the tc ingress hook, before <code>ip_rcv</code>, so no netfilter hook point in any namespace is reached. The measured bench run over twelve packets gave 12, 12 and 0.</p>
+<p>The near miss is "twenty and twenty, one pair per pod". That is the plain veth answer of chapter 9, and the whole saving here is the half that does not happen.</p>
+</details>
+<p>2. <code>bpf_redirect_peer</code> refuses to work when the target device's peer is in the same network namespace as the current one. Find the line and explain why the restriction is there rather than being a bug.</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>net/core/filter.c:2537</code>, where <code>net_eq(net, dev_net(dev))</code> is one of the conditions that jumps to <code>out_drop</code>. The helper's whole purpose is to cross a namespace boundary in one step, and it achieves that by setting <code>skb->dev</code> and returning <code>-EAGAIN</code> so the core restarts with the new device. Within one namespace that restart would deliver the packet to the same stack it is already in, which the ordinary <code>bpf_redirect</code> already does correctly through <code>__bpf_redirect</code>. The peer branch also requires <code>skb_at_tc_ingress</code> at line 2532.</p>
+<p>The near miss is "because the peer might not exist". That is checked too, in the same condition, but it is the <code>!dev</code> half; the namespace test is separate and deliberate.</p>
+</details>
+<p>3. A colleague adds an iptables rule in FORWARD to count traffic between two pods on one node and sees zero. On a second cluster the same rule counts correctly. Name the single configuration difference most likely responsible and how you would confirm it.</p>
+<details class="ans"><summary>Answer</summary>
+<p>BPF host routing, on in the first cluster and off in the second. With it on, <code>cil_from_container</code> ends in <code>ctx_redirect_peer</code> and the skb leaves the receive path before <code>ip_rcv</code>, so no netfilter hook runs; the bench measured zero <code>nf_hook_slow</code> calls for the whole flow. Confirm with <code>cilium-dbg status --verbose</code> and read the <code>Routing: ... Host:</code> field, which prints <code>BPF</code> or <code>Legacy</code>, and then re-run a capture and count <code>nf_hook_slow</code>.</p>
+<p>The near miss is "the rule is in the wrong chain; it should be in PREROUTING". Every chain reads zero, because the packet reaches none of them; moving the rule changes nothing.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.cilium.io/en/stable/network/ebpf/lifeofapacket/">Life of a Packet</a>, Cilium documentation. The same journey as a diagram, for the endpoint-to-endpoint, egress and ingress cases; read it against this chapter's trace.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.cilium.io/en/stable/operations/performance/tuning/">Tuning Guide</a>, Cilium documentation. The eBPF Host-Routing section states in one sentence what the zero in this chapter's table means: it bypasses iptables and the upper host stack.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/">Kubernetes Without kube-proxy</a>, Cilium documentation. Read the socket load balancing section: it is the piece that acts before anything in this chapter, at <code>connect()</code> time.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://github.com/cilium/cilium/blob/main/bpf/bpf_lxc.c">bpf/bpf_lxc.c</a>, Cilium source. The file this chapter traces; start at <code>cil_from_container</code> and follow the tail calls rather than reading top to bottom.</li>
+</ul>
+</div>
+</section>

@@ -1,0 +1,193 @@
+<section id="ch15" class="chapter">
+<span class="chnum">Chapter 15</span>
+<h2>Cilium across nodes and to the world</h2>
+<p class="chmeta">~RT15 min · <span class="tag BPF">BPF</span> · <em>Spine:</em> chapter 14's redirect worked because the destination was a device on the same machine. Now the destination is on another node, and then outside the cluster entirely. The same program makes both decisions, and this chapter follows one skb across two nodes and watches the address column change twice.</p>
+
+<h3>Encapsulation: the same skb, a different tuple</h3>
+<p>When <code>handle_ipv4_from_lxc</code> finds the destination is an endpoint on another node, <code>ipv4_forward_to_destination</code> takes the tunnel branch and calls <code>encap_and_redirect_lxc</code> (<code>bpf/bpf_lxc.c:1532</code>, defined at <code>bpf/lib/encap.h:382</code>), which reaches <code>__encap_and_redirect_with_nodeid</code> (line 255). Two things are set before the redirect. <code>ctx_set_encap_info4</code> (<code>bpf/lib/overloadable_skb.h:189</code>) fills a tunnel key:</p>
+<pre><code>key.tunnel_id  = get_tunnel_id(seclabel);           /* line 203 */
+key.remote_ipv4 = bpf_ntohl(tunnel_endpoint);       /* line 209 */
+key.tunnel_ttl  = IPDEFTTL;
+ret = ctx_set_tunnel_key(ctx, &amp;key, key_size, BPF_F_ZERO_CSUM_TX);</code></pre>
+<p>The remote address is the other node. The tunnel identifier is the <em>sender's</em> security identity, which is the whole reason policy can be enforced on the far side without a lookup: the identity rides in the tunnel header. Then line 278 calls <code>ctx_redirect(ctx, ifindex, 0)</code> with the tunnel device's index, and this is an ordinary <code>bpf_redirect</code> rather than the peer variant, so the kernel takes the <code>__bpf_redirect</code> path and queues the skb for transmit on <code>cilium_geneve</code>.</p>
+<p>The bench follows one skb, <code>0xffff88dfec7e0ae8</code>, from a pod on one node to a pod on another. Watch the tuple column:</p>
+<pre><code>netns worker2, eth0:28   ip_local_out ... veth_xmit > skb_scrub_packet > eth_type_trans
+netns worker2, lxc:29    cil_from_container > skb_do_redirect > __bpf_redirect
+netns worker2, dev 27    __dev_queue_xmit > cil_to_overlay > dev_hard_start_xmit >
+  (cilium_geneve)        geneve_xmit[geneve] > geneve_build_gro_hint_opt >
+                         skb_tunnel_check_pmtu > geneve_build_skb > skb_scrub_packet >
+                         iptunnel_handle_offloads > udp_set_csum > iptunnel_xmit >
+                         skb_scrub_packet > skb_push
+        tuple so far:    10.128.0.57:33200 -> 10.128.0.82:80 (tcp)
+        tuple from here: 172.18.0.2:62469 -> 172.18.0.4:6081 (udp)
+netns worker2, dev 27    ip_local_out > __ip_local_out > nf_hook_slow > ip_output
+netns worker2, eth0:2    nf_hook_slow > ip_finish_output2 > __dev_queue_xmit >
+                         cil_to_netdev > veth_xmit[veth] > ...</code></pre>
+<p>The skb address never changes. The tuple changes because <code>iptunnel_xmit</code> pushed an outer IP and UDP header in front of the packet that was already there, and pwru is reading the outermost headers. From that point the kernel treats this as a locally generated UDP datagram: <code>ip_local_out</code>, LOCAL_OUT, <code>ip_output</code>, POST_ROUTING, a route lookup to the other node, and then the physical device's egress program <code>cil_to_netdev</code> (<code>bpf/bpf_host.c:1506</code>).</p>
+<p>Those two <code>nf_hook_slow</code> calls are the important detail, and the measurement makes it exact. In the whole cross-node capture, the receiving node's namespace recorded 116 <code>nf_hook_slow</code> calls. Of those, 116 carried the outer UDP tuple on port 6081 and <b>zero</b> carried the inner TCP tuple. Netfilter on both nodes sees a UDP datagram between two node addresses. It never sees the pod-to-pod connection inside it, so a rule matching pod addresses matches nothing, and conntrack holds one entry for the tunnel rather than one per pod connection.</p>
+
+<h3>Decapsulation on the far node</h3>
+<p>The outer packet arrives on the destination node's <code>eth0</code>, where <code>cil_from_netdev</code> (<code>bpf/bpf_host.c:1298</code>) runs. For tunnel traffic it does nothing special; there is no port check that catches Geneve and shortcuts it, so the packet is passed to the stack as an ordinary UDP datagram:</p>
+<pre><code>netns worker, eth0:2     __netif_rx > enqueue_to_backlog > __netif_receive_skb_one_core >
+                         cil_from_netdev > ip_rcv > ip_rcv_core > nf_hook_slow >
+                         ip_rcv_finish_core > udp_v4_early_demux > ip_route_input_slow >
+                         ip_local_deliver > nf_hook_slow > ip_protocol_deliver_rcu >
+                         udp_rcv > udp_queue_rcv_one_skb >
+                         geneve_udp_encap_recv[geneve] > __iptunnel_pull_header >
+                         skb_pull_rcsum > skb_scrub_packet > eth_type_trans
+        tuple flips back to 10.128.0.57:33200 -> 10.128.0.82:80 (tcp)
+netns worker, cilium_geneve:7
+                         gro_cells_receive > netif_rx > enqueue_to_backlog >
+                         __netif_receive_skb_one_core > cil_from_overlay >
+                         skb_ensure_writable x9 > skb_do_redirect
+netns pod                skb_scrub_packet > ip_rcv > ip_rcv_core > ip_route_input_slow >
+                         ip_local_deliver > tcp_v4_rcv > __inet_lookup_listener</code></pre>
+<p>The route lookup and the two hook calls here belong to the outer packet, delivered locally because the node owns that address. <code>udp_rcv</code> finds the Geneve socket, <code>geneve_udp_encap_recv</code> strips the outer headers with <code>__iptunnel_pull_header</code>, and the skb is handed to the tunnel device through <code>gro_cells_receive</code>, which re-enters the receive path with <code>skb->dev</code> set to <code>cilium_geneve</code>. There <code>cil_from_overlay</code> (<code>bpf/bpf_overlay.c:654</code>) reads the identity back out of the tunnel key, enforces ingress policy against it, and finishes with the same <code>skb_do_redirect</code> as the previous chapter, straight into the destination pod.</p>
+<p>So one skb, two nodes, two namespace pairs, and exactly two moments where the stack was entered on purpose: once to transmit the outer packet and once to receive it.</p>
+
+<figure class="dia">
+<div class="mermaid">
+sequenceDiagram
+  participant P1 as pod on node A
+  participant A as node A datapath
+  participant W as the wire
+  participant B as node B datapath
+  participant P2 as pod on node B
+  P1->>A: veth_xmit, then cil_from_container
+  Note over A: ipcache says the destination is on node B<br/>encap_and_redirect_lxc, tunnel_id = sender identity
+  A->>A: ctx_redirect to cilium_geneve, cil_to_overlay<br/>geneve_xmit, iptunnel_xmit
+  Note over A: tuple becomes node A to node B, UDP 6081<br/>LOCAL_OUT and POST_ROUTING run for THIS packet
+  A->>W: cil_to_netdev on eth0
+  W->>B: eth0 ingress, cil_from_netdev
+  Note over B: PRE_ROUTING, routing, LOCAL_IN for the OUTER packet<br/>udp_rcv finds the Geneve socket
+  B->>B: geneve_udp_encap_recv, iptunnel_pull_header<br/>tuple becomes pod to pod again
+  B->>B: gro_cells_receive onto cilium_geneve<br/>cil_from_overlay reads the identity from the tunnel key
+  B->>P2: skb_do_redirect into the pod, ip_rcv, tcp_v4_rcv
+  Note over A,B: measured: 116 of 116 nf_hook_slow calls carried the OUTER tuple, 0 the inner
+</div>
+<figcaption><strong>Diagram 15.1 — one skb across two nodes, and the two moments the stack is entered.</strong> Notice that the netfilter boxes belong to the outer packet only. The inner pod-to-pod connection has no conntrack entry and no chain ever matches its addresses.</figcaption>
+</figure>
+
+<h3>VXLAN, Geneve and native routing</h3>
+<p>The tunnel protocol changes very little of the above. VXLAN uses UDP 8472 and Geneve 6081 (<code>pkg/defaults/defaults.go:475</code> and 477), the transmit function becomes <code>vxlan_xmit</code> and the receive one <code>vxlan_rcv</code>, and the identity travels in the VXLAN network identifier. The shape of the path is identical. Geneve adds a variable-length option field for extra metadata alongside the identity.</p>
+<p>Native routing removes the tunnel. Instead of the encapsulation branch, <code>ipv4_forward_to_destination</code> takes the host-routing branch (<code>bpf/bpf_lxc.c:1547</code>) and calls <code>fib_redirect_v4</code> (<code>bpf/lib/fib.h:263</code>) at line 1550, which performs a <code>bpf_fib_lookup</code> and redirects to the physical device. The far node's <code>eth0</code> receives the pod address directly, <code>cil_from_netdev</code> finds it in the ipcache as a local endpoint, and delivery is the peer redirect of chapter 14. The cluster has to be on a network that will route pod addresses for this to work, which is the trade: no encapsulation overhead, and the fabric has to know about your pod ranges.</p>
+
+<h3>Out to the world, and where the masquerade happens</h3>
+<p>Now a pod on the bench talking to an address outside the cluster, <code>172.18.0.1</code>. The measured path is shorter than expected:</p>
+<pre><code>netns pod,    eth0:42          ip_local_out ... veth_xmit > skb_scrub_packet > eth_type_trans
+netns worker, lxc:43           __netif_rx > enqueue_to_backlog > cil_from_container >
+                               skb_ensure_writable x4 > skb_do_redirect > skb_pull
+netns worker, eth0:2           cil_to_netdev > skb_ensure_writable
+        tuple:  10.128.0.66:47446 -> 172.18.0.1:9099
+        tuple:  172.18.0.4:47446 -> 172.18.0.1:9099    <-- changes here
+netns worker, eth0:2           inet_proto_csum_replace_by_diff > netdev_core_pick_tx >
+                               ... > veth_xmit[veth] > eth_type_trans
+netns host                     the packet leaves the node</code></pre>
+<p>Two facts are worth stating plainly. First, the source address changes inside <code>cil_to_netdev</code>, next to a checksum fix-up, and nowhere near a MASQUERADE rule. This is Cilium's BPF masquerade: <code>handle_nat_fwd</code> (<code>bpf/bpf_host.c:1707</code>) leads to <code>snat_v4_nat</code> (<code>bpf/lib/nodeport_egress.h:407</code>), and the mapping is kept in a BPF map rather than in conntrack. Second, and this is the part that surprises people who know the older behaviour, the count of <code>nf_hook_slow</code> calls inside the node's namespace for this flow is <b>zero</b>. The four in the capture are all in the laptop's own namespace, where the masqueraded packet is received and answered.</p>
+<p>The reason is in one branch. <code>ipv4_forward_to_destination</code> checks <code>if (is_defined(ENABLE_HOST_ROUTING))</code> at <code>bpf/bpf_lxc.c:1547</code> and calls <code>fib_redirect_v4</code> at line 1550, redirecting the skb to the physical device. The label <code>pass_to_stack</code> at line 1565, which ends in <code>return CTX_ACT_OK</code> and hands the packet to <code>ip_rcv</code> on the lxc device, is reached only when host routing is off or when the route lookup fails with a not-forwarded result. On a cluster with legacy host routing the world path really does enter the host's PRE_ROUTING, routing decision, FORWARD and POST_ROUTING chains, and an iptables masquerade rule really does do the translation. On this one, neither happens.</p>
+<p>So the answer to "where does the skb re-enter the netfilter chart" depends on one setting, and it is worth being able to say which cluster you are looking at:</p>
+<table>
+<thead><tr><th>Flow</th><th>BPF host routing on, as measured</th><th>Legacy host routing</th></tr></thead>
+<tbody>
+<tr><td>Pod to pod, same node</td><td>No hook is reached</td><td>Host routes the packet; the chart is entered</td></tr>
+<tr><td>Pod to pod, other node</td><td>Only the outer tunnel packet is seen, on both nodes</td><td>Same for the tunnel; the inner packet is still hidden</td></tr>
+<tr><td>Pod to the world</td><td>No hook is reached; masquerade happens in <code>cil_to_netdev</code></td><td>PRE_ROUTING, FORWARD, POST_ROUTING on the lxc and physical devices, and an iptables masquerade</td></tr>
+<tr><td>Node's own traffic</td><td>The full chart, as on any host</td><td>The full chart</td></tr>
+</tbody>
+</table>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["pod sends to 172.18.0.1"] ==> B["veth_xmit into the node"]
+  B ==> C["tcx ingress on the lxc device<br/>cil_from_container"]
+  C ==> D{"ENABLE_HOST_ROUTING?<br/>bpf_lxc.c 1547"}
+  D ==>|"yes, the bench"| E["fib_redirect_v4 1550<br/>bpf_fib_lookup, redirect to eth0"]
+  D -->|"no"| F["pass_to_stack 1565<br/>CTX_ACT_OK, ip_rcv on the lxc device<br/>PRE_ROUTING, FORWARD, POST_ROUTING"]
+  E ==> G["tcx egress on eth0: cil_to_netdev 1506<br/>handle_nat_fwd 1707, snat_v4_nat<br/>source becomes the node address"]
+  F --> G
+  G ==> H["out of the node. nf_hook_slow inside the node: 0"]
+  style E fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style G fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style F fill:#f4f6f8,stroke:#999,stroke-dasharray: 4 4
+</div>
+<figcaption><strong>Diagram 15.2 — the world path, and the one branch that decides whether netfilter sees it.</strong> Notice the dashed box is the path most older writing describes. On a cluster with BPF host routing the thick path is taken and the source address is rewritten by a BPF program, not by a rule.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Cluster lab. Prerequisites: the cluster of the previous chapter, <code>kubectl</code>, <code>docker</code>, <code>pwru</code> in the node. Nothing changes the cluster.</p>
+<pre><code># cross node: capture the outer tunnel AND the inner packet in one go
+docker exec -d kind-worker timeout 42 /usr/local/bin/pwru --filter-trace-tc \
+  --kmods geneve,veth --output-meta \
+  '(udp and port 6081) or (tcp and host 10.128.0.82 and port 80)' &gt; /tmp/cil15.txt
+kubectl -n pp-demo exec pp-cli-far -- curl -s -o /dev/null http://10.128.0.82/
+
+# the claim, measured: every hook call carries the OUTER tuple
+docker exec kind-worker sh -c "awk '\$4==\"4026533157\" && \$NF==\"nf_hook_slow\"' /tmp/cil15.txt | grep -c '6081(udp)'"
+docker exec kind-worker sh -c "awk '\$4==\"4026533157\" && \$NF==\"nf_hook_slow\"' /tmp/cil15.txt | grep -c '(tcp)'"
+
+# to the world: watch the source address change inside cil_to_netdev
+docker exec -d kind-worker timeout 40 /usr/local/bin/pwru --filter-trace-tc \
+  --kmods veth --output-meta 'tcp and host 172.18.0.1 and port 9099' &gt; /tmp/w.txt
+kubectl -n pp-demo exec pp-cli -- curl -s --max-time 4 http://172.18.0.1:9099/
+docker exec kind-worker grep -c nf_hook_slow /tmp/w.txt
+
+# two more clusters to compare against, for you to create when you want them:
+#   kind create cluster --config lab/15-kind-vxlan.yaml
+#   kind create cluster --config lab/15-kind-native.yaml
+# each file carries its cilium install command as a comment.</code></pre>
+<p>Every transcript and count in this chapter came from these commands. The two extra cluster configurations were written for this dossier and deliberately not created, so anything this chapter says about VXLAN and about native routing comes from the source rather than from a capture, and is marked as such in the text.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>For a destination on another node, <code>encap_and_redirect_lxc</code> sets a tunnel key whose identifier is the sender's security identity and whose remote address is the other node, then redirects to <code>cilium_geneve</code>, where <code>cil_to_overlay</code> and <code>geneve_xmit</code> build an outer UDP packet. From there the kernel treats it as ordinary local output, so LOCAL_OUT and POST_ROUTING run for the outer packet; on the far node PRE_ROUTING and LOCAL_IN run for it too, <code>udp_rcv</code> reaches <code>geneve_udp_encap_recv</code>, the headers are pulled, and <code>cil_from_overlay</code> reads the identity back and redirects into the destination pod. Measured on the bench, all 116 hook calls in the receiving node's namespace carried the outer tuple and none carried the inner one. Native routing replaces the tunnel with <code>fib_redirect_v4</code>. For world traffic with BPF host routing on, the same branch redirects straight to the physical device and <code>cil_to_netdev</code> rewrites the source address through <code>snat_v4_nat</code>, giving zero netfilter hook calls inside the node; with legacy host routing the packet takes <code>pass_to_stack</code> and the familiar chains and iptables masquerade apply.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>encap_and_redirect_lxc</dt><dd>The tunnel branch of the sender's program; it sets the tunnel key and redirects to the tunnel device.</dd>
+<dt>ctx_set_encap_info4, tunnel key</dt><dd>The call that writes the remote node address and the tunnel identifier the encapsulation will use.</dd>
+<dt>tunnel identifier</dt><dd>The VXLAN or Geneve identifier field, carrying the sender's security identity so the far node need not look it up.</dd>
+<dt>cilium_geneve</dt><dd>The tunnel device the sender redirects to; its egress program is <code>cil_to_overlay</code> and its ingress one <code>cil_from_overlay</code>.</dd>
+<dt>outer packet, inner packet</dt><dd>The node-to-node UDP datagram, and the pod-to-pod packet carried inside it; netfilter sees only the first.</dd>
+<dt>geneve_udp_encap_recv</dt><dd>The receive callback on the tunnel's UDP socket; it strips the outer headers and hands the skb to the tunnel device.</dd>
+<dt>gro_cells_receive</dt><dd>How the tunnel device re-enters the receive path after decapsulation.</dd>
+<dt>cil_from_netdev, cil_to_netdev</dt><dd>The programs on the physical device's tcx ingress and egress.</dd>
+<dt>fib_redirect_v4</dt><dd>The native-routing and host-routing branch: do a route lookup in BPF and redirect to the resulting device.</dd>
+<dt>pass_to_stack</dt><dd>The branch that hands the packet to the host stack instead, used when host routing is off.</dd>
+<dt>handle_nat_fwd, snat_v4_nat</dt><dd>Cilium's BPF masquerade, performed in the physical device's egress program with state in a BPF map.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You write an iptables rule counting traffic to a pod address on another node and it stays at zero, while a rule counting UDP port 6081 climbs steadily. Explain both observations with one mechanism.</p>
+<details class="ans"><summary>Answer</summary>
+<p>Encapsulation: by the time any netfilter hook runs, the pod-to-pod packet is the payload of a node-to-node UDP datagram. <code>iptunnel_xmit</code> pushes the outer headers before <code>ip_local_out</code> is called, so LOCAL_OUT and POST_ROUTING on the sending node and PRE_ROUTING and LOCAL_IN on the receiving node all see source and destination node addresses with UDP port 6081. The bench measured 116 of 116 hook calls in the receiving node's namespace carrying the outer tuple and zero carrying the inner one.</p>
+<p>The near miss is "the rule is on the wrong node". It would read zero on both; the inner addresses are never visible to netfilter on either side.</p>
+</details>
+<p>2. Trace the path: name every point between the two pods where <code>skb->dev</code> changes, for a cross-node connection through the tunnel.</p>
+<details class="ans"><summary>Answer</summary>
+<p>Four times. First <code>eth_type_trans</code> inside <code>__dev_forward_skb2</code> sets it to the host end of the source pod's veth pair. Second, <code>skb_do_redirect</code> from <code>cil_from_container</code> sets it to <code>cilium_geneve</code> through the ordinary redirect path. Third, after the outer packet is routed, the transmit path sets it to the physical device, and on the far node the receive path sets it to that node's <code>eth0</code>. Fourth, <code>gro_cells_receive</code> after decapsulation delivers on <code>cilium_geneve</code>, and then <code>skb_do_redirect</code> from <code>cil_from_overlay</code> sets it to the destination pod's <code>eth0</code>. The bench trace shows all of these on one skb address.</p>
+<p>The near miss is counting the wire as a device change. The two kind nodes are containers on one kernel here, so the capture shows the bridge crossing too; on real hardware that hop is a driver and a NIC instead.</p>
+</details>
+<p>3. Predict the value: on a cluster identical to the bench except that <code>bpf.hostLegacyRouting</code> is true, you repeat the pod-to-world capture and count <code>nf_hook_slow</code> inside the node. Is it still zero, and which line in the source decides?</p>
+<details class="ans"><summary>Answer</summary>
+<p>No, it becomes non-zero, and <code>bpf/bpf_lxc.c:1547</code> decides. With host routing on, that <code>if (is_defined(ENABLE_HOST_ROUTING))</code> branch calls <code>fib_redirect_v4</code> at line 1550 and the skb goes straight to the physical device, which the bench measured as zero hook calls in the node. With legacy routing the branch is not compiled in, execution falls through to the <code>pass_to_stack</code> label at line 1565 and returns <code>CTX_ACT_OK</code>, so the packet enters <code>ip_rcv</code> on the lxc device and traverses PRE_ROUTING, the routing decision, FORWARD and POST_ROUTING, and the masquerade becomes an iptables rule rather than <code>snat_v4_nat</code>.</p>
+<p>The near miss is "it is still zero because the masquerade is BPF either way". The masquerade setting and the host-routing setting are independent; legacy host routing sends the packet through the chains even if <code>bpf.masquerade</code> stays on.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.cilium.io/en/stable/network/concepts/masquerading/">Masquerading</a>, Cilium documentation. The Implementation Modes section contrasts the eBPF and iptables implementations, which is the difference this chapter measures.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://www.rfc-editor.org/rfc/rfc8926">RFC 8926, Geneve</a>. Read section 3 for the header and the variable-length options; the identifier field is where the security identity travels.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://www.rfc-editor.org/rfc/rfc7348">RFC 7348, VXLAN</a>. The older and simpler encapsulation, for comparing the two header layouts.</li>
+<li class="ref" data-layer="BPF"><span class="tag BPF">BPF</span><a href="https://docs.kernel.org/networking/vxlan.html">Virtual eXtensible Local Area Networking documentation</a>, Linux kernel documentation. The kernel side of tunnel devices, including the external-control-plane mode Cilium drives from BPF.</li>
+</ul>
+</div>
+</section>

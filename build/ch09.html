@@ -1,0 +1,201 @@
+<section id="ch9" class="chapter">
+<span class="chnum">Chapter 9</span>
+<h2>veth: the mystery, resolved</h2>
+<p class="chmeta">~RT9 min · <span class="tag L2">L2</span> · <em>Spine:</em> chapter 8 sent our skb through the loopback device and it came back up with its route still attached. Now we hand the same skb to the other end of a veth pair, in a different network namespace, and almost everything about that sentence changes except the skb itself.</p>
+
+<h3>The payoff sentence</h3>
+<p><b>A veth pair does not create a new skb. It points <code>skb->dev</code> at the peer device, erases the state that belonged to the old namespace, and hands the same skb to a receive function, so the receive half of the stack runs again in the peer's namespace while the transmit half ran once in the origin's.</b></p>
+<p>Every word of that is visible in one bench trace. Two namespaces, <code>pp-a</code> (inode 4026534764, device <code>va</code>, index 21) and <code>pp-b</code> (inode 4026534837, device <code>vb</code>, index 20), and one SYN. The skb address column never changes:</p>
+<pre><code>skb                 netns        ifindex  function
+0xffff88dee6a8b8e8  4026534764   0        ip_local_out
+0xffff88dee6a8b8e8  4026534764   21       ip_finish_output2
+0xffff88dee6a8b8e8  4026534764   21       dev_hard_start_xmit
+0xffff88dee6a8b8e8  4026534764   21       veth_xmit[veth]
+0xffff88dee6a8b8e8  4026534764   21       __dev_forward_skb2
+0xffff88dee6a8b8e8  4026534764   21       skb_scrub_packet
+0xffff88dee6a8b8e8  4026534764   21       eth_type_trans
+0xffff88dee6a8b8e8  4026534837   20       __netif_rx        <-- both columns flip
+0xffff88dee6a8b8e8  4026534837   20       enqueue_to_backlog
+0xffff88dee6a8b8e8  4026534837   20       ip_rcv
+0xffff88dee6a8b8e8  4026534837   20       ip_route_input_slow
+0xffff88dee6a8b8e8  4026534837   20       ip_local_deliver
+0xffff88dee6a8b8e8  4026534837   20       tcp_v4_rcv</code></pre>
+<p>One allocation, one free, two namespaces. The namespace and the device index change on the same line, and that line is the handoff.</p>
+
+<h3>veth_xmit and the choice it makes</h3>
+<p><code>veth_xmit</code> (<code>drivers/net/veth.c:347</code>) starts by finding the other end, <code>rcv = rcu_dereference(priv->peer)</code> at line 357. The pair is two <code>net_device</code> structures holding pointers to each other, which is the entire data structure. Then it makes one decision, at lines 373 to 374:</p>
+<pre><code>use_napi = rcu_access_pointer(rq->napi) &&
+           veth_skb_is_eligible_for_gro(dev, rcv, skb);</code></pre>
+<p>and calls <code>veth_forward_skb</code> (line 320), which is three lines and contains both doors:</p>
+<pre><code>return __dev_forward_skb(dev, skb) ?: xdp ?
+        veth_xdp_rx(rq, skb) :
+        __netif_rx(skb);</code></pre>
+<p><code>__netif_rx</code> is the backlog door of chapter 1. <code>veth_xdp_rx</code> leads to the peer's own NAPI poll. Which one runs is decided per packet by that <code>use_napi</code> expression, and both of its operands have to be true.</p>
+<p>The first operand is the napi pointer, which exists only when the peer has GRO enabled or an XDP program attached. The second is <code>veth_skb_is_eligible_for_gro</code> (line 338), whose whole body is:</p>
+<pre><code>return !(dev->features & NETIF_F_ALL_TSO) ||
+        (skb->destructor == sock_wfree &&
+         rcv->features & (NETIF_F_GRO_FRAGLIST | NETIF_F_GRO_UDP_FWD));</code></pre>
+<p>Read the first clause carefully, because it catches people. It tests the features of <code>dev</code>, the <em>transmitting</em> device. Aggregating segments that the sender is about to hand over as one large offloaded blob would be work for nothing, so if the sender has TCP segmentation offload on, the skb is ineligible and the backlog door is taken whatever the receiver has configured.</p>
+<p>The bench confirms it in three steps. By default, <code>veth_xmit > __netif_rx > enqueue_to_backlog</code>. With <code>ethtool -K vb gro on</code> and nothing else, the napi pointer now exists but the trace is unchanged: still <code>__netif_rx</code>, still the backlog. Only after <code>ethtool -K va tso off gso off</code> on the sender as well does the door move:</p>
+<pre><code>0xffff88dee6a8b2e8  4026534764  21  eth_type_trans
+0xffff88dee6a8b2e8  4026534837  20  veth_xdp_rcv_skb[veth]
+0xffff88dee6a8b2e8  4026534837  20  pskb_expand_head
+0xffff88dee6a8b2e8  4026534837  20  gro_receive_skb
+0xffff88dee6a8b2e8  4026534837  20  dev_gro_receive
+0xffff88dee6a8b2e8  4026534837  20  inet_gro_receive
+0xffff88dee6a8b2e8  4026534837  20  tcp4_gro_receive
+0xffff88dee6a8b2e8  4026534837  20  ip_rcv_core</code></pre>
+<p>No <code>__netif_rx</code>, no <code>enqueue_to_backlog</code>, and the skb address is again constant. The <code>pskb_expand_head</code> line is a headroom fix-up before GRO, which reallocates the data buffer and keeps the same skb structure.</p>
+<p>This also explains a behaviour that looks like magic. Attaching an XDP program to one end makes the pair start using NAPI, because <code>veth_xdp_set</code> clears the peer's software offloads, <code>peer->hw_features &amp;= ~NETIF_F_GSO_SOFTWARE</code> at line 1622. With the sender's segmentation offload gone, the first clause of the eligibility test is true for every packet. The comment above the function says so in as many words: when XDP is enabled, all traffic is considered eligible, as the transmitting device has segmentation offload off.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  X["veth_xmit veth.c 347<br/>rcv = peer"] ==> D1{"rq napi pointer exists?<br/>GRO on, or XDP attached"}
+  D1 ==>|"no"| B["__netif_rx<br/>backlog door"]
+  D1 ==>|"yes"| D2{"veth_skb_is_eligible_for_gro 338<br/>sender has no TSO?<br/>or sock_wfree plus fraglist or UDP forward GRO"}
+  D2 ==>|"no"| B
+  D2 ==>|"yes"| N["veth_xdp_rx<br/>peer NAPI poll<br/>veth_xdp_rcv_skb, GRO, tc, ip_rcv_core"]
+  B ==> C["enqueue_to_backlog<br/>then __netif_receive_skb_core"]
+  style B fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style N fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 9.1 — the two receive doors and the test that picks one.</strong> Notice that both operands must be true, and the second one reads the <em>sender's</em> features. Turning GRO on at the receiver alone leaves the backlog door in place, which the bench confirmed.</figcaption>
+</figure>
+
+<h3>What gets erased at the boundary</h3>
+<p>Before either door, <code>veth_forward_skb</code> calls <code>__dev_forward_skb</code> (<code>net/core/dev.c:2451</code>), which is <code>__dev_forward_skb2</code> (line 2438) with the MTU check on. That calls <code>____dev_forward_skb</code> (<code>include/linux/netdevice.h:4440</code>), four lines that matter:</p>
+<pre><code>if (skb_orphan_frags(skb, GFP_ATOMIC) ||
+    unlikely(!__is_skb_forwardable(dev, skb, check_mtu))) {
+        dev_core_stats_rx_dropped_inc(dev); kfree_skb(skb); return NET_RX_DROP;
+}
+skb_scrub_packet(skb, !net_eq(dev_net(dev), dev_net(skb->dev)));
+skb->priority = 0;</code></pre>
+<p><code>__is_skb_forwardable</code> (line 4400) checks that the peer is up and that the frame fits its MTU plus link-layer and VLAN headroom (lines 4413 to 4415), with a deliberate exemption: a GSO skb passes regardless of length (lines 4420 to 4421), because it will be segmented later. An MTU mismatch between the two ends of a pair therefore shows up as a silent <code>rx_dropped</code> on the receiving device rather than as an ICMP message.</p>
+<p>Then the important call, whose second argument is the whole question. <code>!net_eq(dev_net(dev), dev_net(skb->dev))</code> is true when the two devices live in different network namespaces, and that flag is named <b>xnet</b> inside <code>skb_scrub_packet</code> (<code>net/core/skbuff.c:6278</code>). Here is exactly what it clears:</p>
+<table>
+<thead><tr><th>Cleared always</th><th>Cleared only when the namespace changes</th><th>Kept</th></tr></thead>
+<tbody>
+<tr><td><code>pkt_type</code> set to <code>PACKET_HOST</code> (:6280)</td><td><code>skb->mark</code> set to 0 (:6296)</td><td>the packet data and all headers</td></tr>
+<tr><td><code>skb_iif</code> set to 0 (:6281)</td><td>the timestamp (:6297)</td><td><code>skb->priority</code>, cleared separately by the caller</td></tr>
+<tr><td><code>skb_dst_drop</code>, the route (:6283)</td><td></td><td><code>skb->tc_index</code></td></tr>
+<tr><td><code>nf_reset_ct</code>, the conntrack pointer (:6285)</td><td></td><td>the skb itself, its address and its data buffer</td></tr>
+<tr><td><code>nf_reset_trace</code> (:6286) and <code>skb_ext_reset</code> (:6284)</td><td></td><td></td></tr>
+<tr><td><code>ipvs_reset</code>, the <code>ipvs_property</code> bit (:6292)</td><td></td><td></td></tr>
+</tbody>
+</table>
+<p>Two rows of that table answer the question people actually have. Because the route is dropped, the peer namespace must do its own routing decision, which is why the trace shows <code>ip_route_input_noref</code> and <code>ip_route_input_slow</code> on the receive side. That is the precise opposite of chapter 8, where <code>loopback_xmit</code> called <code>skb_dst_force</code> and the lookup was skipped. And because the conntrack pointer is reset, conntrack runs again from scratch in the peer namespace, with its own table and its own entry.</p>
+<p>The mark is the subtle one. <code>skb->mark</code> is cleared only when the namespace actually changes. A veth pair with both ends in one namespace, which is how a Linux bridge is usually wired, preserves the mark; a pair whose ends straddle a container boundary does not. The last step, after the scrub, is <code>eth_type_trans</code> back in <code>__dev_forward_skb2</code> (line 2443), and its first statement is <code>skb->dev = dev</code>. That single assignment is the device swap.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  subgraph A["namespace pp-a"]
+    T1["ip_local_out, OUTPUT, POST_ROUTING"] ==> T2["__dev_queue_xmit on va"] ==> T3["veth_xmit"]
+  end
+  T3 ==> S["__dev_forward_skb2<br/>MTU check<br/>skb_scrub_packet: drop route, reset conntrack<br/>eth_type_trans: skb dev = vb"]
+  subgraph B["namespace pp-b"]
+    R1["__netif_rx or veth_xdp_rcv_skb"] ==> R2["tc ingress, ip_rcv"] ==> R3["ip_route_input_slow<br/>a fresh routing decision"] ==> R4["PRE_ROUTING, LOCAL_IN, tcp_v4_rcv"]
+  end
+  S ==> R1
+  style S fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 9.2 — one skb, two namespaces, one scrub between them.</strong> Notice that the transmit half runs once and the receive half runs once, on the same object. Everything the middle box erases is state the second namespace is not allowed to inherit.</figcaption>
+</figure>
+
+<h3>The one place a copy happens</h3>
+<p>Chapter 2 promised this chapter would say when a veth copies. The answer is a single call site. When a native XDP program is attached to the receiving end, <code>veth_convert_skb_to_xdp_buff</code> (<code>veth.c:751</code>) must hand the program a linear buffer it owns, with headroom in front. If any of four conditions holds (lines 758 to 760) it copies:</p>
+<pre><code>if (skb_shared(skb) || skb_head_is_locked(skb) ||
+    skb_is_nonlinear(skb) ||
+    skb_headroom(skb) < XDP_PACKET_HEADROOM) {
+        if (skb_pp_cow_data(rq->page_pool, pskb, XDP_PACKET_HEADROOM))</code></pre>
+<p>For locally generated TCP this is not a rare case; it is every packet. TCP keeps the original skb on its retransmission queue and transmits a clone, so the head is locked and <code>skb_pp_cow_data</code> (<code>net/core/skbuff.c:942</code>) allocates a fresh page-pool buffer and copies the data into it. The earlier native XDP trace showed exactly that shape: the old skb freed through <code>consume_skb</code> and a new address appearing afterwards. Without an XDP program the skb identity holds end to end, which is what the address column in this chapter's traces shows.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  I["skb arriving at vb<br/>with a native XDP program attached"] ==> Q{"any of these four true?<br/>veth.c 758 to 760"}
+  Q ==>|"skb_shared"| CP["skb_pp_cow_data<br/>skbuff.c 942<br/>new buffer, new skb, old one freed"]
+  Q ==>|"skb_head_is_locked<br/>every TCP clone"| CP
+  Q ==>|"skb_is_nonlinear"| CP
+  Q ==>|"headroom under XDP_PACKET_HEADROOM"| CP
+  Q ==>|"none of them"| KP["passed through<br/>same skb, same address"]
+  style CP fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style KP fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 9.3 — the only copy a veth performs, and the four things that trigger it.</strong> Notice that the head-locked condition is enough on its own for locally generated TCP, because TCP always transmits a clone of the segment it keeps for retransmission. Without an XDP program none of this code runs.</figcaption>
+</figure>
+
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>iproute2</code>, <code>ethtool</code> (package <code>ethtool</code>), <code>curl</code>, <code>pwru</code>. The <code>--kmods veth</code> flag is required: <code>veth</code> is a module, and pwru probes only built-in functions unless you name it.</p>
+<pre><code>sudo lab/09-veth.sh up            # pp-a va 10.9.0.1  <-->  vb 10.9.0.2 pp-b
+
+# door 1, the default. Watch the skb address column stay constant.
+sudo pwru --kmods veth --output-meta 'tcp and host 10.9.0.2' &amp;
+sudo ip netns exec pp-a curl -s --max-time 2 http://10.9.0.2:9099/   # refused is fine
+
+# GRO at the receiver alone changes nothing: still __netif_rx
+sudo ip netns exec pp-b ethtool -K vb gro on
+sudo ip netns exec pp-a curl -s --max-time 2 http://10.9.0.2:9099/
+
+# now take segmentation offload off the sender: veth_xdp_rcv_skb appears
+sudo ip netns exec pp-a ethtool -K va tso off gso off
+sudo ip netns exec pp-a curl -s --max-time 2 http://10.9.0.2:9099/
+
+# restore, then tear down
+sudo ip netns exec pp-a ethtool -K va tso on gso on
+sudo ip netns exec pp-b ethtool -K vb gro off
+sudo lab/09-veth.sh down</code></pre>
+<p>All three runs above were measured on the bench and the transcripts in this chapter are their real output. You need no listener: the SYN crosses the pair and is answered with a reset, which exercises the whole path.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A veth pair is two devices pointing at each other. <code>veth_xmit</code> (<code>veth.c:347</code>) looks up the peer and calls <code>veth_forward_skb</code>, which runs <code>__dev_forward_skb</code> and then either <code>__netif_rx</code> or the peer's NAPI poll. The NAPI door needs a napi pointer on the peer and an eligible skb, and eligibility reads the <em>sender's</em> segmentation offload, so turning GRO on at the receiver alone changes nothing. <code>skb_scrub_packet</code> drops the route and resets conntrack for every crossing, and clears the mark only when the namespace changes, so the peer namespace repeats the routing decision and conntrack lookup that chapter 8's loopback path skipped. The skb address is unchanged throughout; the only copy is the native XDP path, where a locked TCP clone forces <code>skb_pp_cow_data</code>.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>veth_xmit</dt><dd>The veth transmit function: find the peer, pick a door, forward the same skb.</dd>
+<dt>veth_forward_skb</dt><dd>The three-line function holding both doors, <code>__netif_rx</code> and <code>veth_xdp_rx</code>.</dd>
+<dt>veth_skb_is_eligible_for_gro</dt><dd>The test that reads the sending device's segmentation offload to decide whether aggregating is worth it.</dd>
+<dt>veth_xdp_rcv_skb</dt><dd>The NAPI-side receive function, which runs GRO and enters the IP layer without the backlog.</dd>
+<dt>__dev_forward_skb, ____dev_forward_skb</dt><dd>The shared handoff used by veth and by BPF redirect: check, scrub, then <code>eth_type_trans</code>.</dd>
+<dt>__is_skb_forwardable</dt><dd>The up-and-MTU check, with GSO skbs exempted from the length test.</dd>
+<dt>skb_scrub_packet</dt><dd>Erases the state a packet may not carry into another device or namespace: route, conntrack, input index, and the mark when crossing namespaces.</dd>
+<dt>xnet</dt><dd>The argument telling <code>skb_scrub_packet</code> that the two devices are in different network namespaces.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You set a firewall mark on a packet in one namespace and expect to match it in the peer namespace after it crosses a veth pair. Sometimes it works and sometimes it does not. What decides, and which line?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Whether the two ends are in different network namespaces decides it, at <code>net/core/skbuff.c:6296</code>. <code>____dev_forward_skb</code> passes <code>!net_eq(dev_net(dev), dev_net(skb->dev))</code> as the <code>xnet</code> argument (<code>include/linux/netdevice.h:4451</code>), and <code>skb_scrub_packet</code> zeroes <code>skb->mark</code> only under that flag. A pair with both ends in one namespace, the usual bridge wiring, keeps the mark; a pair straddling a container boundary loses it.</p>
+<p>The near miss is "the mark is always cleared like the route is". The route is dropped unconditionally at line 6283; the mark is conditional, and that asymmetry is the whole answer.</p>
+</details>
+<p>2. Trace the path: a container sends a TCP segment out of its <code>eth0</code>, which is one end of a veth pair. Does conntrack in the host namespace see a new connection or an established one, and why?</p>
+<details class="ans"><summary>Answer</summary>
+<p>A new one, because <code>skb_scrub_packet</code> called <code>nf_reset_ct</code> (<code>net/core/skbuff.c:6285</code>) and dropped the conntrack pointer the container's namespace had attached. Conntrack state lives per network namespace, and <code>skb->_nfct</code> is the only thing tying an skb to an entry, so the host's <code>nf_conntrack_in</code> finds nothing in the skb, builds the tuple again and allocates its own entry with <code>IP_CT_NEW</code>.</p>
+<p>The near miss is "it is established because the container already tracked it". Two independent tables are involved, and neither can see the other's entry; the container's table is not even consulted.</p>
+</details>
+<p>3. Predict the trace: you attach a native XDP program to <code>vb</code> and send one TCP segment from <code>va</code>. Does the skb address stay constant, and what would change if the traffic were UDP from a socket with plenty of headroom?</p>
+<details class="ans"><summary>Answer</summary>
+<p>It changes for TCP and can stay constant for UDP. <code>veth_convert_skb_to_xdp_buff</code> (<code>veth.c:758</code> to 761) copies when the skb is shared, head-locked, nonlinear, or short of <code>XDP_PACKET_HEADROOM</code>. TCP transmits a clone of the skb it keeps for retransmission, so the head is locked and <code>skb_pp_cow_data</code> (<code>net/core/skbuff.c:942</code>) allocates a new buffer; the trace shows the old skb freed and a new address appearing. A linear UDP skb with enough headroom fails all four tests and is passed through unchanged.</p>
+<p>The near miss is "XDP always copies on veth". The copy is driven by the four properties of that specific skb, and the headroom condition is the one you can influence.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man4/veth.4.html">veth(4)</a>, Linux manual page. Short and worth reading once: it states the pair relationship and the namespace behaviour this chapter traces.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man8/ethtool.8.html">ethtool(8)</a>, Linux manual page. The <code>-K</code> option list; <code>tso</code>, <code>gso</code> and <code>gro</code> are the three switches that move the door in this chapter's lab.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/segmentation-offloads.html">Segmentation Offloads</a>, Linux kernel documentation. Read the GSO and TSO sections to see why an offloaded skb is a poor candidate for aggregation, which is the eligibility rule.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/netdevices.html">Network Devices, the Kernel, and You!</a>, Linux kernel documentation. The contract a driver's transmit function works under, which is what makes <code>veth_xmit</code> calling a receive function legal.</li>
+</ul>
+</div>
+</section>

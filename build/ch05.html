@@ -1,0 +1,143 @@
+<section id="ch5" class="chapter">
+<span class="chnum">Chapter 5</span>
+<h2>Netfilter and conntrack: hooks, priorities, tuples, and NAT</h2>
+<p class="chmeta">~RT5 min · <span class="tag L3">L3</span> · <em>Spine:</em> our skb is inside the PRE_ROUTING call that chapter 4 treated as a black box. This chapter opens it: what <code>nf_hook_slow</code> walks, in what order, and what conntrack and NAT write into the skb and into their own tables before the routing decision runs.</p>
+
+<h3>The list, and the numbers that order it</h3>
+<p>Chapter 0 showed the two gates in front of a hook. When both pass, <code>nf_hook_slow</code> (<code>net/netfilter/core.c:612</code>) walks an array of <b>hook entries</b>, each a function pointer and a <b>priority</b>, sorted by priority when the array is rebuilt on registration (<code>nf_hook_entries_grow</code>, line 97). The loop at lines 620 to 640 calls each entry and acts on its verdict: accept moves to the next entry; drop frees the skb with reason <code>NETFILTER_DROP</code> and returns; queue sends the skb to a user-space program and returns; stolen returns without freeing, because the entry now owns the skb. When the loop runs out of entries the macro that called it runs the continuation, <code>ip_rcv_finish</code> for PRE_ROUTING.</p>
+<p>The priorities are plain integers, and the whole "raw, mangle, nat, filter" order of the chart is just these numbers from <code>include/uapi/linux/netfilter_ipv4.h:29</code> to 45:</p>
+<table>
+<thead><tr><th>Priority</th><th>Value</th><th>Who registers there</th></tr></thead>
+<tbody>
+<tr><td><code>CONNTRACK_DEFRAG</code></td><td>-400</td><td>IPv4 fragment reassembly for conntrack, <code>ipv4_conntrack_defrag</code></td></tr>
+<tr><td><code>RAW</code></td><td>-300</td><td>nftables chains declared <code>priority raw</code>; the place for <code>notrack</code> and for <code>nftrace</code></td></tr>
+<tr><td><code>CONNTRACK</code></td><td>-200</td><td><code>ipv4_conntrack_in</code> at PRE_ROUTING, <code>ipv4_conntrack_local</code> at LOCAL_OUT</td></tr>
+<tr><td><code>MANGLE</code></td><td>-150</td><td>nftables chains declared <code>priority mangle</code></td></tr>
+<tr><td><code>NAT_DST</code></td><td>-100</td><td>Destination NAT: <code>nf_nat_ipv4_pre_routing</code>, <code>nf_nat_ipv4_local_fn</code></td></tr>
+<tr><td><code>FILTER</code></td><td>0</td><td>nftables chains declared <code>priority filter</code></td></tr>
+<tr><td><code>SECURITY</code></td><td>50</td><td>SELinux and friends</td></tr>
+<tr><td><code>NAT_SRC</code></td><td>100</td><td>Source NAT: <code>nf_nat_ipv4_out</code>, <code>nf_nat_ipv4_local_in</code></td></tr>
+<tr><td><code>CONNTRACK_CONFIRM</code></td><td>INT_MAX</td><td><code>nf_confirm</code> at POST_ROUTING and LOCAL_IN: the last word</td></tr>
+</tbody>
+</table>
+<p>The router trace makes the table concrete. At PRE_ROUTING on <code>r0</code> the SYN visits, in order: <code>ipv4_conntrack_defrag</code>, then <code>nft_do_chain_inet</code> for the lab's raw chain, then <code>ipv4_conntrack_in</code>, then <code>nf_nat_ipv4_pre_routing</code>, then <code>nft_do_chain_inet</code> again for the filter chain. Minus 400, minus 300, minus 200, minus 100, zero.</p>
+
+<h3>An nftables chain is one entry</h3>
+<p>Each nftables <b>base chain</b>, a chain declared with a hook and a priority, is registered as one entry whose function is <code>nft_do_chain_ipv4</code> or <code>nft_do_chain_inet</code> (<code>net/netfilter/nft_chain_filter.c:15</code>). It calls <code>nft_do_chain</code> (<code>net/netfilter/nf_tables_core.c:250</code>), which walks the rules (line 275), evaluates each rule's expressions, and acts on the rule's verdict: continue to the next rule, accept or drop the packet, or jump to another chain and come back through a small stack (line 322). When the walk finishes without a verdict, the chain's policy applies.</p>
+<p>This is the layer <code>nft monitor trace</code> shows. A rule containing <code>meta nftrace set 1</code> sets the bit at <code>skb-&gt;nf_trace</code> (<code>net/netfilter/nft_meta.c:501</code>), and every chain the skb enters afterwards reports through <code>nft_trace_packet</code> (lines 297 and 340) and <code>nft_trace_notify</code> (<code>net/netfilter/nf_tables_trace.c:238</code>). The bench output for one SYN reads, one line per event: the raw chain saw the packet on <code>r0</code>; the rule that set the trace bit matched with verdict continue; the raw chain's policy was accept; the prerouting chain's policy was accept; the forward chain saw it with <code>iif r0 oif r1</code>; the rule <code>ct state new counter</code> matched; and so on through postrouting. pwru saw those chains as five <code>nft_do_chain_inet</code> lines. The two tools are looking at the same walk from two altitudes.</p>
+
+<h3>Conntrack: a tuple, an entry, and a pointer in the skb</h3>
+<p>The entry at minus 200 is <code>ipv4_conntrack_in</code> (<code>net/netfilter/nf_conntrack_proto.c:208</code>), which calls <code>nf_conntrack_in</code> (<code>net/netfilter/nf_conntrack_core.c:2004</code>). Its first move (lines 2011 to 2018) is to check whether the skb already carries a conntrack pointer; a packet that has been through this hook before, for example one that came back in through <code>lo</code>, is accepted without a second lookup. Otherwise <code>resolve_normal_ct</code> (line 1862) builds the <b>tuple</b>: source and destination address, protocol, source and destination port (<code>nf_ct_get_tuple</code>, line 1876), and looks it up in the conntrack hash table.</p>
+<p>On a miss, <code>init_conntrack</code> (line 1898) allocates a <b>conntrack entry</b>, <code>struct nf_conn</code> (<code>include/net/netfilter/nf_conntrack.h:74</code>). The entry holds two tuples in <code>tuplehash</code> (line 96): the original direction, and the <b>reply tuple</b>, which starts as the original with source and destination swapped and is what a returning packet will be matched against. It also holds a status bitmap (line 99) and a timeout (line 89). Then lines 1907 to 1920 classify the packet: a reply-direction match is <code>IP_CT_ESTABLISHED_REPLY</code>; an original-direction match on an entry that has seen a reply is <code>IP_CT_ESTABLISHED</code>; an expected connection is <code>IP_CT_RELATED</code>; a fresh entry is <code>IP_CT_NEW</code>. <code>nf_ct_set</code> (line 1921) packs the entry pointer and that classification into <code>skb-&gt;_nfct</code>, the field from chapter 0's table, and <code>nf_ct_get</code> (<code>nf_conntrack.h:169</code>) unpacks it. A protocol handler, <code>nf_conntrack_tcp_packet</code> in the trace, then runs the TCP state machine on the entry.</p>
+<p>The entry is not yet in the hash table. It is <b>unconfirmed</b> until the packet reaches the entry with priority <code>INT_MAX</code>, <code>nf_confirm</code>, registered at both LOCAL_IN and POST_ROUTING (<code>nf_conntrack_proto.c:240</code> to 265), which calls <code>__nf_conntrack_confirm</code> (<code>nf_conntrack_core.c:1179</code>) to insert it. The delay is deliberate. A packet that a filter chain drops never creates an entry, and NAT gets a chance to rewrite the reply tuple before anyone can look it up. Meanwhile every chain with a priority above minus 200 can read <code>ct state</code> from <code>skb-&gt;_nfct</code>: that is why <code>ct state new</code> works in a filter chain at zero and matches nothing useful in a raw chain at minus 300, where <code>skb-&gt;_nfct</code> is still empty and the expression evaluates to invalid (<code>net/netfilter/nft_ct.c:74</code>).</p>
+<p>The <code>conntrack -L</code> line for the lab connection reads the entry back: protocol, timeout, TCP state, the original tuple, then the reply tuple, then <code>[ASSURED]</code> once both directions have been seen. When no NAT is involved the reply tuple is the mirror of the original. The next section changes that.</p>
+
+<h3>NAT: decided once, applied every time</h3>
+<p>NAT is four hook entries, <code>nf_nat_ipv4_ops</code> (<code>net/netfilter/nf_nat_proto.c:766</code> to 795): destination NAT at PRE_ROUTING and LOCAL_OUT with priority minus 100, source NAT at POST_ROUTING and LOCAL_IN with priority 100. All four call <code>nf_nat_inet_fn</code> (<code>net/netfilter/nf_nat_core.c:898</code>). It reads the conntrack entry from the skb (line 907) and switches on the classification (line 918).</p>
+<p>For a <code>NEW</code> packet whose entry has no NAT mapping yet for this direction (lines 918 to 941), it runs the <b>nat chains</b> registered at this hook, the nftables chains declared <code>type nat</code>, through <code>nft_nat_do_chain</code>. A rule such as <code>masquerade</code> calls <code>nf_nat_setup_info</code> (line 765), which chooses the new address and port and rewrites the entry's reply tuple to match. If no rule matched, a null mapping is recorded (lines 942 to 946) so the chains are never consulted again for this connection. Then, for this packet and for every later packet in either direction (the established branch at lines 955 to 960), <code>nf_nat_packet</code> (line 860) calls <code>nf_nat_manip_pkt</code> (<code>nf_nat_proto.c:357</code>) to rewrite the addresses, ports and checksums in the header. The mapping lives in the conntrack entry; the rules were consulted once.</p>
+<p>The bench shows it in the tuple column. With a masquerade rule on the router's <code>natpost</code> chain, the SYN reaches POST_ROUTING on <code>r1</code> reading <code>10.5.1.2:57158 to 10.5.2.2:8080</code>, passes the filter chain, enters <code>nf_nat_ipv4_out</code>, <code>nf_nat_inet_fn</code>, <code>nft_nat_do_chain</code>, <code>nf_nat_masquerade_ipv4</code>, then <code>nf_nat_manip_pkt</code> and two checksum updates, and from the next line reads <code>10.5.2.1:57158 to 10.5.2.2:8080</code>. Then <code>nf_confirm</code> inserts the entry with its rewritten reply tuple, which <code>conntrack -L</code> now shows as <code>src=10.5.2.2 dst=10.5.2.1</code>. When the SYN-ACK comes back on <code>r1</code> addressed to <code>10.5.2.1</code>, PRE_ROUTING finds the entry by that reply tuple, classifies the packet as an established reply, and <code>nf_nat_inet_fn</code> applies the inverse rewrite through <code>nf_nat_manip_pkt</code> with no chain walk at all; the tuple column flips back to <code>10.5.1.2</code> before <code>ip_rcv_finish_core</code> runs. That last clause is the reason the reverse translation lives at PRE_ROUTING: the routing decision must see the real destination, or it would deliver the SYN-ACK to the router's own stack.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  IN["ip_rcv_core"] ==> P1["defrag<br/>minus 400"] ==> P2["raw chain<br/>minus 300<br/>nftrace set here"] ==> P3["ipv4_conntrack_in<br/>minus 200<br/>writes skb nfct"] ==> P4["nf_nat_ipv4_pre_routing<br/>minus 100<br/>dst NAT, chains only if NEW"] ==> P5["filter chain<br/>zero<br/>ct state readable"] ==> OUT["ip_rcv_finish<br/>routing sees the rewritten address"]
+  style P3 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style P4 fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 5.1 — the PRE_ROUTING hook of the lab router, entry by entry.</strong> Notice that conntrack writes <code>skb-&gt;_nfct</code> before the NAT and filter entries read it, and that all of this finishes before the routing decision. The same five names appear in the pwru trace, in this order.</figcaption>
+</figure>
+
+<figure class="dia">
+<div class="mermaid">
+sequenceDiagram
+  participant CT as conntrack, minus 200
+  participant FLT as filter chain, zero
+  participant RT as routing decision
+  participant NAT as nf_nat_inet_fn, plus 100
+  participant CONF as nf_confirm, INT_MAX
+  Note over CT,CONF: first packet, client to server, no entry exists
+  CT->>CT: tuple lookup misses, allocate entry, ctinfo NEW, set skb nfct
+  CT->>FLT: ct state new matches, counter plus one
+  FLT->>RT: RTN_UNICAST, dst input = ip_forward
+  RT->>NAT: POST_ROUTING on r1
+  NAT->>NAT: no mapping yet: run nat chain, masquerade, setup_info rewrites reply tuple
+  NAT->>NAT: manip_pkt rewrites source to 10.5.2.1, fixes checksums
+  NAT->>CONF: insert entry into the hash table
+  Note over CT,CONF: reply, server to client, addressed to 10.5.2.1
+  CT->>CT: reply tuple hits, ctinfo ESTABLISHED_REPLY
+  CT->>NAT: PRE_ROUTING, minus 100: mapping exists, manip_pkt only, dst back to 10.5.1.2
+  NAT->>RT: routing sees 10.5.1.2, forwards out r0
+</div>
+<figcaption><strong>Diagram 5.2 — one connection through conntrack and masquerade.</strong> Notice that the nat chain runs once, on the first packet, and that the confirm happens after NAT has rewritten the reply tuple. Every later packet, in both directions, is rewritten from the entry without consulting a rule.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Watch the rule walk and the tuple rewrite on the router from chapter 4.</p>
+<pre><code># terminal 1: kernel functions in the router namespace, all modules included
+sudo pwru --all-kmods --filter-netns /run/netns/pp-rt 'tcp and port 8080'
+# terminal 2: the nftables rule walk (stdbuf keeps the output flowing when redirected)
+sudo ip netns exec pp-rt stdbuf -oL nft monitor trace
+# terminal 3: one request, then read the state
+sudo ip netns exec pp-c curl -s -o /dev/null http://10.5.2.2:8080/
+sudo ip netns exec pp-rt nft list chain inet lab forward
+sudo ip netns exec pp-rt conntrack -L
+# now add masquerade and repeat; watch the tuple column in terminal 1 change at POST_ROUTING
+sudo ip netns exec pp-rt nft add rule inet lab natpost oifname r1 masquerade
+sudo ip netns exec pp-rt conntrack -F
+sudo ip netns exec pp-c curl -s -o /dev/null http://10.5.2.2:8080/
+sudo ip netns exec pp-rt conntrack -L</code></pre>
+<p>Before masquerade the entry's reply tuple is the mirror of the original. After it, the reply tuple's destination is <code>10.5.2.1</code>, and the server's log shows requests from <code>10.5.2.1</code> instead of <code>10.5.1.2</code>. The <code>ct state new</code> counter grows by one per connection; the <code>established,related</code> counter by one per packet after the first.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A hook is an array of entries sorted by integer priority, walked by <code>nf_hook_slow</code>. Each nftables base chain is one entry. Conntrack, at minus 200, builds a tuple, finds or allocates an entry with an original and a reply tuple, and stores the entry and its classification in <code>skb-&gt;_nfct</code>; the entry is confirmed into the table only at the very end, by <code>nf_confirm</code> at <code>INT_MAX</code>. NAT, at minus 100 and plus 100, consults its chains only for the first packet of a connection, stores the mapping in the entry's reply tuple, and rewrites every packet from that mapping. Destination NAT and the reverse of source NAT run at PRE_ROUTING because the routing decision must see the translated address.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>hook entry, priority</dt><dd>A function pointer plus an integer; entries are walked in ascending order by <code>nf_hook_slow</code>.</dd>
+<dt>base chain</dt><dd>An nftables chain bound to a hook and priority; registered as one hook entry running <code>nft_do_chain</code>.</dd>
+<dt>tuple</dt><dd>Source address, destination address, protocol, source port, destination port; the conntrack key.</dd>
+<dt>conntrack entry, nf_conn</dt><dd>The tracked connection: original and reply tuples, status bits, timeout.</dd>
+<dt>reply tuple</dt><dd>The tuple a returning packet must match; rewritten by NAT, mirror of the original otherwise.</dd>
+<dt>ctinfo: NEW, ESTABLISHED, RELATED, ESTABLISHED_REPLY</dt><dd>The classification packed into <code>skb-&gt;_nfct</code> next to the entry pointer.</dd>
+<dt>unconfirmed, nf_confirm</dt><dd>An entry exists but is not in the hash table until the last entry at POST_ROUTING or LOCAL_IN inserts it.</dd>
+<dt>nf_nat_inet_fn</dt><dd>The one function behind all four NAT hook entries: run nat chains on the first packet, then rewrite from the mapping.</dd>
+<dt>nf_nat_setup_info, nf_nat_manip_pkt</dt><dd>Choose the mapping and store it in the reply tuple; rewrite one packet's header and checksums.</dd>
+<dt>nftrace, nf_trace</dt><dd>The bit a rule sets on the skb so every later chain reports its rule walk to <code>nft monitor trace</code>.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You move a <code>ct state new accept</code> rule from a chain with <code>priority filter</code> into a chain with <code>priority raw</code> on the same hook, and it stops matching. Nothing else changed. Why?</p>
+<details class="ans"><summary>Answer</summary>
+<p>At priority minus 300 the conntrack entry at minus 200 has not run yet, so <code>skb-&gt;_nfct</code> is still empty and the <code>ct state</code> expression evaluates to the invalid state (<code>net/netfilter/nft_ct.c:74</code>). Order within a hook is the integer priority, walked ascending by <code>nf_hook_slow</code> (<code>net/netfilter/core.c:620</code>). Anything that reads conntrack state must sit above minus 200; anything that wants to stop tracking, <code>notrack</code>, must sit below it, which is what raw is for.</p>
+<p>The near miss is "raw chains cannot use ct expressions". They can; the expression runs and returns invalid. The rule is not rejected, it is silently useless, which is worse.</p>
+</details>
+<p>2. After you add a masquerade rule, the nat chain's counter shows one packet per connection while the filter chain's counter shows dozens. A colleague concludes NAT is being skipped for most packets and the source addresses must be wrong. Are they?</p>
+<details class="ans"><summary>Answer</summary>
+<p>No. <code>nf_nat_inet_fn</code> (<code>net/netfilter/nf_nat_core.c:918</code> to 960) runs the nat chains only for a <code>NEW</code> packet whose entry has no mapping yet; it records the mapping in the entry's reply tuple through <code>nf_nat_setup_info</code>, and every later packet in both directions goes straight to <code>nf_nat_packet</code> and <code>nf_nat_manip_pkt</code> without touching a rule. The counter measures rule evaluations, and there is one per connection. Confirm with <code>conntrack -L</code>: the reply tuple carries the translated address for the whole connection.</p>
+<p>The near miss is expecting NAT counters to behave like filter counters. Filter chains run per packet; nat chains are a per-connection decision. That is also why changing a nat rule does not affect connections that already exist.</p>
+</details>
+<p>3. Trace the SYN-ACK of a masqueraded connection as it enters the router on <code>r1</code>, addressed to the router's own address <code>10.5.2.1</code>. Name the entry that rewrites it and explain what would happen if that rewrite ran after the routing decision instead of before it.</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>nf_nat_ipv4_pre_routing</code> at priority minus 100, through <code>nf_nat_inet_fn</code>, which finds the entry by the reply tuple, sees an established reply, and calls <code>nf_nat_manip_pkt</code> to put <code>10.5.1.2</code> back as the destination. This happens inside <code>ip_rcv</code>'s hook call, before <code>ip_rcv_finish</code> runs <code>ip_route_input_slow</code>. If the rewrite came after routing, the lookup would see <code>10.5.2.1</code>, a local address, return <code>RTN_LOCAL</code>, and deliver the SYN-ACK to the router's own TCP, which has no such connection and would answer with a reset. The bench trace shows the tuple column flip back to <code>10.5.1.2</code> two lines before <code>ip_rcv_finish_core</code>.</p>
+<p>The near miss is "the reverse NAT happens at POST_ROUTING, mirroring where the forward NAT happened". Source NAT's reverse is a destination rewrite, so it lives with destination NAT, at PRE_ROUTING, on the way in.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks">Netfilter hooks</a>, nftables wiki. The priority table and the per-family hook list; the numbers in this chapter come from the same enum it cites.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://people.netfilter.org/pablo/nf-hooks.png">Netfilter hooks diagram</a>, Pablo Neira Ayuso. One image; the hooks with the routing decisions between them, as the maintainer draws it.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/nf_conntrack-sysctl.html">Netfilter Conntrack Sysfs variables</a>, kernel documentation. Timeouts and table sizes; read <code>nf_conntrack_max</code> and the TCP timeouts when a table fills up.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://www.netfilter.org/projects/nftables/manpage.html">nft(8)</a>, netfilter.org. The chain types and priorities section, and the <code>ct</code> expression; reference, not reading.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://wiki.nftables.org/wiki-nftables/index.php/Ruleset_debug/tracing">Ruleset debug/tracing</a>, nftables wiki. How to read the trace lines this chapter quotes.</li>
+</ul>
+</div>
+</section>

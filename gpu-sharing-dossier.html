@@ -1,0 +1,1543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One GPU, Many Tenants — a GPU-sharing dossier</title>
+<style>
+:root{
+  --ink:#1b1f24; --ink-soft:#4a5560; --line:#dfe4ea; --bg:#fbfcfd; --panel:#fff;
+  --accent:#0b6bcb; --accent-soft:#e8f1fb; --warm:#b45309; --warm-soft:#fdf3e3;
+  --good:#0f7b6c; --good-soft:#e6f4f1; --code-bg:#f4f6f8;
+  /* one colour per layer tag */
+  --hw:#7c3aed; --fw:#be123c; --kernel:#0b6bcb; --cuda:#0f7b6c; --k8s:#b45309; --orch:#475569;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth; scroll-padding-top:1rem}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+code,pre,.mermaid{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.hero{background:linear-gradient(160deg,#0d1b2a,#12304d 55%,#0b6bcb);color:#eaf2fb;padding:3.2rem 1.5rem 2.6rem}
+.hero-in{max-width:1180px;margin:0 auto}
+.hero h1{font-size:2.5rem;line-height:1.15;margin:0 0 .5rem;letter-spacing:-.02em}
+.hero p.sub{font-size:1.1rem;margin:.2rem 0 1rem;color:#bcd4ee;max-width:62ch}
+.hero .meta{font-size:.85rem;color:#93b4d8}
+.wrap{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:255px 1fr;gap:2.5rem;padding:2rem 1.5rem 4rem}
+@media(max-width:900px){.wrap{grid-template-columns:1fr;gap:1rem}#toc{position:static!important;max-height:none!important}}
+#toc{position:sticky;top:1rem;align-self:start;max-height:calc(100vh - 2rem);overflow:auto;font-size:.86rem}
+#toc h2{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-soft);margin:1.2rem 0 .5rem}
+#toc ol{list-style:none;margin:0;padding:0}
+#toc a{display:block;padding:.32rem .5rem;border-radius:6px;color:var(--ink);text-decoration:none;border-left:3px solid transparent}
+#toc a:hover{background:var(--accent-soft);border-left-color:var(--accent)}
+#toc .num{color:var(--ink-soft);font-variant-numeric:tabular-nums;margin-right:.4rem}
+#toc .rt{display:block;font-size:.72rem;color:var(--ink-soft)}
+main{min-width:0;max-width:80ch}
+.chapter,.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:2rem 2.1rem;margin:0 0 2rem}
+@media(max-width:640px){.chapter,.card{padding:1.2rem}}
+.chapter>h2{font-size:1.85rem;line-height:1.2;margin:.2rem 0 .3rem;letter-spacing:-.015em}
+.chnum{display:inline-block;font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}
+.chmeta{font-size:.8rem;color:var(--ink-soft);margin:0 0 1.4rem;padding-bottom:1rem;border-bottom:1px solid var(--line)}
+h3{font-size:1.15rem;margin:2rem 0 .6rem;letter-spacing:-.01em}
+p{margin:0 0 1rem} b,strong{color:#111} a{color:var(--accent)}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:4px;font-size:.88em}
+pre{background:#0f1720;color:#e6edf3;padding:1rem 1.1rem;border-radius:10px;overflow:auto;font-size:.82rem;line-height:1.55}
+pre code{background:none;padding:0;color:inherit;font-size:1em}
+figure.dia{margin:1.8rem 0;padding:1.1rem;background:#fff;border:1px solid var(--line);border-radius:12px}
+figure.dia .mermaid{white-space:pre;overflow:auto;font-size:.78rem;color:#33404d;text-align:center}
+figure.dia figcaption{margin-top:.9rem;padding-top:.8rem;border-top:1px dashed var(--line);font-size:.85rem;color:var(--ink-soft)}
+aside.tryit{background:var(--warm-soft);border:1px solid #f0d9ae;border-left:4px solid var(--warm);border-radius:10px;padding:1rem 1.2rem;margin:1.6rem 0;font-size:.93rem}
+aside.tryit h4{margin:0 0 .5rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--warm)}
+.recap{background:var(--good-soft);border-radius:10px;padding:1rem 1.2rem;margin:2rem 0 1rem;font-size:.95rem}
+.recap h4{margin:0 0 .5rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--good)}
+.words{border:1px solid var(--line);border-radius:10px;padding:1rem 1.2rem;margin:1rem 0;font-size:.92rem}
+.words h4{margin:0 0 .6rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft)}
+.words dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:.35rem .9rem}
+@media(max-width:640px){.words dl{grid-template-columns:1fr}.words dd{margin-bottom:.5rem}}
+.words dt{font-weight:700;white-space:nowrap} .words dd{margin:0;color:var(--ink-soft)}
+.check{border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;padding:.9rem 1.2rem;margin:1rem 0;font-size:.93rem}
+.check h4{margin:0 0 .4rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.check p{margin:0 0 .4rem}
+details.ans{margin:.35rem 0 1rem;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:.5rem .85rem}
+details.ans>summary{cursor:pointer;font-size:.72rem;letter-spacing:.11em;text-transform:uppercase;color:var(--accent);font-weight:700;list-style:none}
+details.ans>summary::-webkit-details-marker{display:none}
+details.ans>summary::before{content:"\25B8  "}
+details.ans[open]>summary::before{content:"\25BE  "}
+details.ans[open]>summary{padding-bottom:.4rem;margin-bottom:.2rem;border-bottom:1px solid var(--line)}
+details.ans p{margin:.55rem 0;font-size:.9rem}
+details.ans p:last-child{margin-bottom:.15rem}
+#answerctl{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:999px;padding:.25rem .7rem}
+.refs{margin:1.2rem 0 0;font-size:.9rem}
+.refs h4{margin:0 0 .6rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft)}
+.refs ul{list-style:none;margin:0;padding:0}
+.refs li.ref{padding:.5rem 0;border-top:1px solid var(--line)}
+.tag{display:inline-block;font-size:.66rem;font-weight:700;letter-spacing:.08em;padding:.12rem .45rem;border-radius:4px;color:#fff;margin-right:.45rem;vertical-align:.08em}
+.tag.HW{background:var(--hw)} .tag.FW{background:var(--fw)} .tag.KERNEL{background:var(--kernel)}
+.tag.CUDA{background:var(--cuda)} .tag.K8S{background:var(--k8s)} .tag.ORCH{background:var(--orch)}
+.note{font-size:.85rem;color:var(--ink-soft);font-style:italic}
+table{border-collapse:collapse;width:100%;margin:1.4rem 0;font-size:.88rem}
+th,td{border:1px solid var(--line);padding:.5rem .65rem;text-align:left;vertical-align:top}
+th{background:var(--code-bg);font-size:.8rem}
+#filters button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:999px;padding:.25rem .7rem;margin:.15rem .25rem .15rem 0}
+#filters button.off{opacity:.35}
+.path{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+@media(max-width:640px){.path{grid-template-columns:1fr}}
+.path div{border:1px solid var(--line);border-radius:10px;padding:.9rem 1rem;font-size:.9rem}
+footer{border-top:1px solid var(--line);padding:2rem 1.5rem;text-align:center;color:var(--ink-soft);font-size:.85rem}
+@media print{.hero{background:#fff;color:#000}#toc{display:none}.wrap{display:block}.chapter{border:none;padding:0;page-break-after:always}}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-in">
+    <h1>One GPU, Many Tenants</h1>
+    <p class="sub">Follow a single kernel launch from a process down to the silicon, and learn every way an NVIDIA GPU can be shared — time-slicing, MPS, MIG, vGPU, and HAMi — from the hardware up to Kubernetes.</p>
+    <p class="meta">11 chapters · ~21,000 words · ~105 minutes · 13 diagrams · written August 2026, revised September 2026</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#how-to-read"><span class="num">—</span>How to read this<span class="rt">3 min</span></a></li>
+      <li><a href="#ch0"><span class="num">0</span>One GPU, many tenants<span class="rt">10 min · HW</span></a></li>
+      <li><a href="#ch1"><span class="num">1</span>The silicon: what there is to slice<span class="rt">11 min · HW</span></a></li>
+      <li><a href="#ch2"><span class="num">2</span>How a launch reaches the silicon<span class="rt">10 min · CUDA KERNEL</span></a></li>
+      <li><a href="#ch3"><span class="num">3</span>The driver and the firmware<span class="rt">9 min · KERNEL FW</span></a></li>
+      <li><a href="#ch4"><span class="num">4</span>Time-slicing: sharing by default<span class="rt">10 min · HW KERNEL</span></a></li>
+      <li><a href="#ch5"><span class="num">5</span>MPS: many processes, one context<span class="rt">9 min · CUDA</span></a></li>
+      <li><a href="#ch6"><span class="num">6</span>MIG: cutting the silicon<span class="rt">9 min · HW FW</span></a></li>
+      <li><a href="#ch7"><span class="num">7</span>vGPU: the VF returns<span class="rt">11 min · FW KERNEL</span></a></li>
+      <li><a href="#ch8"><span class="num">8</span>Kubernetes plumbing<span class="rt">9 min · K8S</span></a></li>
+      <li><a href="#ch9"><span class="num">9</span>HAMi: slicing without hardware help<span class="rt">10 min · ORCH</span></a></li>
+      <li><a href="#ch10"><span class="num">10</span>Epilogue: choosing, and the traps<span class="rt">8 min · all layers</span></a></li>
+      <li><a href="#glossary"><span class="num">—</span>Merged glossary<span class="rt">reference</span></a></li>
+      <li><a href="#references"><span class="num">—</span>All references<span class="rt">reference</span></a></li>
+    </ol>
+  </nav>
+  <main>
+    <section id="how-to-read" class="card">
+      <h2>How to read this</h2>
+      <p>This document explains how one physical NVIDIA GPU gets shared between tenants that do not trust each other — virtual machines, containers, or plain processes. It covers five sharing techniques and the full stack under them: the silicon, the firmware, the kernel driver, the CUDA libraries, and the Kubernetes machinery on top.</p>
+      <div class="path">
+        <div><b>Path 1 — straight through.</b> The intended way. Chapters build on each other: every technical term is defined before it is used, and each chapter follows the same kernel launch a little further down the stack. Roughly 105 minutes.</div>
+        <div><b>Path 2 — hop by layer.</b> Already know a layer? Use the coloured tags. <span class="tag HW">HW</span> silicon · <span class="tag FW">FW</span> GPU firmware · <span class="tag KERNEL">KERNEL</span> host kernel driver · <span class="tag CUDA">CUDA</span> user-space GPU stack · <span class="tag K8S">K8S</span> Kubernetes · <span class="tag ORCH">ORCH</span> third-party orchestrators.</div>
+      </div>
+      <p><b>The vocabulary rule.</b> Every term of art appears in <b>bold</b> exactly once — at the place it is defined — and never earlier. If you meet a word you do not remember, search backwards; its definition is guaranteed to be behind you, and the merged glossary at the end lists them all by chapter. This document assumes you have read the SR-IOV dossier: PCIe, physical and virtual functions, the IOMMU, VFIO, and Kubernetes device plugins are used here without ceremony.</p>
+      <p><b>Check yourself, and how to use it.</b> Every chapter ends with two or three questions, and each one carries its answer behind a toggle. Answer out loud first, in full sentences, and only then open it. A question you can half-answer is the one worth re-reading the chapter for. If you would rather be quizzed properly, hand this file to an agent running the Alvar <code>probe</code> skill and ask it to quiz you chapter by chapter: it asks through a real question tool, scores your reasoning rather than your letter, and writes what it found to <code>.alvar/maps/</code>. <button id="answerctl" type="button">Open all answers</button></p>
+      <p id="filters"><b>Filter references by layer:</b><br>
+        <button data-l="HW">HW</button>
+        <button data-l="FW">FW</button>
+        <button data-l="KERNEL">KERNEL</button>
+        <button data-l="CUDA">CUDA</button>
+        <button data-l="K8S">K8S</button>
+        <button data-l="ORCH">ORCH</button>
+      </p>
+    </section>
+    <section id="ch0" class="chapter">
+      <span class="chnum">Chapter 0 · Prologue</span>
+      <h2>One GPU, many tenants</h2>
+      <p class="chmeta">~10 min · <span class="tag HW">HW</span> — Where we are: nowhere yet. Two tenants want one very expensive GPU. In this chapter we pick the single kernel launch we will follow for the rest of the document, and we meet the four families of tricks that let strangers share the machine.</p>
+
+      <p>An H100 costs as much as a nice car. Most of the time, in most clusters, it sits mostly idle. An inference service that answers a request every few hundred milliseconds might keep the chip busy 15% of the time. The other 85% is money evaporating. So the obvious question: can a second workload use the gaps?</p>
+      <p>On a CPU, this question was answered fifty years ago and nobody thinks about it anymore. The operating system interrupts whatever is running a hundred times a second, saves its registers, and hands the core to someone else. Memory is virtual, paged, and swappable. Two processes share a CPU so completely that neither can tell the other exists.</p>
+      <p>On a GPU, none of that machinery comes for free. This whole document is about what NVIDIA built instead, layer by layer, and what each option costs you in isolation, performance, and operational pain.</p>
+
+      <h3>The object we follow</h3>
+      <p>First, one word with two meanings, and we have to defuse it now. In GPU programming, a <b>kernel</b> is a function that runs on the GPU — one function, launched once, executed by thousands of threads in parallel. It has nothing to do with the Linux kernel. In this document, "kernel" or "the launch" always means the GPU function; the operating system is always "the host kernel".</p>
+      <p>We follow one kernel launch. Tenant A runs an inference service inside a container; somewhere in its code, a library calls into <b>CUDA</b> (<i>Compute Unified Device Architecture</i>, NVIDIA's programming model and software stack) and asks it to launch a kernel that multiplies two matrices. Tenant B, a stranger, wants the same physical GPU at the same time. Every chapter that follows watches this one launch travel a little further: into the driver, through the firmware, onto the silicon — and watches what stands between it and Tenant B at each layer.</p>
+      <p>Two more words we need before anything else. The GPU's compute power lives in an array of identical units called <b>SMs</b> — <i>streaming multiprocessors</i>. An SM is the closest thing a GPU has to a CPU core: it has schedulers, arithmetic units, registers, and a chunk of fast local memory. An A100 has 108 of them. And the GPU carries its own on-board memory, <b>VRAM</b> — tens of gigabytes soldered next to the die, separate from system RAM. Kernels read and write VRAM; getting data into VRAM from the host is a separate, explicit step.</p>
+
+      <h3>Why a GPU does not share like a CPU</h3>
+      <p>Three concrete reasons, and they shape everything downstream.</p>
+      <p><b>One: the state is enormous.</b> When the host kernel preempts a CPU process, it saves a few hundred bytes of registers. A running GPU kernel has state spread across 108 SMs — registers for tens of thousands of threads, local memory, in-flight cache lines. Stopping it mid-flight and swapping in someone else is possible on modern chips, but it is a heavyweight event that happens at millisecond scale. The time-slicing chapter (chapter 4) measures this.</p>
+      <p><b>Two: VRAM does not swap.</b> There is no page-out path to disk that anyone would tolerate. If Tenant A allocates 35 GB of a 40 GB card, Tenant B gets 5 GB and no negotiation. Whoever controls sharing must decide, up front, who gets how much physical memory — or lie to the tenants about it, and we will see both approaches.</p>
+      <p><b>Three: the GPU trusts its input.</b> A process talks to the GPU through a per-process bundle of GPU-side state called a <b>context</b>. Think of it as the GPU's version of an OS process; the launch-path chapter (chapter 2) makes this precise. Within a context, the hardware executes what it is given at full speed. Fine-grained supervision of the kind an OS does (checking, metering, intervening) would destroy exactly the throughput people buy GPUs for. So isolation has to be built in coarser, cheaper ways: walls in the silicon, walls in the driver, or a chaperone in the software stack.</p>
+      <p>This is the tension behind the whole field: <b>utilization</b> pulls you toward packing tenants tightly onto one chip; <b>isolation</b> pulls you toward giving each tenant its own walls — and every wall wastes some silicon. Each technique in this document is one point on that trade-off line.</p>
+
+      <h3>Four families of sharing</h3>
+      <p>Everything you will meet — and every product name you have seen on this topic — belongs to one of four families.</p>
+      <p><b>Take turns.</b> The GPU runs Tenant A's work, then Tenant B's, alternating. Nobody is walled off; the hardware just switches between contexts. This is <b>time-slicing</b>, the GPU's default behaviour, and the time-slicing chapter (chapter 4) shows it is both older and stranger than you expect. A cooperative variant, <b>MPS</b> (<i>Multi-Process Service</i>), lets multiple processes run <em>simultaneously</em> on the SMs by funnelling them through one shared context; that is the MPS chapter (chapter 5).</p>
+      <p><b>Split the silicon.</b> Draw a wall through the chip: these SMs and this slice of VRAM are yours, those are mine, and the two halves run at the same time without touching. This is <b>MIG</b> (<i>Multi-Instance GPU</i>), a hardware feature of A100 and newer, and it is the MIG chapter (chapter 6).</p>
+      <p><b>Fake whole GPUs.</b> Give each virtual machine what looks like a complete GPU — its own device, its own driver inside the guest — while the host multiplexes them onto one physical chip. This is <b>vGPU</b>, NVIDIA's GPU virtualization product, and if you are coming from the SR-IOV dossier you will recognise the shape of the vGPU chapter (chapter 7) immediately.</p>
+      <p><b>Police the library calls.</b> Change nothing in the hardware or driver. Instead, slip an interception layer between the tenant's code and CUDA, and have it enforce made-up limits: refuse allocations past a memory quota, slow a tenant that used too much compute. This is what <b>HAMi</b>, an open-source Kubernetes middleware, does, and the HAMi chapter (chapter 9) dissects how a pure software trick can impersonate a hardware feature.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph F1["1 · Take turns"]
+    A1["Tenant A"] ==> G1["whole GPU<br/>all SMs, all VRAM"]
+    B1["Tenant B"] -.->|"waits its turn"| G1
+  end
+  subgraph F2["2 · Split the silicon"]
+    A2["Tenant A"] ==> G2A["its own SMs, its own VRAM"]
+    B2["Tenant B"] ==> G2B["its own SMs, its own VRAM"]
+  end
+  subgraph F3["3 · Fake whole GPUs"]
+    A3["Tenant A VM"] ==> V1["virtual GPU"]
+    B3["Tenant B VM"] ==> V2["virtual GPU"]
+    V1 ==> G3["one physical GPU"]
+    V2 ==> G3
+  end
+  subgraph F4["4 · Police the calls"]
+    A4["Tenant A"] ==> L4["interceptor library"]
+    B4["Tenant B"] ==> L4
+    L4 ==> G4["whole GPU"]
+  end
+  style G2A fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style G2B fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style L4 fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 0.1 — The four families of GPU sharing.</b> Notice what varies: in family 1 both tenants see and (eventually) get the whole GPU; in family 2 each gets a real, walled-off piece; in family 3 each <em>sees</em> a whole GPU but gets a share; in family 4 the hardware is untouched and a library (amber) enforces limits that exist only in software. Thick arrows are the everyday data path; the dotted arrow is time spent waiting.</figcaption>
+      </figure>
+
+      <p>One honest warning before we start descending. These families compose (you can run vGPU on top of MIG, or time-slicing inside a MIG slice), and the marketing names do not tell you which layer does what. Untangling exactly that is one of this document's jobs, and by the vGPU chapter (chapter 7) you will have a single diagram that settles it.</p>
+      <p><b>What this document skips, deliberately:</b> graphics, display, and video workloads (we are compute-only); multi-GPU topics (NVLink, NVSwitch, tensor parallelism), which are about combining GPUs, a different problem; AMD and Intel GPUs; and the economics of buying versus renting. All real, all out of scope.</p>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A GPU cannot be shared the way a CPU is: its execution state is too big to swap cheaply, its VRAM does not page, and per-instruction supervision would destroy throughput. Every sharing scheme is one of four families, take turns (time-slicing, MPS), split the silicon (MIG), fake whole GPUs (vGPU), or police the library calls (HAMi), each trading isolation against utilization differently. We will follow one kernel launch from Tenant A's container down to the silicon, and watch what separates it from Tenant B at every layer.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>kernel (GPU)</dt><dd>one function launched onto the GPU, executed by thousands of parallel threads; unrelated to the host kernel</dd>
+          <dt>CUDA</dt><dd>Compute Unified Device Architecture — NVIDIA's programming model and software stack for GPU compute</dd>
+          <dt>SM</dt><dd>streaming multiprocessor — the GPU's core-like unit; an A100 has 108</dd>
+          <dt>VRAM</dt><dd>the GPU's on-board memory, separate from system RAM; not swappable in practice</dd>
+          <dt>context (GPU)</dt><dd>per-process bundle of GPU-side state — the GPU's version of an OS process (precise definition in the launch-path chapter)</dd>
+          <dt>time-slicing</dt><dd>sharing family 1: tenants alternate use of the whole GPU</dd>
+          <dt>MPS</dt><dd>Multi-Process Service — cooperative variant of family 1 where processes share the SMs simultaneously through one shared context</dd>
+          <dt>MIG</dt><dd>Multi-Instance GPU — sharing family 2: the silicon is partitioned into walled-off pieces</dd>
+          <dt>vGPU</dt><dd>NVIDIA's GPU virtualization product — sharing family 3: each VM sees a fake whole GPU</dd>
+          <dt>HAMi</dt><dd>open-source Kubernetes middleware — sharing family 4: a library intercepts CUDA calls and enforces software-only limits</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. For each of the four families: does Tenant A ever physically hold the <em>whole</em> GPU, and does Tenant A ever <em>see</em> anything other than a whole GPU?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Take turns: holds yes, sees a whole GPU. During its slice Tenant A owns every SM and all of VRAM. Split the silicon: holds no, sees a fraction. Tenant A gets only its instance's SM slices and memory slices, and the device it sees is that instance. Fake whole GPUs: holds no, sees a whole GPU. The VM sees a complete device, but behind it is a share of one chip. Police the calls: holds yes, sees a fraction. The hardware is untouched, so Tenant A's kernels can occupy the whole GPU, but the interceptor makes <code>nvidia-smi</code> report a smaller card.</p>
+          <p>Check it against the four-families diagram (diagram 0.1). The near miss is saying MPS lets tenants hold the whole GPU at once. They share it in the same instant, which is the MPS chapter's point, but none of them holds all of it.</p>
+        </details>
+        <p>2. Your workload allocates 35 GB on a 40 GB card and your neighbour needs 20 GB. Which of the three "why GPUs don't share like CPUs" reasons applies here, and which families can even express a rule about it?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The second reason: VRAM does not swap. There is no page-out path, so once 35 GB is allocated the remaining 5 GB is all the neighbour can get, and its 20 GB request fails with an out-of-memory error. Only families that decide memory up front can express a rule. Split the silicon (MIG) makes it a hard hardware limit per instance. Fake whole GPUs (vGPU) fixes VRAM per profile. Police the calls (HAMi) keeps a ledger and refuses allocations past a quota. Take turns cannot express it: time-slicing has no quota, and MPS's pinned-memory limit is an advisory environment variable.</p>
+          <p>Check it in the epilogue's choosing table, row "VRAM quota". The near miss is blaming the first reason, state size. State size makes context switches expensive; it says nothing about capacity.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://developer.nvidia.com/blog/improving-gpu-utilization-in-kubernetes/">Improving GPU Utilization in Kubernetes</a> — NVIDIA technical blog, June 2022. The canonical comparison table of time-slicing, MPS, MIG and vGPU. Read after the vGPU chapter (chapter 7), when every row of that table means something.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://developer.nvidia.com/blog/maximize-ai-infrastructure-throughput-by-consolidating-underutilized-gpu-workloads/">Maximize AI Infrastructure Throughput by Consolidating Underutilized GPU Workloads</a> — NVIDIA technical blog, March 2026. Fresh benchmarks of time-slicing versus MIG on Kubernetes; useful for the "is sharing worth it" business case. Skim now, reread after the MIG chapter (chapter 6).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch1" class="chapter">
+      <span class="chnum">Chapter 1</span>
+      <h2>The silicon: what there is to slice</h2>
+      <p class="chmeta">~11 min · <span class="tag HW">HW</span> — Last chapter we chose the object we follow: one kernel launch, headed for the GPU. Before we can follow it, we need a map of the machine it is about to enter, because every sharing technique later is a different way of carving up exactly the units named here.</p>
+
+      <p>This chapter is a guided tour of a data-center GPU die, using the A100 as the reference model and noting where the H100 differs. We stay functional: what each unit does and how many there are. No transistor counts, no clock domains, no electrical anything. The reason for the tour is blunt: <b>MIG, in the MIG chapter (chapter 6), is a list of which of these units each tenant gets</b>, and it makes no sense until you can name them.</p>
+
+      <h3>The compute hierarchy</h3>
+      <p>The SMs from the prologue come in a strict hierarchy of identical, repeated blocks. From the top: the die contains 8 <b>GPCs</b>, <i>graphics processing clusters</i>, the largest repeated block, each effectively a small self-contained GPU. Each GPC contains up to 8 <b>TPCs</b>, <i>texture processing clusters</i>, and each TPC contains 2 SMs. Full GA100 silicon would give 8 × 8 × 2 = 128 SMs; the A100 you can buy ships with 108 enabled (chip yields are never perfect, so some blocks are fused off). The H100 SXM ships with 132.</p>
+      <p>Inside an SM are the execution resources: thousands of registers, schedulers, a slab of fast local memory, 64 <b>CUDA cores</b> (the plain arithmetic units, working in FP32, the 32-bit floating-point format that is the everyday precision of GPU arithmetic) and 4 <b>tensor cores</b>, wide matrix-multiply units that do the heavy lifting for machine learning. The SM executes threads in fixed bundles of 32 called <b>warps</b>: 32 threads marching through the same instruction together. When our kernel launches with, say, a million threads, the hardware chops them into <b>thread blocks</b>, fixed-size groups of threads, sized by the programmer, that the hardware places on one SM as a unit. It hands blocks to SMs, and each SM runs its blocks warp by warp.</p>
+      <p>One unit sits above all the GPCs: the <b>work distributor</b> (NVIDIA's manuals call it the GigaThread Engine), the dispatcher that takes an incoming kernel launch and deals its thread blocks out to SMs with free capacity. Remember it — it is a chokepoint every sharing scheme has to reckon with, because <em>all</em> compute work enters through it.</p>
+
+      <h3>The memory system</h3>
+      <p>VRAM on these cards is <b>HBM</b> — <i>high-bandwidth memory</i> — DRAM dies stacked vertically and placed on the same package as the GPU, millimetres from the die. An A100 carries 40 or 80 GB of it in five or six stacks; H100 moves to faster HBM3. The reward for the exotic packaging is bandwidth: about 2 TB/s on A100, roughly twenty times a server CPU's memory bandwidth.</p>
+      <p>Between the SMs and the HBM sit two things. First, a 40 MB <b>L2 cache</b> (50 MB on H100), and the detail that matters for us is that it is physically built as independent <b>slices</b>, each slice caching one region of VRAM. Second, the <b>memory controllers</b>, each driving one portion of the HBM. A wide <b>crossbar</b>, an any-to-any on-die switch, connects every SM to every L2 slice. So one byte travelling from an SM to VRAM crosses: SM → crossbar → L2 slice → memory controller → HBM stack.</p>
+      <p>Now the observation this chapter exists for. Compute comes in 8 repeated blocks (GPCs). The L2 comes in slices. The HBM hangs off independent controllers. For MIG's purposes, the memory system divides into <b>8 equal memory slices</b>: one eighth of the VRAM plus the L2 slices and controller bandwidth that serve it. Nothing on this die is one monolithic lump; it is all countable, repeated units, and a wall between tenants only needs to decide which units fall on which side. That is a consequence of how you must build anything this big, and it is the entire hardware basis of the MIG chapter (chapter 6).</p>
+
+      <h3>The other engines</h3>
+      <p>SMs are not the only things that do work. The die carries a set of independent <b>engines</b> that run alongside compute. The ones that matter here: <b>copy engines</b> — DMA engines that move data between host RAM and VRAM (and between GPUs) while the SMs keep computing; and <b>NVDEC</b> units — fixed-function video decoders, plus JPEG decoders and an optical-flow unit, which matter to anyone feeding video into a model. If "DMA engine" rings an SR-IOV bell: same idea as a NIC's DMA, a device-side unit that reads and writes host memory across PCIe without the CPU touching a byte.</p>
+      <p>Counts again, because they will matter: the A100 has 5 NVDEC decoders; the H100 has 7. Seven is also the maximum number of MIG tenants, and the H100 count was chosen so that every tenant can get a decoder of its own, which the A100 could not offer.</p>
+
+      <h3>The generations you will hear named</h3>
+      <p>NVIDIA names each hardware generation after a scientist, and later chapters will say "Pascal onward" or "pre-Volta" as if you already knew the order. Here it is, with the one fact each generation contributes to this document. The left half is stable history; the part numbers and years are the drifting side, correct as of 2026.</p>
+      <table>
+        <tr><th>Generation</th><th>Year</th><th>Data-center part</th><th>What it adds to this document</th></tr>
+        <tr><td>Kepler</td><td>2012</td><td>K20, K80</td><td>a running kernel can only be interrupted between thread blocks (see the time-slicing chapter)</td></tr>
+        <tr><td>Maxwell</td><td>2014</td><td>M40, M60</td><td>same limit</td></tr>
+        <tr><td>Pascal</td><td>2016</td><td>P100</td><td>a running kernel can be stopped between any two instructions (see the time-slicing chapter)</td></tr>
+        <tr><td>Volta</td><td>2017</td><td>V100</td><td>MPS rebuilt so each client keeps its own address space (see the MPS chapter)</td></tr>
+        <tr><td>Turing</td><td>2018</td><td>T4</td><td>a small management CPU appears on the die and most of the driver moves onto it (see the driver-and-firmware chapter)</td></tr>
+        <tr><td>Ampere</td><td>2020</td><td>A100</td><td>MIG partitions; SR-IOV Virtual Functions for vGPU (see the MIG and vGPU chapters)</td></tr>
+        <tr><td>Hopper</td><td>2022</td><td>H100</td><td>7 NVDEC decoders, one per MIG tenant; VRAM encryption for tenants who distrust the operator (this chapter and the epilogue)</td></tr>
+        <tr><td>Blackwell</td><td>2024</td><td>B200</td><td>newer than anything measured here; the same units, larger counts</td></tr>
+      </table>
+      <p>Every GPU this document cares about is Turing or later. When a chapter says "since Volta" or "pre-Ampere", read it against this table.</p>
+
+      <h3>The way in</h3>
+      <p>Everything above is inside the chip. The way in is the <b>host interface</b>: the GPU's PCIe endpoint logic. From the SR-IOV dossier you already know what lives here — configuration space and BARs. The GPU exposes its control registers through BAR0, and something we did not see on NICs: a large <b>BAR1 aperture</b>, a PCIe window through which the <em>host</em> can read and write VRAM directly. The host interface also contains the machinery that fetches and dispatches commands from host memory — how exactly a kernel launch gets from a process's memory through this interface and onto the work distributor is the whole of the launch-path chapter (chapter 2).</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  HOST["host RAM + CPU"] ==>|"PCIe"| HI["host interface<br/>BAR0 registers · BAR1 aperture"]
+  subgraph DIE["A100 die, simplified"]
+    HI ==> WD["work distributor"]
+    WD ==> GPC1["GPC 1<br/>up to 16 SMs"]
+    WD ==> GPC2["GPC 2"]
+    WD ==> GPCn["... GPC 8"]
+    CE["copy engines"] === XBAR
+    DEC["NVDEC decoders x5"] === XBAR
+    GPC1 ==> XBAR["crossbar"]
+    GPC2 ==> XBAR
+    GPCn ==> XBAR
+    XBAR ==> L2["L2 cache 40 MB<br/>built as slices"]
+    L2 ==> MC["memory controllers"]
+  end
+  HI === CE
+  MC ==> HBM["HBM stacks — 40 or 80 GB VRAM"]
+  style GPC1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style L2 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 1.1 — The A100 die as a map of sliceable units.</b> Notice that every box comes in countable, identical copies: 8 GPCs of SMs (blue), an L2 built from slices (green), multiple memory controllers, 5 decoders. The MIG chapter (chapter 6) will draw tenant walls straight through this exact picture. All arrows here are data paths; the command path that <em>drives</em> this machine is the launch-path chapter's subject.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop GPU</h4>
+        <p>Your laptop GPU has the same anatomy at smaller scale. <code>nvidia-smi --query-gpu=name,memory.total,clocks.sm --format=csv</code> shows the card and its VRAM. For the SM count, build <code>deviceQuery</code> from the CUDA samples (<code>github.com/NVIDIA/cuda-samples</code>) and look for "Multiprocessors" — a laptop RTX 4060 reports 24 SMs to an A100's 108. Same hierarchy, same warp size of 32; only the counts change.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A data-center GPU is a hierarchy of repeated units: 8 GPCs holding TPCs holding SMs (108 on A100), fed by a work distributor that deals thread blocks to free SMs. Memory is stacked HBM behind memory controllers and a sliced L2, reachable from any SM through a crossbar; for partitioning purposes it divides into 8 equal memory slices. Independent copy engines and video decoders work alongside compute. The host reaches all of it through the PCIe host interface via BAR0 registers and the BAR1 VRAM aperture. Everything is countable — which is precisely what makes hardware partitioning possible.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>GPC</dt><dd>graphics processing cluster — largest repeated compute block; 8 per die, each a near-complete small GPU</dd>
+          <dt>TPC</dt><dd>texture processing cluster — block of 2 SMs; up to 8 per GPC</dd>
+          <dt>CUDA core</dt><dd>plain FP32 arithmetic unit inside an SM; 64 per SM</dd>
+          <dt>tensor core</dt><dd>wide matrix-multiply unit inside an SM; 4 per SM, does most ML arithmetic</dd>
+          <dt>warp</dt><dd>fixed bundle of 32 threads executing the same instruction together — the SM's unit of scheduling</dd>
+          <dt>thread block</dt><dd>programmer-sized group of threads placed on one SM as a unit; a launch is dealt out block by block</dd>
+          <dt>work distributor</dt><dd>die-level dispatcher (GigaThread Engine) that deals a kernel's thread blocks out to SMs</dd>
+          <dt>HBM</dt><dd>high-bandwidth memory — stacked DRAM on the GPU package; the physical form of VRAM here</dd>
+          <dt>L2 slice</dt><dd>independent section of the L2 cache, each caching one region of VRAM</dd>
+          <dt>memory controller</dt><dd>unit driving one portion of the HBM; several per die</dd>
+          <dt>crossbar</dt><dd>on-die any-to-any switch connecting every SM to every L2 slice</dd>
+          <dt>memory slice</dt><dd>one eighth of the memory system — VRAM share plus the L2 slices and controller bandwidth serving it; MIG's unit of memory partitioning</dd>
+          <dt>engine</dt><dd>independent non-SM work unit on the die: copy engines, decoders, and similar</dd>
+          <dt>copy engine</dt><dd>DMA engine moving data host↔VRAM in parallel with compute</dd>
+          <dt>NVDEC</dt><dd>fixed-function video decoder engine; 5 on A100, 7 on H100</dd>
+          <dt>host interface</dt><dd>the GPU's PCIe endpoint logic — BARs, command fetch; the way in</dd>
+          <dt>BAR1 aperture</dt><dd>PCIe window through which the host reads and writes VRAM directly</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace one byte from an SM to VRAM: name the four things it crosses, in order.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Crossbar, L2 slice, memory controller, HBM stack. The SM issues the access into the crossbar, the any-to-any on-die switch, which routes it to the L2 slice responsible for that address range. On a miss the slice forwards to the memory controller that drives the portion of HBM holding the address, and the controller reads or writes the stacked DRAM.</p>
+          <p>Check it against the die map (diagram 1.1), where the arrows run GPC to crossbar to L2 to memory controllers to HBM. The near miss is putting the work distributor on the path. It dispatches thread blocks to SMs before any of this and never sees a data access. A second near miss is letting each SM talk to "its" L2; every SM can reach every slice, which is why the crossbar exists.</p>
+        </details>
+        <p>2. The H100 has 7 NVDECs and the A100 has 5. Predict why 7, and predict which tenants on an A100 must go without one.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Seven is the maximum number of MIG instances per GPU, so with 7 decoders every instance can own one. On an A100 with 5 decoders and seven <code>1g.5gb</code> instances, two instances get no decoder, and any workload that decodes video on those two must fall back to the CPU or fail. Which two depends on the placement the firmware chooses, so treat it as "at most five of seven".</p>
+          <p>Check it in the MIG User Guide's per-profile tables, which list the engine counts each profile receives on A100 and on H100. The near miss is assuming decoders are shared across instances under MIG. They are engines, and a GPU instance's engines are private to it; that is what makes the count matter.</p>
+        </details>
+        <p>3. Which single unit does <em>every</em> kernel launch pass through before any SM sees work, and why does that make it interesting for the time-slicing chapter's kind of sharing?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The work distributor, NVIDIA's GigaThread Engine. Every launch, whatever context it came from, arrives there as a grid of thread blocks to be dealt out to SMs with free capacity. It matters for time-slicing because the granting of engine time happens just upstream of it: the runlist scheduler decides whose commands reach the work distributor, and while one TSG holds its turn the distributor deals only that tenant's blocks. It is also why MIG must give each instance its own work distributor, or two instances could not launch in the same instant.</p>
+          <p>Check it against the die map (diagram 1.1), where the work distributor is the only box between the host interface and the GPCs. The near miss is naming the host interface. It carries commands in, but which SMs run which blocks is the distributor's decision.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf">NVIDIA A100 Tensor Core GPU Architecture</a> — the A100 whitepaper (PDF). Read the GA100 architecture chapter for this chapter's map with real diagrams; save its Multi-Instance GPU chapter for after the MIG chapter (chapter 6).</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c">NVIDIA H100 Tensor Core GPU Architecture</a> — the H100 whitepaper (NVIDIA viewer page). Skim for what changed since A100: HBM3, 132 SMs, per-tenant decoders, confidential-computing hardware.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch2" class="chapter">
+      <span class="chnum">Chapter 2</span>
+      <h2>How a launch reaches the silicon</h2>
+      <p class="chmeta">~10 min · <span class="tag CUDA">CUDA</span> <span class="tag KERNEL">KERNEL</span> — Last chapter gave us the map of the die. Now our kernel launch finally moves: from a line of Python in Tenant A's container, through two libraries and one device file, to the work distributor. Watch closely where the host kernel appears on this path — and where it disappears.</p>
+
+      <p>Everything in this chapter happens on one machine, inside one process, with no sharing in sight. That is deliberate. You cannot understand how five different technologies interpose on the launch path until you have seen the undisturbed path once. This chapter is the "before" picture.</p>
+
+      <h3>Two libraries and a device file</h3>
+      <p>Tenant A's code calls a framework, the framework calls CUDA. That call arrives in the <b>CUDA runtime</b>, <code>libcudart</code>, the convenient high-level library that most applications link. The runtime is a wrapper; the real work happens one layer down in the <b>CUDA driver API</b>, <code>libcuda.so</code>, a proprietary library that ships <em>with the driver</em>; applications never bundle it. Its functions have a <code>cu</code> prefix, and the one we care about is <code>cuLaunchKernel</code>: it takes a function handle, a grid of thread blocks, and an argument buffer. Every kernel launch on every NVIDIA GPU, whatever the framework, funnels through this one narrow API. Hold that thought: a chokepoint that every process must pass through <em>in its own address space</em> is exactly where the HAMi chapter's technology (chapter 9) will choose to stand.</p>
+      <p>Below <code>libcuda</code>, the operating system. The driver exposes the GPU as device files: <code>/dev/nvidiactl</code> (the control node), <code>/dev/nvidia0</code> (the first GPU), and <code>/dev/nvidia-uvm</code> (memory management, more on it below). <code>libcuda</code> opens these and speaks to the kernel driver through ioctls — the catch-all "do something" system call on a device file. Through those ioctls it builds, once at startup, everything the process needs. Then it mostly stops calling the kernel. That "mostly" is the punchline of this chapter.</p>
+
+      <h3>The context: a process, GPU-side</h3>
+      <p>The prologue (chapter 0) promised a precise definition of the <b>context</b>. Here it is: a context is the GPU-side mirror of an OS process, created through those setup ioctls, made of three things.</p>
+      <p>First, an address space. The GPU has its own MMU, the <b>GMMU</b>, with its own page tables living in VRAM. Each context gets its own page tables, hence its own private <b>GPU virtual address space</b> — pointer 0x7f0 in Tenant A's context and the same pointer in Tenant B's context resolve to different physical VRAM, exactly like two host processes and the host MMU. This is the memory-isolation floor for everything in this document: even the crudest sharing scheme inherits it. When a kernel dereferences a bad pointer, the GMMU faults it — the GPU equivalent of a segfault.</p>
+      <p>Second, channels — next section. Third, a bag of bookkeeping state on the die and in the driver: engine state, fault buffers, settings.</p>
+      <p>There is a second memory system worth naming now: <b>UVM</b> — <i>unified virtual memory</i>, served by <code>/dev/nvidia-uvm</code>. It lets a process allocate "managed" memory that both CPU and GPU can touch; pages migrate to whichever side faults on them. It is optional and most inference workloads skip it, but it will make two cameo appearances later: squeezing more into VRAM than it physically holds, and one of the calls HAMi must intercept.</p>
+
+      <h3>Channels, pushbuffers, doorbells</h3>
+      <p>Now, how does <code>cuLaunchKernel</code> actually tell the GPU anything? If you are guessing "an ioctl per launch", that is the wrong answer, and the right one should feel familiar from the SR-IOV dossier.</p>
+      <p>Work reaches the GPU through a <b>channel</b>: a command queue in memory that the GPU's host interface reads. The commands sitting in that queue are called the <b>pushbuffer</b>: a stream of instructions like "set up this kernel, this grid, these arguments, go". During setup, the driver maps the channel's ring and its control registers <em>directly into the process's address space</em>, through the BARs. To submit work, <code>libcuda</code> writes pushbuffer commands into the ring with plain memory writes, then performs one MMIO write to a special register to say "there is new work". NVIDIA calls that register a <b>doorbell</b>, literally, in their own hardware documentation.</p>
+      <p>You have seen this machine before. A NIC's transmit path is a descriptor ring in memory plus a doorbell register; the driver writes descriptors, rings the doorbell, and the NIC's DMA engine fetches. Swap "descriptor" for "pushbuffer command" and it is the same design, for the same reason: per-operation system calls are too slow, so the kernel sets up a shared-memory mailbox once and gets out of the way. <b>After setup, a kernel launch involves zero system calls.</b> Run <code>strace</code> on a busy CUDA process and you will see it: a storm of ioctls at startup, then near-silence while the GPU runs flat out.</p>
+      <p>Let us say the absence list out loud, because it is the most consequential paragraph in this chapter. On the per-launch path, the only things that run are user-space memory writes and hardware. The host kernel, the driver and the CPU-side scheduler are all absent, and nobody with root privileges inspects a launch on its way to the silicon. Whatever polices tenants must therefore live somewhere else: inside the process as a library (the HAMi chapter, chapter 9), inside the hardware's own scheduler (the time-slicing and MIG chapters, chapters 4 and 6), or underneath the whole VM (the vGPU chapter, chapter 7). The host kernel had its chance at setup time, and setup time only.</p>
+
+      <h3>Who runs next: TSGs and the runlist</h3>
+      <p>One GPU, many contexts, each with channels demanding work. Something on the die must pick whose channel gets executed. Two structures do it. A context's channels are grouped into a <b>TSG</b>, a <i>time-slice group</i>: channels that share one scheduling turn (they belong to the same context, so there is nothing to protect between them). And the hardware keeps a <b>runlist</b>: the ordered list of TSGs the GPU's <b>runlist scheduler</b>, part of the host interface, walks through, giving each TSG its turn on the engines. The driver writes the runlist at setup; the hardware walks it at runtime, alone.</p>
+      <p>When the runlist scheduler grants a TSG its turn, that TSG's pushbuffer commands flow to the work distributor from the silicon chapter (chapter 1), which deals thread blocks to SMs. And with that, our launch has arrived: Python call → runtime → <code>cuLaunchKernel</code> → pushbuffer write → doorbell → runlist turn → work distributor → 108 SMs lighting up.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+    participant APP as Tenant A process with libcuda
+    participant K as host kernel driver
+    participant FE as GPU host interface
+    participant WD as work distributor and SMs
+    Note over APP,FE: setup — once per process
+    APP-->>K: open /dev/nvidiactl, /dev/nvidia0
+    APP-->>K: ioctls create context, GMMU page tables, channel
+    K-->>APP: channel ring and doorbell mapped into process
+    Note over APP,WD: runtime — every launch, no kernel involved
+    APP->>APP: cuLaunchKernel writes pushbuffer commands
+    APP->>FE: one MMIO write rings the doorbell
+    FE->>FE: runlist scheduler grants this TSG its turn
+    FE->>WD: fetch pushbuffer, hand over the kernel
+    WD->>WD: thread blocks dealt to free SMs
+        </div>
+        <figcaption><b>Diagram 2.1 — The undisturbed launch path.</b> Notice the horizontal line splitting the diagram: above it, setup ioctls through the host kernel, once; below it, the per-launch path never touches the kernel at all — user-space memory writes, one doorbell ring, and hardware scheduling. Every sharing technology in this document is a decision about where on this picture to stand.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop GPU</h4>
+        <p>Watch the kernel disappear from the hot path: <code>strace -f -c -e trace=ioctl,openat python3 -c "import torch; x=torch.rand(4096,4096,device='cuda'); [x.matmul(x) for _ in range(1000)]"</code>. The counter shows hundreds of ioctls — nearly all from startup — while a thousand matrix multiplies add almost none. Then look at <code>ls -l /dev/nvidia*</code> to see the device files this chapter named.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A launch goes framework → CUDA runtime → CUDA driver API (<code>cuLaunchKernel</code>). At startup, <code>libcuda</code> uses ioctls on <code>/dev/nvidia*</code> to build a context (private GMMU page tables, the memory-isolation floor; channels grouped into a TSG; bookkeeping) and gets the channel ring and doorbell mapped into the process. From then on, launches are pure user-space: write pushbuffer commands, ring the doorbell. The hardware's runlist scheduler walks the runlist of TSGs and feeds the work distributor. The host kernel sees setup and nothing else, so tenant policing must live in the process, in the hardware, or under the VM.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>CUDA runtime</dt><dd><code>libcudart</code> — the high-level CUDA library applications link against; wraps the driver API</dd>
+          <dt>CUDA driver API</dt><dd><code>libcuda.so</code> — proprietary library shipped with the driver; <code>cuLaunchKernel</code> and friends; the narrow funnel all GPU work passes through</dd>
+          <dt>context (precise)</dt><dd>GPU-side mirror of a process: private GMMU page tables, channels in a TSG, bookkeeping state</dd>
+          <dt>GMMU</dt><dd>the GPU's own MMU; per-context page tables in VRAM give each context a private GPU virtual address space</dd>
+          <dt>GPU virtual address space</dt><dd>per-context pointer space translated by the GMMU — same pointer, different tenant, different physical VRAM</dd>
+          <dt>UVM</dt><dd>unified virtual memory (<code>/dev/nvidia-uvm</code>) — managed memory that migrates between CPU and GPU on fault</dd>
+          <dt>channel</dt><dd>command queue in memory the GPU reads work from; mapped into the owning process at setup</dd>
+          <dt>pushbuffer</dt><dd>the stream of commands written into a channel — "run this kernel with this grid"</dd>
+          <dt>doorbell (GPU)</dt><dd>MMIO register a process writes to announce new pushbuffer work; same design as a NIC doorbell</dd>
+          <dt>TSG</dt><dd>time-slice group — a context's channels bundled into one scheduling unit</dd>
+          <dt>runlist</dt><dd>ordered list of TSGs the hardware walks to decide who runs next</dd>
+          <dt>runlist scheduler</dt><dd>host-interface hardware that walks the runlist and grants TSGs their turns</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace the full path: what happens between <code>cuLaunchKernel</code> returning in Tenant A's process and the first warp executing on an SM? Name every structure touched.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p><code>cuLaunchKernel</code> writes pushbuffer commands into the process's channel ring in memory, then makes one MMIO write to the doorbell register mapped into the process through a BAR. The host interface notices the doorbell; the runlist scheduler walks the runlist and, when Tenant A's TSG gets its turn, fetches the channel's pushbuffer. The commands reach the work distributor, which splits the kernel into thread blocks and deals them to SMs with free capacity, and each SM schedules its blocks warp by warp. Structures: channel, pushbuffer, doorbell, runlist, TSG, runlist scheduler, work distributor, SM.</p>
+          <p>Check it against the undisturbed launch path (diagram 2.1), below the horizontal line. The near miss is inserting an ioctl or the host kernel driver anywhere on this path. They appear only above the line, at setup.</p>
+        </details>
+        <p>2. Why can't the host kernel enforce a per-tenant compute quota by inspecting launches? What fact about the runtime path makes that structurally impossible?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Because a launch never enters the host kernel. After setup, the channel ring and the doorbell are mapped into the process's own address space, so submitting work is a memory write plus one MMIO store, both performed by the CPU without a system call. No kernel code runs per launch, so there is nothing for it to inspect, count or delay.</p>
+          <p>Check it with <code>strace -c -e trace=ioctl</code> on a busy CUDA process: ioctls at startup, near silence after. The near miss is proposing that the driver trap the doorbell page. It could unmap the page and take a fault per launch, but that puts a kernel entry on every launch and destroys the throughput the design exists for. That is why the time-slicing chapter's enforcement happens in hardware and the HAMi chapter's happens inside the process.</p>
+        </details>
+        <p>3. Two containers each run a CUDA process on the same GPU with no sharing technology configured. Can Tenant B read Tenant A's VRAM through a stray pointer? Which structure says no?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>No. The GMMU, the GPU's own memory management unit, translates every access through per-context page tables in VRAM, and Tenant B's context has mappings only for Tenant B's allocations. A stray pointer into Tenant A's range has no translation, so the GMMU faults and the kernel is terminated with an illegal memory access error. This is the memory-isolation floor every sharing scheme inherits.</p>
+          <p>Check it in the time-slicing chapter's discussion of Xids, where an illegal memory access is one of the contained errors. The near miss is crediting the host IOMMU. The IOMMU governs the GPU's DMA into host memory; accesses to VRAM never leave the die and are the GMMU's business alone.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EXEC.html">CUDA Driver API — Execution Control</a> — the real <code>cuLaunchKernel</code> signature. Skim once to see the funnel is as narrow as claimed; the full <a href="https://docs.nvidia.com/cuda/cuda-driver-api/index.html">Driver API reference</a> is the ground truth when you need any <code>cu*</code> call.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://github.com/NVIDIA/open-gpu-doc">NVIDIA/open-gpu-doc</a> — NVIDIA's published hardware-interface documentation (classes, methods, per-architecture registers). Only for the very curious: this is where "pushbuffer" and "doorbell" stop being words and become documented register interfaces.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch3" class="chapter">
+      <span class="chnum">Chapter 3</span>
+      <h2>The driver and the firmware: who is in charge</h2>
+      <p class="chmeta">~9 min · <span class="tag KERNEL">KERNEL</span> <span class="tag FW">FW</span> — Our launch crossed the host kernel exactly once, at setup. This chapter opens the box it crossed: the driver modules, the resource manager inside them, and the surprise that most of "the driver" no longer runs on the CPU at all.</p>
+
+      <p>Every sharing technology from the time-slicing chapter (chapter 4) onward is configured, enforced, or mediated by the software in this chapter. Time-slicing policy? Set here. MIG partitions? Created here. vGPU? Is, to a first approximation, <em>a licensed extension of</em> here. So before any of that, we need to know who "here" is.</p>
+
+      <h3>Three kernel modules and one big brain</h3>
+      <p>Run <code>lsmod | grep nvidia</code> on a GPU box and you will see the cast: <code>nvidia.ko</code>, the main driver; <code>nvidia-uvm.ko</code>, which implements UVM behind <code>/dev/nvidia-uvm</code>; and <code>nvidia-modeset.ko</code> plus <code>nvidia-drm.ko</code> for display — irrelevant on a server, ignored from here on.</p>
+      <p>Inside <code>nvidia.ko</code> is the core of the driver: the <b>Resource Manager</b>, <b>RM</b> for short, NVIDIA's name for the logic that owns the GPU. RM is an object system: contexts, channels, memory allocations and engines are all objects with handles, created and wired together by those setup ioctls from the launch-path chapter (chapter 2). When <code>libcuda</code> asked for a context, it was RM that allocated the GMMU page tables, carved out the channel, registered the TSG on the runlist. RM is also where the vocabulary of that chapter stops being per-process and becomes global: RM sees <em>all</em> contexts, all channels, all of VRAM.</p>
+      <p>Historically RM was infamous for its size — a million-plus lines of closed code in the kernel. Keep that thought; it explains what happened next.</p>
+
+      <h3>GSP: the driver moves onto the GPU</h3>
+      <p>The silicon chapter's die tour skipped one unit, on purpose. Modern NVIDIA GPUs, Turing generation (2018) and everything after, carry a <b>GSP</b>, a <i>GPU System Processor</i>: a RISC-V CPU core embedded on the GPU die itself. And since the Turing generation, NVIDIA's answer to "where should RM run?" has been: on the GPU's own core.</p>
+      <p>At boot, the kernel driver loads a firmware blob (find it at <code>/lib/firmware/nvidia/&lt;version&gt;/gsp*.bin</code>, tens of megabytes) onto the GSP. That firmware is <b>GSP-RM</b>: most of the Resource Manager, compiled for RISC-V, running <em>on the GPU</em>. What remains on the host is a thin client. When <code>libcuda</code> issues a setup ioctl, the host-side driver mostly packages it into an RPC message, posts it to a shared-memory queue, and waits for GSP-RM to do the real work — build the page tables, program the runlist — and reply. NVIDIA's driver documentation states the default plainly: "The GSP firmware will be used by default for all Turing and later GPUs" (toggle: the module parameter <code>NVreg_EnableGpuFirmware</code>).</p>
+      <p>Why move it? Two reasons, one boring and one that matters for this document. The boring one: offload and consistency. Driver logic is in one place, CPU overhead drops, and behaviour is identical across operating systems. The important one: <b>it puts the GPU's management logic behind a hardware boundary</b>. Code running on the host, even root, even a compromised kernel, cannot reach into GSP-RM's private state; it can only send messages. When the vGPU chapter (chapter 7) needs to give untrusted virtual machines pieces of a GPU, "the privileged manager runs on the die, out of everyone's reach" is exactly the foundation it stands on. If GSP-RM reminds you of the firmware-heavy design of ConnectX NICs from the SR-IOV dossier, the card that is really a small computer running its own OS, that is the correct instinct.</p>
+      <p>This modernisation is also what made NVIDIA's 2022 open-sourcing move possible: the <b>open GPU kernel modules</b> (<code>github.com/NVIDIA/open-gpu-kernel-modules</code>) publish the host-side kernel code under MIT/GPL — and they run <em>only</em> in GSP mode, because the proprietary logic stayed in the firmware blob. The proof of the GSP's instruction set is right there in that repository: the file <code>kernel_gsp_tu102.c</code> "prepares RISCV core to run GSP-RM". Note what stayed closed: the firmware itself, and the entire userspace (<code>libcuda</code>). Open kernel modules do not mean an open driver.</p>
+
+      <h3>NVML: the management path</h3>
+      <p>One more component. Everything so far served the <em>data plane</em>, getting work onto silicon. Administration goes through a separate library: <b>NVML</b>, the <i>NVIDIA Management Library</i>. It is the C library behind <code>nvidia-smi</code> (which is a CLI wrapper around it), and behind every Kubernetes component you will meet in the Kubernetes plumbing chapter (chapter 8). Query temperature, list processes, set clocks, and, crucially for us: <b>create and destroy MIG partitions, configure vGPU, read per-tenant utilization</b>. NVML calls travel the slow path (library, ioctl, RM, mostly GSP-RM) and that is fine, because management is rare and slow by nature.</p>
+      <p>So the full picture of "the driver" is a two-plane system, and it is worth one diagram before the sharing chapters start carving it up.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph US["user space"]
+    APP["Tenant A process<br/>CUDA runtime + driver API"]
+    SMI["nvidia-smi / NVML"]
+  end
+  subgraph HK["host kernel"]
+    NV["nvidia.ko — RM client"]
+    UVMKO["nvidia-uvm.ko"]
+  end
+  subgraph GPU["GPU die"]
+    GSP["GSP core — RISC-V<br/>running GSP-RM firmware"]
+    FE["host interface<br/>runlist scheduler + doorbells"]
+    ENG["work distributor, SMs, engines"]
+  end
+  APP -.->|"setup ioctls, once"| NV
+  SMI -.->|"management ioctls"| NV
+  NV -.->|"RPC over shared memory"| GSP
+  GSP -.->|"programs"| FE
+  APP ==>|"pushbuffer + doorbell, every launch"| FE
+  FE ==> ENG
+  style GSP fill:#fde8ec,stroke:#be123c,stroke-width:2px
+  style APP fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 3.1 — Two planes, one owner.</b> Notice the line weights: every dotted arrow is control plane, rare, slow, mediated by RM, which mostly runs in the GSP firmware (red); the one thick arrow is the data plane from the undisturbed launch path (diagram 2.1), going around the entire software stack. Sharing technologies differ mainly in which of these arrows they interpose on.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop GPU</h4>
+        <p><code>lsmod | grep nvidia</code> shows the module cast. <code>nvidia-smi -q | grep -iA1 gsp</code> shows the GSP firmware version actually running (an "N/A" means your card predates GSP or firmware mode is off). <code>ls -lh /lib/firmware/nvidia/$(modinfo -F version nvidia)/</code> shows the blobs themselves — note their size against a typical kernel module's.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>The host driver is <code>nvidia.ko</code> plus <code>nvidia-uvm.ko</code>; its core, the Resource Manager, owns every context, channel and byte of VRAM. On Turing and newer, most of RM runs as GSP-RM firmware on a RISC-V core on the die — the host kernel driver is a thin RPC client, which is what made the open kernel modules possible and what gives later chapters a management layer that no host software can reach around. Administration flows through NVML (under <code>nvidia-smi</code>), down the same control path. Control plane: dotted, rare, mediated. Data plane: thick, constant, untouched.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>Resource Manager (RM)</dt><dd>the driver's core logic — object system owning all contexts, channels, memory and engines</dd>
+          <dt>GSP</dt><dd>GPU System Processor — RISC-V CPU core on the GPU die, present since Turing</dd>
+          <dt>GSP-RM</dt><dd>the firmware build of RM that runs on the GSP; host driver becomes an RPC client to it</dd>
+          <dt>open GPU kernel modules</dt><dd>NVIDIA's published host-side kernel driver (MIT/GPL); GSP-only; firmware and userspace remain closed</dd>
+          <dt>NVML</dt><dd>NVIDIA Management Library — the control-plane C API under <code>nvidia-smi</code> and every k8s GPU component; also where MIG and vGPU get configured</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace an <code>nvidia-smi</code> temperature query end to end. Which pieces of silicon and software does it cross, and which arrow of the two-planes diagram does each hop use?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p><code>nvidia-smi</code> calls NVML; NVML issues an ioctl on <code>/dev/nvidiactl</code>; the RM client in <code>nvidia.ko</code> packages the request into an RPC message and posts it to the shared-memory queue; GSP-RM on the RISC-V core reads the sensor and replies over the same queue; the answer returns up through the ioctl to NVML and the terminal. Every hop is a dotted control-plane arrow in the two-planes diagram (diagram 3.1): user space to <code>nvidia.ko</code>, <code>nvidia.ko</code> to GSP. The thick data-plane arrow is never touched.</p>
+          <p>Check it with <code>strace nvidia-smi -q -d TEMPERATURE</code> for the ioctls, and <code>nvidia-smi -q | grep -iA1 gsp</code> for firmware mode. The near miss is routing the query through the doorbell or the runlist. Those carry work for the engines; management never uses them.</p>
+        </details>
+        <p>2. Before Turing, where did the code that builds GMMU page tables execute? After Turing? What single security property did that move create?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Before Turing, in the Resource Manager inside <code>nvidia.ko</code>, on the host CPU in kernel mode. From Turing onward, in GSP-RM, the same Resource Manager compiled for RISC-V and running as firmware on the GSP core on the die; the host driver only sends RPC messages. The property created: the privileged manager's state sits behind a hardware boundary, so host software, root and a compromised kernel included, cannot rewrite page tables or partitions directly. It can only ask.</p>
+          <p>Check it by finding the firmware blob under <code>/lib/firmware/nvidia/&lt;version&gt;/gsp*.bin</code>, and the module parameter <code>NVreg_EnableGpuFirmware</code> in NVIDIA's driver README. The near miss is saying the move made the driver open source. The open kernel modules were made possible by it, but the property that matters for sharing is the trust boundary, which the vGPU chapter relies on.</p>
+        </details>
+        <p>3. Predict: when the MIG chapter creates MIG partitions with <code>nvidia-smi</code>, which components from this chapter must be involved, in what order?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p><code>nvidia-smi</code>, then NVML, then an ioctl into <code>nvidia.ko</code>, then an RPC to GSP-RM, which programs the partition into the hardware and replies. The order follows the control plane: the CLI is a wrapper around NVML, NVML speaks to the host driver through the device files, and the host driver is a thin client of the firmware, which owns all GPU state. Nothing on the data plane is involved, and no tenant process needs to be running.</p>
+          <p>Check it against the MIG chapter's command block (<code>nvidia-smi -i 0 -mig 1</code>, then <code>nvidia-smi mig -cgi ...</code>) and the MIG User Guide, which configures partitions through NVML. The near miss is giving the host kernel driver the enforcing role. It relays the request; the firmware creates and polices the walls, which is why host software cannot rewire a partition quietly.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://download.nvidia.com/XFree86/Linux-x86_64/580.65.06/README/gsp.html">GSP Firmware — NVIDIA driver README, the GSP Firmware chapter</a> — NVIDIA's own explanation of the offload, defaults, and the toggle parameter. Two-minute read. (Versioned URL; swap the version number for newer releases. There is no <code>/latest/</code> alias.)</li>
+          <li class="ref" data-layer="KERNEL"><span class="tag KERNEL">KERNEL</span><a href="https://github.com/NVIDIA/open-gpu-kernel-modules">NVIDIA Linux Open GPU Kernel Module Source</a> — the README states the GSP requirement and supported GPUs; the source is the only public window into RM's object system. Browse after this chapter, don't read linearly.</li>
+          <li class="ref" data-layer="KERNEL"><span class="tag KERNEL">KERNEL</span><a href="https://developer.nvidia.com/blog/nvidia-releases-open-source-gpu-kernel-modules">NVIDIA Releases Open-Source GPU Kernel Modules</a> — the May 2022 announcement; read for the why and the what-stayed-closed.</li>
+          <li class="ref" data-layer="KERNEL"><span class="tag KERNEL">KERNEL</span><a href="https://docs.nvidia.com/deploy/nvml-api/index.html">NVML API Reference</a> — the management API itself. Reference material; open it when you build monitoring or need MIG/vGPU control programmatically.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch4" class="chapter">
+      <span class="chnum">Chapter 4</span>
+      <h2>Time-slicing: sharing by default</h2>
+      <p class="chmeta">~10 min · <span class="tag HW">HW</span> <span class="tag KERNEL">KERNEL</span> — We know the undisturbed launch path. Now Tenant B finally shows up with work of its own, and we configure precisely nothing: this chapter is what the hardware already does when two contexts want one GPU.</p>
+
+      <p>Here is a fact that surprises people who came to GPUs recently: two processes could always share an NVIDIA GPU, with no flags, products or Kubernetes involved. Start two CUDA programs on one card and both make progress. This zero-configuration behaviour is sharing family 1 from the prologue (chapter 0), it is what "time-slicing" means in every vendor document, and understanding exactly what it does, and the three things it refuses to do, is the baseline every later chapter improves on.</p>
+
+      <h3>Two TSGs walk into a runlist</h3>
+      <p>Rewind to the undisturbed launch path (diagram 2.1). Tenant A has a context, its channels grouped into a TSG, sitting on the runlist. Tenant B starts; the driver (GSP-RM, per the driver-and-firmware chapter) builds a second context and adds a second TSG to the runlist. Now the runlist scheduler has a decision to make, and its policy is unglamorous: <b>round-robin</b>. Grant TSG A the engines for one time slice — millisecond scale — then TSG B, then A again.</p>
+      <p>The crucial word is <em>the engines</em>, plural but exclusive: while TSG A holds its turn, A's kernels own the SMs. Two contexts do not execute compute simultaneously under time-slicing: Tenant B's beautifully parallel kernel waits its full turn even if Tenant A is using three SMs out of 108. The GPU alternates between tenants wholesale. This is the single most important sentence in the chapter, because it is the exact inefficiency the MPS and MIG chapters (chapters 5 and 6) exist to fix.</p>
+
+      <h3>What a context switch costs</h3>
+      <p>At the end of A's slice, the hardware performs a <b>GPU context switch</b>: save everything the running context has on the engines, restore B's. "Everything" is far more than a CPU's few hundred bytes of registers. It is the architectural state of up to 108 SMs — register files for tens of thousands of live threads, shared memory contents, scheduler state — written out to dedicated preemption buffers in VRAM, megabytes of it. A GPU context switch is a bulk memory operation. It works, it is invisible to the tenants, and it is orders of magnitude heavier than what your OS does between processes.</p>
+      <p>And there is a subtler question: <em>when</em> can the hardware interrupt a running kernel? On Kepler and Maxwell (pre-2016), the honest answer was "at thread-block boundaries": a kernel whose blocks each ran for minutes could not be preempted mid-block, so one tenant's long kernel blocked everyone. Pascal fixed this in silicon. The P100 whitepaper states it plainly: compute tasks can now be "preempted at instruction-level granularity, rather than thread block granularity as in prior Maxwell and Kepler GPU architectures". This is <b>compute preemption</b>: stop a kernel between any two instructions, save state, resume later as if nothing happened. Every GPU in this document (Turing onward) has it, and it is the quiet hardware foundation that makes time-slicing between strangers tolerable at all.</p>
+
+      <h3>The three refusals</h3>
+      <p>Now the honest ledger. Time-slicing gives each tenant the whole GPU, alternately, with the GMMU keeping their address spaces private. What it refuses to do:</p>
+      <p><b>It refuses to partition memory capacity.</b> Both contexts allocate from the same physical VRAM pool, first come, first served. Tenant A takes 35 GB of a 40 GB card; Tenant B's <code>cudaMalloc</code> for 10 GB returns an out-of-memory error, full stop. Nothing arbitrates: the driver has no quota to apply and no eviction path, because, as the prologue said, VRAM does not swap.</p>
+      <p><b>It refuses to guarantee performance.</b> Round-robin shares <em>turns</em>; what each tenant gets from its turns depends on who else is running. Add a third tenant and everyone's throughput drops by a third with no warning; a tenant that launches storms of kernels gets exactly as many turns as one that sips. Nothing meters compute consumed.</p>
+      <p><b>It refuses to fully contain failures.</b> Time to define a word you will grep for in anger one day. When the driver hits a serious error, it logs an <b>Xid</b> — a numbered error report in the kernel log (<code>dmesg | grep Xid</code>), each number a diagnosis. Many are contained: an illegal memory access kills the offending context and the neighbour never notices. Some are not: an Xid reporting the GPU fell off the PCIe bus, or a firmware halt, takes down <em>every</em> context on the card, innocent or not. Under time-slicing, tenants share one blast radius for the worst failures.</p>
+
+      <h3>Kubernetes discovers the oldest trick</h3>
+      <p>The Kubernetes plumbing chapter (chapter 8) owns the full Kubernetes picture, but one piece belongs here because it is pure time-slicing under a different name. The NVIDIA device plugin normally advertises each physical GPU as one <code>nvidia.com/gpu</code>. Its <b>time-slicing mode</b> is a config entry:</p>
+<pre><code>version: v1
+sharing:
+  timeSlicing:
+    resources:
+    - name: nvidia.com/gpu
+      replicas: 4</code></pre>
+      <p>One physical GPU now advertises as four schedulable <b>replicas</b> — <b>oversubscription</b>, turned into scheduler inventory. What enforcement machinery stands behind that number? None. Four pods are scheduled onto the node, each opens a context, and the hardware round-robins them exactly as this chapter described: same unpartitioned VRAM, same shared blast radius. The <code>replicas</code> count is an admission-control fiction for the scheduler; the device plugin even has a config flag (<code>failRequestsGreaterThanOne</code>) whose only job is to stop users from believing that requesting two replicas gets them two GPUs' worth of anything. Time-sliced replicas are a fine tool for packing forgiving dev workloads, and an honest operator documents them as exactly that.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+    participant RL as runlist scheduler
+    participant A as TSG of Tenant A
+    participant B as TSG of Tenant B
+    participant E as SMs and engines
+    Note over RL,E: runlist holds two TSGs — round-robin, millisecond turns
+    RL->>A: grant time slice
+    A->>E: kernels own all SMs
+    RL->>A: slice over — compute preemption
+    A->>E: save state to preemption buffers in VRAM
+    RL->>B: grant time slice
+    B->>E: kernels own all SMs
+    Note over A,E: Tenant B idle above, Tenant A idle here — never both running
+    RL->>B: slice over — preempt, save state
+    RL->>A: next turn, restore state, resume mid-kernel
+        </div>
+        <figcaption><b>Diagram 4.1 — Round-robin between two tenants.</b> Notice what never happens: both TSGs on the engines at once. Each "grant" hands over all 108 SMs wholesale, however few the tenant actually uses. The save and restore steps are the compute-preemption cost, megabytes to VRAM per switch.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop GPU</h4>
+        <p>Open two terminals. In each: <code>python3 -c "import torch,time; x=torch.rand(4096,4096,device='cuda'); t=time.time(); [x.matmul(x) for _ in range(2000)]; torch.cuda.synchronize(); print(time.time()-t)"</code>. Run one alone, then both together: each takes roughly twice as long, because they take turns. While they run, <code>nvidia-smi</code> shows both PIDs resident on the card at once. Then check <code>sudo dmesg | grep -i xid</code> — hopefully empty, but now you know what lives there.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>With zero configuration, the runlist scheduler round-robins TSGs in millisecond turns; whoever holds a turn owns all the engines, so tenants alternate rather than overlap. Compute preemption (Pascal onward) lets the hardware stop kernels between instructions and swap megabytes of SM state to VRAM, making the alternation safe even mid-kernel. Time-slicing refuses three things: VRAM capacity quotas (allocation is first come, then OOM), performance guarantees (turns are equal, outcomes are not), and containment of the worst Xid failures. Kubernetes time-sliced replicas are this same behaviour behind a scheduler-side count that enforces nothing.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>round-robin (runlist)</dt><dd>the default scheduling policy: each TSG on the runlist gets an equal turn on the engines, in rotation</dd>
+          <dt>GPU context switch</dt><dd>saving one context's engine state — registers, shared memory, scheduler state — to VRAM preemption buffers and restoring another's; megabytes per switch</dd>
+          <dt>compute preemption</dt><dd>hardware ability (Pascal onward) to stop a kernel between any two instructions; earlier GPUs could stop only at block boundaries</dd>
+          <dt>Xid</dt><dd>numbered driver error report in the kernel log; some Xids kill one context, the worst kill every context on the card</dd>
+          <dt>time-sliced replicas</dt><dd>device-plugin mode advertising one GPU as N schedulable resources with no enforcement behind the number</dd>
+          <dt>oversubscription</dt><dd>admitting more tenants than the resource can serve simultaneously, betting they won't all peak at once</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. A node advertises <code>replicas: 4</code>. Pod 1 allocates 35 GB of the card's 40 GB. Predict exactly what pod 2 sees when it tries to allocate 10 GB, and name every layer that could have prevented it (per this chapter: none, but say why the kubelet could not, and why the driver did not).</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Pod 2's <code>cudaMalloc</code> returns <code>cudaErrorMemoryAllocation</code>, immediately, with 5 GB free on the card. No layer prevented it. The kubelet could not: replicas are an admission count, and its <code>Allocate</code> call hands back the same device node with no memory figure, because the device plugin protocol has no notion of VRAM. The driver did not: RM allocates from one physical pool, first come first served, and time-slicing has no quota to apply. The GMMU isolates address spaces; it does not ration capacity.</p>
+          <p>Check it with <code>nvidia-smi</code> on the node, which shows both PIDs and 35 GB in use, and the pod's log, which shows the OOM. The near miss is expecting the scheduler to spread pods by memory. It sees four identical integer replicas and nothing else.</p>
+        </details>
+        <p>2. Trace what happens in the two milliseconds after Tenant A's slice expires while a kernel is mid-execution, on an H100, and then on a Kepler card from 2013.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>On an H100: the runlist scheduler signals preemption; compute preemption stops A's kernel between two instructions; the hardware writes the architectural state of every active SM (register files, shared memory, scheduler state, megabytes of it) into preemption buffers in VRAM; then TSG B is granted its slice and B's kernels occupy the SMs. When A's next turn arrives the state is restored and the kernel resumes mid-kernel. On a Kepler card: the hardware can stop only at thread-block boundaries, so A's running blocks run to completion first. If each block takes seconds, B waits seconds, and a kernel with very long blocks holds the GPU until it finishes.</p>
+          <p>Check it in the P100 whitepaper's compute preemption section and against the round-robin diagram (diagram 4.1). The near miss is assuming the switch is free because it is in hardware. It is a bulk memory copy each way.</p>
+        </details>
+        <p>3. Tenant B's process dies of an illegal memory access. Tenant A's process dies with it. Which mechanism from this chapter failed, and which Xid class are you looking for in dmesg?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Fault containment failed, and in a way this chapter says should not normally happen: an illegal memory access is a contained error that ends only the offending context, because GMMU faults are attributed per context. If Tenant A died too, look in <code>dmesg | grep Xid</code> for an uncontained class alongside the Xid 13 or 31 that reports B's fault: for example Xid 79 (GPU has fallen off the bus) or Xid 119 and 120 (GSP firmware timeout or error), which take every context down whatever triggered them.</p>
+          <p>Check it against the Xid Errors catalogue linked in this chapter. The near miss is concluding that time-slicing shares fate for all faults by design. It shares fate for the worst class only; a plain illegal access ending a neighbour points to a driver or firmware failure, or to MPS being in use, which the next chapter explains.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/content/pdf/tesla/whitepaper/pascal-architecture-whitepaper.pdf">NVIDIA Tesla P100 whitepaper</a> — read only the Compute Preemption section (page 9): the primary source for instruction-level preemption, one page, worth it.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html">Time-Slicing GPUs in Kubernetes</a> — the official configuration page for replicas, <code>renameByDefault</code>, and NVIDIA's own warnings about what this mode does not isolate. Read when you configure it.</li>
+          <li class="ref" data-layer="KERNEL"><span class="tag KERNEL">KERNEL</span><a href="https://docs.nvidia.com/deploy/xid-errors/latest/index.html">Xid Errors</a> — the catalog mapping Xid numbers to causes. Bookmark it now, read it the day dmesg gives you a number.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch5" class="chapter">
+      <span class="chnum">Chapter 5</span>
+      <h2>MPS: many processes, one context</h2>
+      <p class="chmeta">~9 min · <span class="tag CUDA">CUDA</span> — The time-slicing chapter (chapter 4) ended on an inefficiency: tenants alternate wholesale, so Tenant A's three busy SMs block Tenant B's hundred idle ones. This chapter commits the obvious sin (if separate contexts cannot overlap, put everyone in one context) and then inspects the bill.</p>
+
+      <p>The inefficiency has a shape worth stating precisely. The runlist scheduler's unit of granting is the TSG, and TSGs belong to contexts. Different contexts always mean different turns. But <em>within</em> one context, the work distributor runs many kernels at once, filling SMs from whatever <b>streams</b> have work. A stream is the ordered queue of kernels a CUDA program submits into, and one context may hold many streams that the hardware is free to run at the same time. So the whole serialization problem is an artifact of tenants arriving in separate contexts. The <b>Multi-Process Service</b>, MPS, family 1's cooperative variant from the prologue, is NVIDIA's official way to collapse that separation.</p>
+
+      <h3>The architecture: a daemon, a server, and trusting clients</h3>
+      <p>MPS is three processes and a rendezvous. An administrator starts the <b>MPS control daemon</b> (<code>nvidia-cuda-mps-control -d</code>). From then on, any CUDA process on that machine — now called an MPS <b>client</b> — checks a well-known pipe directory at startup (<code>CUDA_MPS_PIPE_DIRECTORY</code>, default under <code>/tmp/nvidia-mps</code>); finding a daemon, its <code>libcuda</code> connects instead of building a standalone context. The daemon spawns one <b>MPS server</b> process per user, and it is the server that owns the one real GPU context everybody will share.</p>
+      <p>On pre-Volta hardware this was an ugly funnel: clients shipped work to the server, the server submitted everything, one address space for all, one bad pointer away from chaos. Volta rebuilt it in hardware, and the modern version is the only one worth learning: each client gets <em>its own GPU address space</em> (the MPS documentation says clients "own their own GPU address space instead of sharing GPU address space") and each client submits work <em>directly to the GPU</em> through its own channels, with no server hop on the hot path. The undisturbed launch path (diagram 2.1) is still intact, per client. What clients share is the context's scheduling identity: to the runlist scheduler, everyone inside MPS is one TSG family, one turn, so the work distributor packs all clients' kernels onto SMs <em>simultaneously</em>. Tenant A's three SMs and Tenant B's hundred now coexist in the same microsecond.</p>
+
+      <h3>The knobs: provisioning</h3>
+      <p>Sharing SMs concurrently raises an obvious fear: one greedy client fills the machine. MPS answers with what its documentation carefully calls <em>limited execution resource provisioning</em>. The env var <code>CUDA_MPS_ACTIVE_THREAD_PERCENTAGE</code> caps the portion of the GPU's threads a client's context may occupy — set 20, and that client's kernels get dealt onto at most a fifth of the execution resources. The administrator can set a default for all clients in the daemon (<code>set_default_active_thread_percentage</code>), and a client's own env var can only shrink its share further, never grow past the daemon's ceiling. The lower value wins.</p>
+      <p>Memory got its knob later: <code>CUDA_MPS_PINNED_DEVICE_MEM_LIMIT</code>, per-device caps like <code>0=8G</code>, the first VRAM <em>quota</em> in this document. Note the shape of both knobs: environment variables and daemon settings, applied at client startup. This is provisioning among processes that could have been configured honestly; a tenant who edits their own environment is outside its model. MPS was designed for cooperating processes (think MPI ranks from one job), and its trust model still assumes them. The HAMi chapter (chapter 9) exists because people wanted these two knobs, enforced.</p>
+
+      <h3>The bill: one blast radius</h3>
+      <p>Address spaces are isolated; failure is not. The MPS documentation is admirably blunt: a fatal GPU fault generated by one client "will be contained within the subset of GPUs shared between all clients" — which, on one GPU, means <em>all clients</em>. One tenant's fatal fault takes down every process in the MPS pool, and the fault report does not even name the culprit. Performance interference is likewise real: provisioning caps SM occupancy, but L2, memory bandwidth, and copy engines stay common property.</p>
+      <p>So the honest positioning: MPS buys true concurrent packing, the best utilization of any technique so far, at the price of shared fate and advisory limits. Perfect for one team's processes; reckless for strangers. Kubernetes can drive it through the device plugin's MPS mode, which the Kubernetes plumbing chapter (chapter 8) shows, and the same trust caveats apply.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph TS["time-slicing: separate contexts"]
+    A1["Tenant A context<br/>3 SMs busy"] -->|"turn 1"| G1["all engines"]
+    B1["Tenant B context<br/>100 SMs wanted"] -->|"turn 2 — waits"| G1
+  end
+  subgraph MPS["MPS: one shared context"]
+    A2["client A<br/>own address space<br/>own channels"] ==> SC["one shared context<br/>via MPS server"]
+    B2["client B<br/>own address space<br/>own channels"] ==> SC
+    SC ==> G2["SMs packed concurrently<br/>split by active thread percentage"]
+  end
+  D["MPS control daemon"] -.->|"spawns server, sets defaults"| SC
+  style SC fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style G2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 5.1 — Separate contexts versus MPS.</b> Notice what moved: on the left, isolation sits between tenants and the price is alternation; on the right, both tenants stand inside one shared context (green) and the SMs (blue) finally hold both workloads in the same instant. The daemon touches only setup (dotted); launches still ride each client's own channels.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it later — H100 (may work on your laptop)</h4>
+        <p>Rerun the time-slicing chapter's two-terminal experiment, but first: <code>nvidia-cuda-mps-control -d</code>. If the two matmul loops previously each doubled in wall time, under MPS with small kernels they overlap — combined time drops toward the solo number. Inspect the daemon: <code>echo get_default_active_thread_percentage | nvidia-cuda-mps-control</code>. Then set it to 50 and watch a single client cap at half the SMs. GeForce laptop parts sometimes refuse MPS; the H100 will not.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Contexts never share a scheduling turn, but kernels inside one context pack SMs freely, so MPS merges every client into one server-owned context. Since Volta, each client keeps a private GPU address space and submits directly through its own channels; what is shared is scheduling identity and therefore true SM-level concurrency. Limits exist (active thread percentage for execution resources, a pinned-memory quota for VRAM) but they are provisioning knobs read at startup, shrink-only against a daemon default, and a tenant can edit them. Fatal faults hit every client in the pool, unattributed. Maximum packing, shared fate: family 1 pushed to its logical extreme.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>MPS control daemon</dt><dd><code>nvidia-cuda-mps-control</code> — the admin process clients rendezvous with at startup via a well-known pipe directory</dd>
+          <dt>MPS server</dt><dd>per-user process owning the single real GPU context all of that user's clients share</dd>
+          <dt>MPS client</dt><dd>an ordinary CUDA process whose <code>libcuda</code> joined the shared context instead of creating its own</dd>
+          <dt>active thread percentage</dt><dd>cap on the portion of execution resources one client may occupy; daemon sets the ceiling, clients may only lower it</dd>
+          <dt>stream</dt><dd>ordered queue of kernels a CUDA program submits into; many streams per context, free to overlap on the SMs</dd>
+          <dt>pinned device memory limit</dt><dd><code>CUDA_MPS_PINNED_DEVICE_MEM_LIMIT</code> — per-device VRAM allocation cap on an MPS client; the first memory quota in this document</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace Tenant B's kernel launch under MPS from <code>cuLaunchKernel</code> to the SMs. Which steps changed versus the undisturbed launch path, and which process's context does the runlist scheduler see?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Tenant B's <code>libcuda</code>, having found the control daemon's pipe directory at startup, joined the MPS server's context instead of creating its own, with its own GPU address space and channels. From then on the launch is unchanged: pushbuffer write into B's own channel, doorbell ring, runlist turn, work distributor, SMs. What changed is setup: B's channels belong to the server-owned context's TSG. The runlist scheduler therefore sees one TSG, the MPS server's, for every client, so all clients' kernels are eligible in the same turn and the work distributor packs them onto SMs together.</p>
+          <p>Check it with <code>nvidia-smi</code>, which shows the <code>nvidia-cuda-mps-server</code> process holding the context, and the MPS architecture page, which states that clients submit work directly since Volta. The near miss is routing every launch through the server process. That was the pre-Volta funnel; the modern hot path has no server hop.</p>
+        </details>
+        <p>2. The daemon default is 40% active threads; a client sets <code>CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=80</code>. Predict its effective share, and explain why the opposite order of values would behave differently.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>40%. The daemon's default is a ceiling, and a client's own setting can only shrink its share, never grow it past the ceiling. The lower value wins, so 80 requested under a 40 default yields 40. With the values reversed, a daemon default of 80 and a client setting of 20, the client gets 20: its request is below the ceiling and is honoured.</p>
+          <p>Check it with <code>echo get_default_active_thread_percentage | nvidia-cuda-mps-control</code>, then start a client with the variable set and compare the SM occupancy a profiler reports. The near miss is adding or averaging the two values. There is no arithmetic; it is a minimum. Both settings are read once at client startup, so changing the variable in a running process changes nothing.</p>
+        </details>
+        <p>3. Under time-slicing, Tenant B's fatal fault usually kills only Tenant B. Under MPS it kills Tenant A too. What structural difference from this chapter explains it, and what does that tell you about running strangers under MPS?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Under time-slicing each tenant has its own context, and the hardware attributes and contains a fault to the context that raised it. Under MPS every client shares one context, the server's, so the fault domain is the whole context: the MPS documentation says a fatal GPU fault from one client is contained to the set of GPUs shared by all clients, which on one GPU means every client, and the report does not name the culprit. So MPS is for processes that already trust each other, such as MPI ranks of one job, and putting two teams on one daemon converts one team's bug into the other's outage.</p>
+          <p>Check it on the "When to Use MPS" page in NVIDIA's MPS documentation. The near miss is blaming a shared address space. Since Volta clients have separate address spaces; what is shared is the context's scheduling identity and fault domain.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/deploy/mps/architecture.html">CUDA MPS — Architecture</a> — the daemon/server/client design and the Volta rework, in NVIDIA's own words. The core read for this chapter.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/deploy/mps/when-to-use-mps.html">CUDA MPS — When to Use MPS</a> — includes the isolation and error-containment fine print most summaries omit. Read before putting two teams on one daemon.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/deploy/mps/appendix-tools-and-interface-reference.html">CUDA MPS — Tools and Interface Reference</a> — every env var and daemon command, including the two knobs above. Reference; open when configuring.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch6" class="chapter">
+      <span class="chnum">Chapter 6</span>
+      <h2>MIG: cutting the silicon</h2>
+      <p class="chmeta">~9 min · <span class="tag HW">HW</span> <span class="tag FW">FW</span> — MPS packed our tenants together but left them sharing fate and trusting each other's limits. This chapter finally builds walls, through the exact die we mapped in the silicon chapter (chapter 1), and our kernel launch runs, for the first time, on silicon that is Tenant A's alone.</p>
+
+      <p>Everything so far shared the GPU by scheduling it. <b>MIG mode</b> (Multi-Instance GPU, family 2, available on A100 and every data-center generation since) shares it by <em>dividing</em> the hardware: these SMs are yours, that L2 portion and memory controller too, and the neighbour cannot reach them at any time slice, because there is no slice. Both tenants run in the same instant on different transistors.</p>
+
+      <h3>Slices, assembled into instances</h3>
+      <p>The silicon chapter (chapter 1) supplied the two facts this chapter uses. The compute side of the die comes in repeated blocks, and MIG's unit of compute is the <b>SM slice</b>, roughly one GPC's worth; an A100 offers 7 of them. The memory side divides into 8 <b>memory slices</b>, each an eighth of the VRAM plus the L2 slices and bandwidth serving it (defined in the silicon chapter, doing real work now, as promised).</p>
+      <p>A tenant's allocation is a <b>GPU instance</b> (GI): a bundle of memory slices, SM slices, and engines. The MIG User Guide's own definition: "a combination of GPU slices and GPU engines (DMAs, NVDECs, and so on)". A GI is the wall: its memory slices, its L2 portion, its copy engine are private. Within a GI there is an optional second cut: <b>compute instances</b> (CIs) subdivide the GI's SM slices while <em>sharing</em> the GI's memory and engines — useful when one tenant wants two workloads with compute separation but a common memory pool. CIs carry a prefix of their own: <code>2c.3g.20gb</code> names two of a <code>3g.20gb</code> instance's three SM slices.</p>
+      <p>You do not draw these shapes freehand. The hardware ships a fixed menu of <b>MIG profiles</b>, named <code>[N]g.[M]gb</code> — N SM slices, M gigabytes. On an H100 80GB the menu includes <code>1g.10gb</code> (seven of them fit), <code>2g.20gb</code> (three fit), <code>3g.40gb</code> (two fit), up to <code>7g.80gb</code> (the whole card, MIG mode still on). The maximum is <b>seven instances per GPU</b>, and mixes are legal if the slices add up: one <code>3g.20gb</code> plus two <code>2g.10gb</code> fills an A100 40GB exactly — 7 SM slices, 8 memory slices, done. Now the silicon chapter's odd arithmetic pays off: 7 SM slices but 5 NVDECs on A100 meant some instances went without a decoder; the H100's 7 NVDECs exist so that every instance can have one.</p>
+
+      <h3>What the walls are made of</h3>
+      <p>Because a GI owns its memory slices, it gets what neither time-slicing nor MPS could offer: <b>performance isolation</b>. Tenant B hammering its own memory does not consume Tenant A's L2 or memory bandwidth, because those are physically separate slices. The work distributor and runlist machinery are likewise instantiated per instance: each GI schedules its own contexts on its own SM slices. Our launch's path from the undisturbed launch (diagram 2.1), context, channel, doorbell, runlist, work distributor, now exists in a private copy inside Tenant A's instance.</p>
+      <p>Fault isolation follows the same walls. An illegal memory access, a GMMU fault, most Xids: contained to the instance that caused them, and the MIG design goal is exactly that error containment. And note who enforces all this: partition state is programmed into the hardware by RM, which, per the driver-and-firmware chapter (chapter 3), means GSP-RM firmware. Host software cannot quietly rewire a partition; it can only ask the firmware, through NVML.</p>
+      <p>What MIG does <em>not</em> do matters just as much. Inside one instance, everything from the launch-path chapter to the MPS chapter (chapters 2 to 5) applies unchanged: multiple contexts time-slice on the instance's SM slices, and you may even run MPS within an instance, because the families compose. And a MIG instance is mostly static: reshaping partitions requires the affected instances to be empty of work; you drain tenants before redrawing their walls. MIG is a wall, and a wall cannot be moved while tenants stand inside it.</p>
+
+      <h3>How instances appear on the host</h3>
+      <p>Here is where your SR-IOV instincts will mislead you, so let us be explicit. A VF is a new PCIe function: new BDF, new config space, assignable to a VM through VFIO. <b>A MIG instance is a partition inside the GPU, behind the same single PCIe device.</b> Creating one adds no PCIe function and no new <code>/dev/nvidia*</code> node.</p>
+      <p>What the driver exposes instead is a capability tree: <code>/proc/driver/nvidia/capabilities/</code> mirrors the GI/CI hierarchy, and access is granted through character devices under <code>/dev/nvidia-caps/</code>: small "permission token" device nodes, one per capability, with their own dynamically allocated major number (visible in <code>/proc/devices</code>). A container that should see only instance 2 gets access to instance 2's cap nodes and nothing else, enforced by the device cgroup, the kernel's per-container allow-list of device nodes. CUDA processes pick their instance by UUID: <code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid&gt;</code>, one MIG device per process. This is also why plain MIG cannot be handed to a virtual machine the way a VF can, a gap the vGPU chapter (chapter 7) closes.</p>
+<pre><code># one-time: enable MIG mode on GPU 0 (drain workloads first)
+nvidia-smi -i 0 -mig 1
+# see the menu of profiles this card offers
+nvidia-smi mig -lgip
+# carve: one 3g.20gb + two 2g.10gb, with default compute instances
+nvidia-smi mig -cgi 3g.20gb,2g.10gb,2g.10gb -C
+# list the resulting MIG devices and their UUIDs
+nvidia-smi -L</code></pre>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph GPU["one A100 40GB in MIG mode — three tenants, zero shared slices"]
+    subgraph GI1["GPU instance 3g.20gb — Tenant A"]
+      CI1["compute instance 2c.3g.20gb<br/>2 SM slices"]
+      CI2["compute instance 1c.3g.20gb<br/>1 SM slice"]
+      M1["4 memory slices — 20 GB<br/>own L2 slices + bandwidth"]
+      E1["own copy engine + NVDEC"]
+      CI1 ==> M1
+      CI2 ==> M1
+    end
+    subgraph GI2["GPU instance 2g.10gb — Tenant B"]
+      C3["2 SM slices"]
+      M2["2 memory slices — 10 GB"]
+      C3 ==> M2
+    end
+    subgraph GI3["GPU instance 2g.10gb — Tenant C"]
+      C4["2 SM slices"]
+      M3["2 memory slices — 10 GB"]
+      C4 ==> M3
+    end
+  end
+  style GI1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style M1 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style M2 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style M3 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 6.1 — The die map with walls drawn in.</b> Notice there is no arrow between any two GPU instances; that absence is the whole feature. Tenant A's instance (blue) shows the optional inner cut: two compute instances with separate SM slices sharing the instance's 20 GB (green). The slice arithmetic fills the die exactly: 3+2+2 SM slices, 4+2+2 memory slices.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it later — H100</h4>
+        <p>Run the command block above on the H100 (profiles become <code>3g.40gb</code>, <code>2g.20gb</code>…). Then the two-terminal experiment from the time-slicing chapter, pinned to different instances: <code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid-1&gt;</code> in one shell, <code>MIG-&lt;uuid-2&gt;</code> in the other. Unlike under time-slicing, each loop now runs at full private speed, and <code>ls /dev/nvidia-caps/ /proc/driver/nvidia/capabilities/gpu0/mig/</code> shows the permission-token plumbing this chapter described.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>MIG divides the hardware itself: SM slices (7 on A100) and memory slices (8) assemble into up to seven GPU instances per card, shaped only by the fixed profile menu (<code>[N]g.[M]gb</code>), optionally subdivided into compute instances that share the instance's memory. Each GI owns its L2 portion, bandwidth, engines, and scheduling machinery, giving real performance isolation and per-instance fault containment, enforced by GSP-RM in firmware. Instances are internal partitions: they surface as capability nodes under <code>/dev/nvidia-caps/</code> plus MIG UUIDs, are selected via <code>CUDA_VISIBLE_DEVICES</code>, and reshaping them requires draining. Inside an instance, everything from the launch-path chapter to the MPS chapter replays unchanged.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>MIG mode</dt><dd>per-GPU switch (<code>nvidia-smi -i 0 -mig 1</code>) that turns on hardware partitioning</dd>
+          <dt>SM slice</dt><dd>MIG's unit of compute — roughly one GPC; 7 per A100/H100</dd>
+          <dt>GPU instance (GI)</dt><dd>the wall: a bundle of SM slices, memory slices, and engines with private L2, bandwidth, and fault domain</dd>
+          <dt>compute instance (CI)</dt><dd>optional subdivision of a GI's SM slices that shares the GI's memory and engines</dd>
+          <dt>MIG profile</dt><dd>fixed menu shape <code>[N]g.[M]gb</code> — e.g. <code>1g.10gb</code> ×7 or <code>3g.40gb</code> ×2 on H100 80GB</dd>
+          <dt>MIG device / MIG UUID</dt><dd>what CUDA targets: <code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid&gt;</code>, one per process</dd>
+          <dt>nvidia-caps</dt><dd>capability character devices under <code>/dev/nvidia-caps/</code> — per-instance permission tokens granted via device cgroups</dd>
+          <dt>drain</dt><dd>emptying an instance (or GPU) of running work — the precondition for reshaping partitions</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. An A100 40GB has 8 memory slices but its largest instance count is 7 × <code>1g.5gb</code>. Predict which resource runs out first and why the eighth memory slice cannot become an eighth tenant.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>SM slices run out first. An A100 exposes 7 SM slices, and every GPU instance needs at least one, so seven instances exhaust compute. That eighth memory slice cannot become a tenant because a GPU instance is a bundle of memory slices plus SM slices plus engines; memory alone has nothing to execute a kernel. The <code>1g.5gb</code> profile's 5 GB is one eighth of 40 GB, so seven of them leave exactly one eighth unassigned.</p>
+          <p>Check it with <code>nvidia-smi mig -lgip</code>, which lists each profile and how many of it fit. The near miss is reasoning from memory slices to tenants. The instance count is bounded by SM slices; memory slices bound only how much each instance can take.</p>
+        </details>
+        <p>2. Trace our kernel launch inside Tenant A's <code>3g.20gb</code>: which structures from the undisturbed launch path are now private copies inside the instance, and which still belong to the whole card?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Private to the instance: the context's GMMU page tables map only the instance's 4 memory slices; the channels and TSG sit on the instance's own runlist, walked by the instance's own runlist scheduler; the instance's own work distributor deals blocks to its 3 SM slices; and the L2 slices, memory bandwidth and copy engine it owns are private. Still whole-card: the PCIe host interface and its BARs (there is one PCIe device), the GSP-RM firmware that programmed the partitions, the kernel driver and device files, and power and clocks.</p>
+          <p>Check it with <code>ls /proc/driver/nvidia/capabilities/gpu0/mig/</code>, which shows per-instance access tokens while <code>lspci</code> still shows one device. The near miss is thinking the instance is a separate PCIe function. It is a partition behind one device, which is why the vGPU chapter needs a VF to hand it to a VM.</p>
+        </details>
+        <p>3. Tenant C's process dies of an illegal memory access at the same moment Tenant A is mid-inference. State Tenant A's fate under time-slicing, under MPS, and under this chapter. One word each.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Time-slicing: continues. The fault is contained to C's context and A's context carries on. MPS: dies. All clients share one context and one fault domain, and the fatal fault takes the pool down. MIG: unaffected. C's fault stays inside C's instance; A's instance has its own fault domain, its own runlist and its own memory slices, so not even A's latency changes.</p>
+          <p>Check it against the fault blast radius row of the epilogue's choosing table, and the MIG User Guide's statement of error containment as a design goal. The near miss is rating time-slicing and MIG the same. Under time-slicing A still shares the card's worst-case Xids and its scheduling turns with C; under MIG A shares only the physical card, its power and the bus.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/index.html">NVIDIA Multi-Instance GPU User Guide</a> — the operational authority: concepts, the full profile tables per GPU, every <code>nvidia-smi mig</code> flag. Read Concepts and Device Names now, the rest when the H100 arrives.</li>
+          <li class="ref" data-layer="KERNEL"><span class="tag KERNEL">KERNEL</span><a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/device-nodes-and-capabilities.html">MIG User Guide — Device Nodes and Capabilities</a> — the <code>/dev/nvidia-caps</code> and <code>/proc/driver/nvidia/capabilities</code> plumbing, with the cgroup mechanism. Read before wiring MIG into containers by hand.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf">A100 whitepaper — Multi-Instance GPU chapter</a> — the hardware view of the same walls: how slices map to GPCs, L2 and memory controllers. The promised follow-up to the silicon chapter's tour.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch7" class="chapter">
+      <span class="chnum">Chapter 7</span>
+      <h2>vGPU: the VF returns</h2>
+      <p class="chmeta">~11 min · <span class="tag FW">FW</span> <span class="tag KERNEL">KERNEL</span> — MIG walled tenants off, but all of them still trust one host kernel and one driver install. Now the tenants are virtual machines, strangers with root running their own operating systems, and the sharing boundary has to move below everything we have built so far.</p>
+
+      <p>From the SR-IOV dossier you already own the endgame for NICs: give each VM a virtual function, let VFIO and the IOMMU guarantee the VM can only DMA into its own memory, and get out of the way. The obvious question: why not exactly that for GPUs? This chapter's answer: eventually yes, partly — but a GPU needs so much more mediation than a NIC that the product built around it, <b>NVIDIA vGPU</b>, is best understood as a licensed, firmware-assisted middle road between paravirtualization and passthrough.</p>
+
+      <h3>Why passthrough isn't enough, and mdev</h3>
+      <p>Whole-GPU passthrough works today, no license needed: bind the GPU to <code>vfio-pci</code>, hand it to one VM, done — that is the SR-IOV dossier's playbook verbatim. But it shares nothing: one VM owns the card. To multiplex VMs you need per-VM devices, and pre-Ampere GPUs had no VFs to offer. Linux's answer was the <b>mediated device</b> framework, <b>mdev</b>: a VFIO extension where a host driver <em>fabricates</em> virtual PCIe devices out of software. The host driver decides what config space, what BARs, what interrupts each fabricated device shows; VFIO carries it to the VM like any assigned device. Where a VF is silicon pretending to be a device, an mdev is a driver pretending to be one.</p>
+      <p>NVIDIA's host driver for this is the <b>Virtual GPU Manager</b>, a special driver package installed on the hypervisor; it is separate from the normal driver and is part of the licensed vGPU product. It registers available <b>vGPU types</b> (profiles, again a fixed menu, each pairing a VRAM share with a class letter, like a 10 GB compute-class profile on an A100) and the operator instantiates one per VM through sysfs or <code>mdevctl</code>.</p>
+
+      <h3>Ampere: the VF returns</h3>
+      <p>On Ampere and later, the promised reunion: <b>the data-center GPU implements SR-IOV</b>. The host enables VFs with a vendor script (<code>/usr/lib/nvidia/sriov-manage -e 0</code>), <code>lspci</code> sprouts virtual functions with real BDFs, and each vGPU now rides a VF instead of a purely fabricated mdev. What the VF contributes is exactly what silicon is good at: a genuine per-VM PCIe identity: its own BARs and MMIO space, so the guest maps <em>its own</em> channels and doorbells and rings them with no hypervisor exit, and its own requester ID, so the IOMMU confines its DMA. The thick runtime path of the undisturbed launch (diagram 2.1) is still there inside a VM, at near-native speed.</p>
+      <p>Here is where GPUs part company with NICs: the VF is a share of a GPU, and the guest driver knows it. Everything on the <em>control</em> plane (create a context, build page tables, touch the runlist) cannot be trusted to a guest and is absent from the VF. The guest driver packages those requests and sends them to the host's Virtual GPU Manager and the GSP firmware, which validate and execute them on the guest's behalf. That is the same "thin client talks to the real RM" shape as the driver-and-firmware chapter (chapter 3), with the trust boundary now between guest and host instead of kernel and firmware. If you remember the SR-IOV dossier's mailbox, the VF driver asking the PF driver for privileged favours, this is that, scaled up from "set my MAC" to "manage my share of a GPU".</p>
+
+      <h3>Whose silicon, whose schedule</h3>
+      <p>What does a vGPU's "share" actually mean in hardware? NVIDIA gives two answers, and both should now read as old friends.</p>
+      <p><b>Time-sliced vGPU:</b> every VM's work runs on the same engines, and a scheduler in the host manager and firmware rotates them: the time-slicing chapter's machinery (chapter 4) with policies added. Three policies, per NVIDIA's docs: <b>best effort</b> (the default: round-robin among VMs that currently have work, no guarantees, best utilization); <b>equal share</b>, "each running VM receives an equal fraction of GPU time regardless of its load", so your fraction shrinks as VMs power on but idle neighbours donate nothing; and <b>fixed share</b>, "each VM receives a fixed fraction of GPU time, even when other VMs are idle": a reservation, idle cycles burned, perfectly predictable. Time slices are millisecond-scale and tunable, the same latency-versus-throughput dial as every scheduler in this document.</p>
+      <p><b>MIG-backed vGPU:</b> each VM's vGPU is bound to a MIG GPU instance: the MIG chapter's walls (chapter 6), with a VM inside them. Spatial isolation, performance isolation, fault containment, now stacked under VM isolation. This is the pairing that finally untangles the marketing: <b>vGPU is the virtualization wrapper; time-slicing or MIG is what it wraps.</b> The question "MIG or vGPU?" is usually malformed: MIG partitions the GPU, vGPU wraps a VM around a partition or a schedule, and they compose.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph STACK["the undisturbed launch path, turned sideways"]
+    direction TB
+    T["tenant code"] ==> L["CUDA libraries<br/>libcudart + libcuda"]
+    L ==> C["context"]
+    C ==> R["runlist scheduler"]
+    R ==> S["SMs, VRAM, engines"]
+  end
+  MPSX["MPS"] -.->|"merges tenants into one"| C
+  TSX["time-slicing"] -.->|"alternates turns at"| R
+  MIGX["MIG"] -.->|"walls off pieces of"| S
+  VG["vGPU — this chapter"] -.->|"wraps a VM around"| T
+  VG -.->|"time-sliced flavour delegates to"| R
+  VG -.->|"MIG-backed flavour delegates to"| S
+  HX["HAMi"] -.->|"stands inside"| L
+  style VG fill:#fde8ec,stroke:#be123c,stroke-width:2px
+  style HX fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 7.1 — Which layer each technology cuts at.</b> The untangling you were promised in the prologue. Notice vGPU (red) is the only one drawn with two delegation arrows: it supplies the VM boundary and borrows either the scheduler cut or the silicon cut for the GPU share itself. HAMi (amber) appears early; the HAMi chapter (chapter 9) earns its arrow. Combinations are legal wherever arrows do not collide: MPS inside a MIG instance, time-slicing inside a MIG instance, MIG under vGPU.</figcaption>
+      </figure>
+
+      <h3>The paperwork layer</h3>
+      <p>One layer of this stack is a contract: vGPU is a paid product. The Virtual GPU Manager installs only on supported hypervisors, and the <em>guest</em> driver phones a license service — hosted by NVIDIA or run on-site — to activate; unlicensed, it degrades. None of the machinery above changes, but architecture discussions that ignore the license line tend to end in procurement meetings. Since the details drift by release, one table, dated honestly:</p>
+      <table>
+        <tr><th>Universal architecture</th><th>Vendor and version specifics — as of August 2026</th></tr>
+        <tr><td>Host-side manager mediates control plane; guest driver pairs with it</td><td>Current release: vGPU software 20.2 (Aug 2026); manager and guest driver versions must match per release notes</td></tr>
+        <tr><td>Data path direct to hardware via per-VM BARs (VF on Ampere+, mdev before)</td><td>VF plumbing via <code>sriov-manage</code>; KVM instantiation via <code>mdevctl</code>/sysfs; details vary per hypervisor</td></tr>
+        <tr><td>Share = time-sliced schedule or MIG instance</td><td>Policy names: best effort / equal share / fixed share; set via manager config</td></tr>
+        <tr><td>Guest activation against a license service</td><td>Sold under NVIDIA AI Enterprise / vGPU software; cloud (CLS) or on-prem (DLS) license service</td></tr>
+      </table>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph VM["guest VM of Tenant A"]
+    GA["tenant code and CUDA libraries"]
+    GDRV["guest NVIDIA driver<br/>knows it holds a share, not a GPU"]
+  end
+  subgraph HOST["hypervisor host"]
+    VGM["Virtual GPU Manager"]
+    VFIO["VFIO and IOMMU"]
+    LIC["license service<br/>cloud or on-prem"]
+  end
+  subgraph GPU["physical GPU"]
+    VF["VF for this VM<br/>own BARs, own requester ID<br/>an mdev before Ampere"]
+    GSP["GSP-RM firmware"]
+    SHARE["the share: scheduler turns<br/>or a MIG instance"]
+  end
+  GA ==>|"pushbuffer and doorbell"| GDRV
+  GDRV ==>|"MMIO through the VF BAR<br/>no exit"| VF
+  VF ==> SHARE
+  VFIO -.->|"setup: programs the IOMMU<br/>for this VF"| VF
+  GDRV -.->|"control plane: create context,<br/>page tables, runlist"| VGM
+  VGM -.-> GSP
+  GSP -.->|"builds and polices"| SHARE
+  GDRV -.->|"activate"| LIC
+  style VGM fill:#fde8ec,stroke:#be123c,stroke-width:2px
+  style VF fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 7.2 — vGPU's two planes, seen from one VM.</b> Notice the thick path: tenant code, guest driver, the VF's BAR, the share, with no host software on it. That is the undisturbed launch path (diagram 2.1) running inside a VM. Every dotted arrow is a request the guest driver cannot serve itself and must send to the Virtual GPU Manager (red), which forwards to GSP-RM; the SR-IOV dossier's mailbox, scaled up. The VF (blue) is the only piece of the GPU the VM truly owns.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>What you'd see — licensed host required</h4>
+        <p>On a KVM host with the manager installed: <code>lsmod</code> shows <code>nvidia-vgpu-vfio</code> alongside <code>nvidia</code>; <code>lspci | grep -i nvidia</code> lists the PF plus VFs after <code>sriov-manage -e</code>; <code>mdevctl types</code> prints the vGPU profile menu with per-profile VRAM and max instances. Inside the guest: a normal-looking NVIDIA driver, <code>nvidia-smi</code> reporting the profile name as the GPU model — and the launch-path chapter's <code>strace</code> experiment behaving identically, because the launch path really is the same.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>vGPU moves the sharing boundary below untrusted VMs. Pre-Ampere it fabricated per-VM devices in software (mdev); Ampere and later expose real SR-IOV VFs, giving each VM its own BARs, doorbells, and IOMMU-confined DMA, so the data path stays direct and near-native. The control plane stays on the host: guest drivers must ask the host's Virtual GPU Manager and GSP firmware for anything privileged. The GPU share itself is borrowed machinery, time-sliced (best effort, equal share, fixed share) or MIG-backed, because vGPU wraps a VM around a partition or a schedule. And one layer is a contract: matched host and guest drivers and a license service.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>NVIDIA vGPU</dt><dd>the licensed product implementing sharing family 3: per-VM virtual GPUs multiplexed onto one physical GPU</dd>
+          <dt>mediated device (mdev)</dt><dd>VFIO framework where a host driver fabricates virtual devices in software — a driver pretending to be silicon</dd>
+          <dt>Virtual GPU Manager</dt><dd>the vGPU host driver package on the hypervisor: registers vGPU types, mediates all guest control-plane requests</dd>
+          <dt>vGPU type / profile</dt><dd>fixed menu entry pairing a VRAM share with a workload class; one instantiated per VM</dd>
+          <dt>time-sliced vGPU</dt><dd>share = scheduler turns on common engines, under a policy</dd>
+          <dt>best effort / equal share / fixed share</dt><dd>the three policies: work-conserving round-robin; equal fractions among running VMs; fixed reservations even beside idle VMs</dd>
+          <dt>MIG-backed vGPU</dt><dd>share = a MIG GPU instance dedicated to the VM</dd>
+          <dt>license service</dt><dd>what the guest driver activates against (cloud or on-prem)</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace a guest kernel launch under SR-IOV vGPU: which steps of the undisturbed launch path happen entirely inside the VM, and which is the first operation that must cross to the host?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Inside the VM: the whole runtime path. The guest's <code>libcuda</code> writes pushbuffer commands into a channel ring in guest memory and rings a doorbell through the VF's BAR with no hypervisor exit; the runlist scheduler and work distributor then run the kernel on the share. The first operation that crosses to the host happens at setup, before any launch: creating the context, which needs GMMU page tables built and a TSG registered on the runlist. The guest driver cannot do that on a VF, so it sends the request to the Virtual GPU Manager, which forwards it to GSP-RM.</p>
+          <p>Check it against the vGPU two-planes diagram (diagram 7.2), where every dotted arrow leaves the VM and the thick one does not. The near miss is putting the doorbell on the host side. It is the one privileged-looking thing the VF does own.</p>
+        </details>
+        <p>2. Three VMs on fixed share, one powered off, the other two idle. Predict the GPU utilization a fourth, busy VM gets under fixed share, then equal share, then best effort.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Fixed share: 25%. Each VM has a fixed fraction of GPU time whether the others are running, idle or off, so with four VMs configured the busy one gets one quarter and three quarters go unused. Equal share: 33%. Time is split equally among running VMs, three are powered on, so the busy VM gets one third; the two idle VMs' turns stay reserved for them. Best effort: close to 100%. Round-robin runs only among VMs that currently have work, and only one does, so it takes nearly every turn.</p>
+          <p>Check it against NVIDIA's scheduling policies page, quoted in this chapter, and <code>nvidia-smi vgpu -q</code> on the host for the active policy. The near miss is giving equal share 25%. Equal share counts running VMs; the idle ones count and the powered-off one does not.</p>
+        </details>
+        <p>3. Your neighbour VM's workload segfaults its context. Compare your blast radius under time-sliced vGPU versus MIG-backed vGPU, and name which chapter's mechanism gives the difference.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Under time-sliced vGPU the neighbour's illegal memory access is contained to its own context, so your VM keeps running, but you still share engines, turns and the card's worst-case Xids; a fault that escalates to a GPU reset takes your share down too. Under MIG-backed vGPU the neighbour's context sits inside its own GPU instance with its own memory slices, runlist and fault domain, so instance-level faults stay on its side of the wall; only whole-card events reach you. The difference is the MIG chapter's mechanism (chapter 6), hardware partitioning enforced by GSP-RM, which vGPU borrows when a profile is MIG-backed.</p>
+          <p>Check it against the fault blast radius row of the epilogue's choosing table. The near miss is crediting the VM boundary. The IOMMU and VFIO protect host memory from the VF's DMA; they say nothing about faults inside the GPU.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://docs.nvidia.com/vgpu/index.html">NVIDIA Virtual GPU Software documentation hub</a> — the index of all vGPU releases (20.2 current as of this writing). Start here; everything below hangs off it.</li>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://docs.nvidia.com/vgpu/20.0/grid-vgpu-user-guide/index.html">Virtual GPU Software User Guide</a> — architecture, vGPU types, installing the Virtual GPU Manager, SR-IOV setup on Ampere+. Read the introduction's architecture section after this chapter; the rest is install-time material.</li>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://docs.nvidia.com/ai-enterprise/release-8/latest/infra-software/vgpu/features/scheduling.html">Scheduling Policies — NVIDIA AI Enterprise</a> — best effort vs equal share vs fixed share in NVIDIA's own words, with tuning guidance. Ten minutes, read before choosing a policy.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch8" class="chapter">
+      <span class="chnum">Chapter 8</span>
+      <h2>Kubernetes plumbing: from resource to device node</h2>
+      <p class="chmeta">~9 min · <span class="tag K8S">K8S</span> — Our launch now works on bare metal under four different sharing regimes. But Tenant A was a pod all along. This chapter builds the bridge: how a line of YAML becomes <code>/dev/nvidia0</code> and a working <code>libcuda</code> inside a container, and how the scheduler learned to count the slices the four sharing chapters (chapters 4 to 7) created.</p>
+
+      <p>Two separate problems hide in "GPU pod", and mixing them up causes most of the confusion in this layer. Problem one: <b>delivery</b>. A container is just a namespaced process; someone must place the device nodes and the driver's userspace into it. Problem two: <b>inventory</b>. The scheduler must know which nodes have what GPU resources, whole or sliced, and stop double-booking them. Kubernetes solves them with different machinery.</p>
+
+      <h3>Delivery: the toolkit and CDI</h3>
+      <p>Containers share the host kernel, so <code>nvidia.ko</code> and GSP-RM are already running; there is nothing to deliver there. What a container lacks is everything from the launch-path chapter's user space: <code>/dev/nvidiactl</code>, <code>/dev/nvidia0</code>, <code>/dev/nvidia-uvm</code>, and <code>libcuda.so</code>. And here is the detail that explains the whole design: <b><code>libcuda</code> ships with the driver</b>, and its version must match the loaded kernel module exactly. Baking it into the image would break on every driver upgrade. So it has to be <em>injected at container start, from the host</em>.</p>
+      <p>The injector is the <b>NVIDIA Container Toolkit</b>: historically a stack of a runtime wrapper and hooks around <code>runc</code>, and these days increasingly just a generator for <b>CDI</b>, the <i>Container Device Interface</i>, a CNCF spec whose README describes it in one line: a specification for container runtimes to support third-party devices. A CDI spec is a JSON or YAML file on the node mapping a device name (<code>nvidia.com/gpu=0</code>, or a MIG instance) to the concrete plumbing it requires: which <code>/dev</code> nodes, which library mounts, which env vars. The runtime reads it and does exactly that; no vendor code executes at container start. If you are thinking "this is CNI's design, for devices instead of networks": yes, explicitly and by intention.</p>
+
+      <h3>Inventory: the device plugin, stretched to its limits</h3>
+      <p>You know the device plugin protocol from the SR-IOV dossier — register with the kubelet's socket, <code>ListAndWatch</code> a list of device IDs, answer <code>Allocate</code> — and the NVIDIA one behaves exactly as you would expect, advertising <code>nvidia.com/gpu</code>. The sharing chapters plug in as configuration:</p>
+      <table>
+        <tr><th>Mode</th><th>What the plugin advertises</th><th>What stands behind it</th></tr>
+        <tr><td>default</td><td><code>nvidia.com/gpu</code> × physical GPUs</td><td>whole cards</td></tr>
+        <tr><td>time-slicing</td><td>same name × <code>replicas</code></td><td>time-slicing chapter: bookkeeping only, zero enforcement</td></tr>
+        <tr><td>MPS</td><td>shared replicas plus a plugin-managed daemon</td><td>MPS chapter: real SM and memory caps, shared fate</td></tr>
+        <tr><td><code>migStrategy: single</code></td><td><code>nvidia.com/gpu</code>, but each unit is one MIG instance (homogeneous node)</td><td>MIG chapter: walls</td></tr>
+        <tr><td><code>migStrategy: mixed</code></td><td><code>nvidia.com/mig-3g.40gb</code> etc., one resource name per profile</td><td>MIG chapter: walls, heterogeneous</td></tr>
+      </table>
+      <p>A pod then writes <code>limits: {"nvidia.com/mig-3g.40gb": 1}</code>, the scheduler counts, the kubelet calls <code>Allocate</code>, the plugin answers with CDI references and env vars (<code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid&gt;</code>), the runtime mounts, and the launch-path chapter's setup (chapter 2) begins inside the container, unmodified.</p>
+      <p>Deploying the toolkit, the plugin, the driver itself, MIG partitioning, and node labelling by hand across a fleet is a job — so NVIDIA ships the <b>GPU Operator</b>, which runs all of it as Kubernetes-managed containers (including the kernel driver in a container, which still feels illegal and works fine), plus <b>GPU Feature Discovery</b> to label nodes with model and capability details, plus a MIG manager that applies a named partition layout per node label. If you run GPUs on Kubernetes in 2026, you almost certainly run the operator and configure everything in this chapter through its values file.</p>
+
+      <h3>The ceiling, and DRA</h3>
+      <p>The device plugin model has a shape, and by now you can see its limits: resources are <em>opaque integers of identical units</em>, sliced at configuration time. The scheduler cannot express "any MIG instance with at least 20 GB", cannot create a partition on demand for a pending pod, cannot share one allocation between two pods deliberately. Every "mode" in the table above is a workaround for the model, configured node-by-node in advance.</p>
+      <p><b>DRA</b>, <i>Dynamic Resource Allocation</i>, is Kubernetes' structural answer, GA since v1.34 (August 2025; today's docs mark the feature stable and default-on). The model changes from counted integers to claims: a <b>ResourceClaim</b> is an API object describing what a pod needs from a device class, with <em>structured parameters</em> the scheduler itself can evaluate against what nodes publish: attributes, capacity, partitionable shapes. A driver (NVIDIA ships a DRA driver alongside the plugin) satisfies the claim, and can in principle carve the MIG instance <em>when the claim demands it</em> rather than at provisioning time. Claims can be shared between pods on purpose. As of this writing the ecosystem is mid-migration, with device plugins everywhere and DRA arriving cluster by cluster, but the direction is settled: the integer era is ending. If you ever build your own orchestrator, DRA is the API you would target.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+    participant U as user YAML
+    participant S as scheduler
+    participant KL as kubelet
+    participant DP as NVIDIA device plugin
+    participant RT as container runtime with CDI
+    participant C as container
+    Note over U,C: all of this is setup — the data plane never appears here
+    U->>S: pod requests nvidia.com/mig-3g.40gb x1
+    S->>KL: bind to node with free unit
+    KL->>DP: Allocate over the plugin socket
+    DP->>KL: CDI device ref + CUDA_VISIBLE_DEVICES=MIG-uuid
+    KL->>RT: create container with CDI devices
+    RT->>C: mount /dev nodes, nvidia-caps, libcuda from host
+    Note over C: the undisturbed launch path runs here, unmodified, with setup ioctls, pushbuffers and doorbell
+        </div>
+        <figcaption><b>Diagram 8.1 — From YAML to device node.</b> Notice two things: every arrow is control plane (this whole chapter is the "setup, once" half of the undisturbed launch path, stretched across a cluster), and the device plugin's answer is <em>names, mounts and env vars</em>. The enforcement, if any, was built by the sharing chapters (chapters 4 to 7) long before the pod arrived.</figcaption>
+      </figure>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop, no cluster needed</h4>
+        <p>The delivery half works anywhere: <code>nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml</code> then read the file — every device node and library mount this chapter described, spelled out. Test it: <code>podman run --rm --device nvidia.com/gpu=all ubuntu nvidia-smi</code>. On the H100 later: <code>kubectl describe node</code> shows the advertised <code>nvidia.com/*</code> capacity changing as you switch plugin modes.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Two problems, two mechanisms. Delivery: <code>libcuda</code> is version-locked to the host driver, so the Container Toolkit injects it and the device nodes at start, declaratively via CDI specs. Inventory: the device plugin advertises countable units (whole GPUs, time-sliced replicas, MPS replicas, or MIG instances via the <code>single</code> and <code>mixed</code> strategies) and the GPU Operator deploys and wires all of it fleet-wide. The plugin model's opaque integers are the ceiling; DRA (GA in v1.34) replaces counting with ResourceClaims and structured parameters the scheduler can reason about, opening on-demand partitioning. Everything in this chapter is setup; no kubelet, plugin, or runtime ever touches a running launch.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>NVIDIA Container Toolkit</dt><dd>host-side injector of device nodes and driver userspace into containers; today mostly a CDI spec generator</dd>
+          <dt>CDI</dt><dd>Container Device Interface — CNCF spec mapping device names to the mounts, nodes and env vars a runtime must provide; CNI's design applied to devices</dd>
+          <dt>MIG strategy</dt><dd>device-plugin setting: <code>none</code> (ignore MIG), <code>single</code> (uniform instances as plain <code>nvidia.com/gpu</code>), <code>mixed</code> (per-profile resource names)</dd>
+          <dt>GPU Operator</dt><dd>NVIDIA's operator running driver, toolkit, plugin, discovery and MIG manager as cluster-managed containers</dd>
+          <dt>GPU Feature Discovery</dt><dd>component labelling nodes with GPU model and capability details for scheduling</dd>
+          <dt>DRA</dt><dd>Dynamic Resource Allocation — claim-based device model, GA in Kubernetes v1.34, replacing opaque integer resources</dd>
+          <dt>ResourceClaim</dt><dd>API object describing a pod's device need with structured parameters the scheduler evaluates; satisfiable on demand, shareable between pods</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Why would baking <code>libcuda.so</code> into your container image break after a node driver upgrade, while the same image with CDI injection keeps working? What does that tell you about where CUDA's version boundary really sits?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Because <code>libcuda.so</code> is part of the driver, and its version must match the loaded <code>nvidia.ko</code> exactly; their private ioctl interface changes between releases. An image carrying a <code>libcuda</code> from driver 550 talking to a 570 kernel module fails at context creation. With CDI, the runtime bind-mounts the host's own <code>libcuda</code> into the container at start, so the pair always matches. The version boundary therefore sits between the CUDA runtime (<code>libcudart</code>, which the application may ship) and the driver API (<code>libcuda</code>, which the host owns).</p>
+          <p>Check it in the output of <code>nvidia-ctk cdi generate</code>, which lists the library mounts, and with <code>ldconfig -p | grep libcuda</code> inside a running container, which shows a host path. The near miss is blaming the CUDA toolkit version in the image. The toolkit is user space and may be older than the driver; the hard match is <code>libcuda</code> to kernel module.</p>
+        </details>
+        <p>2. Trace a pod requesting <code>nvidia.com/mig-3g.40gb</code> from YAML to the first successful <code>cuLaunchKernel</code>, naming what each of scheduler, kubelet, device plugin, CDI and GSP-RM contributed, and which one enforced the memory wall.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The scheduler matched the request against nodes advertising a free <code>nvidia.com/mig-3g.40gb</code> unit and bound the pod. The kubelet called the device plugin's <code>Allocate</code> with the chosen unit. The device plugin, in <code>migStrategy: mixed</code>, returned a CDI device reference for that instance plus <code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid&gt;</code>. CDI told the runtime which <code>/dev/nvidia*</code> nodes, capability tokens and host libraries to mount. GSP-RM built the process's context inside the instance at container start, with GMMU page tables over the instance's memory slices and a TSG on the instance's runlist; and much earlier, when the MIG manager partitioned the card, GSP-RM built the instance itself. The memory wall is GSP-RM's, in firmware and silicon. Everything above it only named the instance.</p>
+          <p>Check it against the YAML-to-device-node diagram (diagram 8.1). The near miss is crediting the device plugin or CDI with enforcement. They hand out names, mounts and env vars.</p>
+        </details>
+        <p>3. A platform team wants "give this pod any instance with ≥20 GB, create it if absent". State precisely why the device plugin model cannot express this and which two DRA concepts can.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The device plugin model advertises opaque integers under fixed names, sliced at configuration time: a node publishes counts of <code>nvidia.com/mig-3g.40gb</code> and <code>nvidia.com/mig-1g.10gb</code>, and a pod must name one exactly. "At least 20 GB" is a comparison across names the scheduler cannot make, and "create it if absent" needs a partition carved at allocation time, for which the <code>ListAndWatch</code> then <code>Allocate</code> protocol has no hook. DRA expresses it with a ResourceClaim carrying structured parameters, a constraint such as memory of at least 20 GB that the scheduler evaluates against the attributes and capacity each node publishes, and with a DRA driver that satisfies the claim on demand, in principle carving the MIG instance when the claim is scheduled.</p>
+          <p>Check it in the Kubernetes DRA documentation linked in this chapter. The near miss is proposing more device-plugin modes. Every mode is a workaround inside the integer model.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/">Kubernetes — Device Plugins</a> — the protocol underneath everything here; skim to refresh the SR-IOV dossier's picture.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/">Kubernetes — Dynamic Resource Allocation</a> — the claim model, DeviceClasses, structured parameters. Read once now and again when you first meet a DRA-enabled cluster.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://github.com/cncf-tags/container-device-interface">Container Device Interface (CDI)</a> — the spec repo; the README is a five-minute read that demystifies device injection permanently.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://github.com/NVIDIA/k8s-device-plugin">NVIDIA device plugin for Kubernetes</a> — README documents every sharing knob in this chapter: <code>sharing.timeSlicing</code>, MPS mode, <code>migStrategy</code>.</li>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html">NVIDIA GPU Operator documentation</a> — what the operator installs and its MIG/time-slicing configuration pages. Read when you own a cluster, skim before.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch9" class="chapter">
+      <span class="chnum">Chapter 9</span>
+      <h2>HAMi: slicing without hardware help</h2>
+      <p class="chmeta">~10 min · <span class="tag ORCH">ORCH</span> <span class="tag CUDA">CUDA</span> — Every wall so far was built by NVIDIA: silicon (MIG), firmware and licenses (vGPU), a daemon with advisory knobs (MPS). This chapter builds walls out of nothing but a shared library and a scheduler, and finally uses the fact the launch-path chapter (chapter 2) established: whoever stands inside the <code>cuLaunchKernel</code> funnel can police every tenant.</p>
+
+      <p>The want is concrete: MIG-grade requests — "this pod gets 3 GB of VRAM and 30% of compute" — on GPUs that lack MIG (consumer cards, older parts), without vGPU licenses, at finer granularity than seven slices, reconfigurable per pod with no draining. The price will be equally concrete, and we will read it off the mechanism.</p>
+
+      <h3>Standing inside the funnel</h3>
+      <p><b>HAMi</b> (the prologue's family 4; a CNCF project, incubating since July 2026) ships its enforcement as <b>HAMi-core</b>, a library named <code>libvgpu.so</code>. Its README states the position precisely: it operates "by hijacking the API calls between CUDA-Runtime (libcudart.so) and CUDA-Driver (libcuda.so)". Loaded ahead of the real driver API (the <code>LD_PRELOAD</code> trick, industrialized) it exports every <code>cu*</code> symbol, does its bookkeeping, then forwards to the genuine <code>libcuda</code>. Recall the undisturbed launch path (diagram 2.1): every framework, every language, every launch and every allocation in the process squeezes through that one API. Own the funnel, own the tenant.</p>
+      <p><b>Memory quotas.</b> The container carries <code>CUDA_DEVICE_MEMORY_LIMIT=3g</code>. The hook intercepts the allocation family (<code>cuMemAlloc_v2</code>, <code>cuMemAllocManaged</code>, the launch-path chapter's UVM cameo, and <code>cuMemAllocHost_v2</code>) and keeps a ledger. A request that would cross the limit never reaches the driver: the hook "directly returns <code>CUDA_ERROR_OUT_OF_MEMORY</code>", in the docs' words. The application experiences a smaller GPU, indistinguishable from the time-slicing chapter's real OOM. And the lie is made self-consistent: the hook also intercepts NVML's <code>nvmlDeviceGetMemoryInfo</code>, so <code>nvidia-smi</code> <em>inside the container</em> reports a 3 GB card. Fake wall, honest mirror.</p>
+      <p><b>Compute quotas.</b> <code>CUDA_DEVICE_SM_LIMIT=30</code> works on the launch side, and here the design is genuinely clever. A token pool (a counter named <code>g_cur_cuda_cores</code> in the source) is debited by a rate limiter that runs before each intercepted kernel launch; an empty pool makes the launch <em>wait</em> (a nanosleep spin) before forwarding. Refilling is a feedback loop: a background watcher thread samples the GPU's actual utilization through NVML and adjusts the refill rate; below your 30%, tokens pour in, and above it the refill slows. What this amounts to is a statistical governor, accurate on average, wobbly at millisecond scale, and blind to a kernel that is already running. It has none of the hardware enforcement of MIG or the scheduler policy of vGPU.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+    participant APP as Tenant A framework code
+    participant H as libvgpu.so hook
+    participant W as watcher thread
+    participant D as real libcuda
+    participant G as GPU
+    APP->>H: cuMemAlloc 2 GB
+    H->>H: ledger check — 2.5 of 3 GB used
+    H-->>APP: CUDA_ERROR_OUT_OF_MEMORY, driver never called
+    APP->>H: cuLaunchKernel
+    H->>H: rate limiter — token pool empty, nanosleep
+    W->>G: sample real utilization via NVML
+    W->>H: refill tokens — feedback toward 30 percent
+    H->>D: forward the launch
+    D->>G: pushbuffer + doorbell, the undisturbed launch path as always
+        </div>
+        <figcaption><b>Diagram 9.1 — How HAMi fakes fractions.</b> The pain-point diagram, promised in the prologue. Notice that both refusals happen <em>above</em> the real driver, so the GPU never learns a limit existed; and notice the feedback loop (watcher → tokens) is the entire compute "wall": a governor chasing a percentage in software.</figcaption>
+      </figure>
+
+      <h3>Teaching the scheduler the same lie</h3>
+      <p>A library limits one process; a platform needs the cluster to <em>place</em> pods against those made-up fractions. HAMi's Kubernetes half is four cooperating components, and after the Kubernetes plumbing chapter (chapter 8) each will look familiar. A <b>mutating webhook</b> spots pods requesting HAMi resources and rewrites them to use HAMi's scheduler. The <b>scheduler extender</b> (filter, score and bind hooks on the stock scheduler) keeps its own view of every card's real VRAM and committed fractions, picks a node <em>and a specific GPU</em>, and records the verdict in pod annotations. HAMi's fork of the <b>device plugin</b> reads those annotations at <code>Allocate</code> time and wires the container: device nodes via the usual machinery, plus <code>libvgpu.so</code> mounted and preloaded, plus the two env vars carrying the quota. The pod requests read like this:</p>
+<pre><code>resources:
+  limits:
+    nvidia.com/gpu: 1        # one virtual GPU
+    nvidia.com/gpumem: 3000  # 3000 MiB of its VRAM
+    nvidia.com/gpucores: 30  # 30% of its compute</code></pre>
+      <p>Three resource names where the Kubernetes plumbing chapter had one, because the extender, unlike the stock scheduler, treats memory and compute as separate, real quantities on each physical card. That is the actual innovation: admission control that <em>models</em> the GPU, bolted onto enforcement that merely <em>impersonates</em> one.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant U as pod with gpumem and gpucores
+  participant WH as mutating webhook
+  participant EX as scheduler extender
+  participant KL as kubelet
+  participant DP as HAMi device plugin
+  participant C as container
+  U->>WH: pod created
+  WH->>U: rewrite: schedulerName is hami-scheduler
+  U->>EX: filter, score, bind
+  EX->>EX: ledger: real VRAM and committed fractions per physical GPU
+  EX->>U: annotations: node, GPU UUID, quota
+  KL->>DP: Allocate
+  DP->>KL: device nodes plus libvgpu.so mount and LD_PRELOAD
+  DP->>KL: CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT
+  KL->>C: start
+  Note over C: the HAMi fractions diagram begins here, every cu call now passes through the hook
+        </div>
+        <figcaption><b>Diagram 9.2 — HAMi's Kubernetes half.</b> Notice that the extender chooses the physical GPU, before the kubelet is involved, and that everything the plugin hands the container is one mount and three environment variables. Nothing on this diagram touches the GPU; the walls arrive together with the process, in the HAMi fractions diagram (diagram 9.1).</figcaption>
+      </figure>
+
+      <h3>The price tag, read off the mechanism</h3>
+      <p>Security first, stated plainly because the mechanism makes it unavoidable. HAMi's walls live inside the tenant's own process, held up by symbol interposition. A tenant who controls their image can statically link the driver API, ship their own loader, or scrub the preload, and every limit in this chapter evaporates, with the scheduler still believing its ledger. HAMi documents this openly; it is the definition of family 4. HAMi is multi-tenancy for tenants you employ. If your neighbours are adversaries, the walls must come from the MIG chapter or the vGPU chapter (chapters 6 and 7).</p>
+      <p>Isolation follows the same logic: shared blast radius (one context-killing Xid still takes everyone down; the time-slicing chapter's rules apply), no L2 or bandwidth separation, and compute limits that wander around their target. In exchange: it works on any NVIDIA card including your laptop, it is free, fractions are of arbitrary size, dozens of tenants fit per GPU, and reconfiguration per pod needs neither a drain nor a license server.</p>
+      <p>HAMi has company in family 4; the pattern is bigger than the project. Volcano's vGPU mode wires the very same HAMi-core library under its own scheduler (resources <code>volcano.sh/vgpu-number/-memory/-cores</code>). Run:ai (acquired by NVIDIA, its scheduler open-sourced as KAI) does fractional GPUs with the same split: scheduler-modelled fractions, software-side enforcement. When you meet any "GPU fractions" product, ask the two questions this chapter armed you with: <em>who models the fraction, and who enforces it?</em> The first answer is always "a scheduler"; the honesty lives in the second.</p>
+
+      <aside class="tryit">
+        <h4>Try it now — laptop GPU, no cluster</h4>
+        <p>HAMi-core works standalone. Build <code>libvgpu.so</code> from <code>github.com/Project-HAMi/HAMi-core</code>, then: <code>LD_PRELOAD=./libvgpu.so CUDA_DEVICE_MEMORY_LIMIT=1g python3 -c "import torch; x=torch.rand(20000,20000,device='cuda')"</code> — a ~1.6 GB allocation fails with a CUDA OOM on your 8 GB laptop card. Drop the preload, it succeeds. You have just run sharing family 4 with your own hands, no Kubernetes in sight.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>HAMi enforces made-up limits from inside the tenant's process: <code>libvgpu.so</code> interposes between CUDA runtime and driver API, refuses over-quota allocations with a genuine-looking <code>CUDA_ERROR_OUT_OF_MEMORY</code>, lies consistently through NVML so <code>nvidia-smi</code> agrees, and throttles compute with a token pool refilled by a utilization-sampling feedback thread. Cluster-side, a webhook, a scheduler extender with a real per-GPU model, and a modified device plugin turn <code>gpumem</code>/<code>gpucores</code> requests into placements and preloads. The trade is explicit: any card, any fraction, without a license or a drain, against in-process enforcement a hostile tenant can shed and isolation no better than time-slicing. Volcano reuses HAMi-core outright; Run:ai/KAI plays the same split. Always ask: who models the fraction, who enforces it.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>HAMi-core / libvgpu.so</dt><dd>the interception library exporting fake <code>cu*</code>/NVML symbols ahead of the real ones; the enforcement half of HAMi</dd>
+          <dt>API interception</dt><dd>preloading a library so its symbols shadow the real ones — family 4's entire foundation</dd>
+          <dt>memory ledger</dt><dd>the hook's per-container account of VRAM allocations, checked before the driver ever hears of a request</dd>
+          <dt>token pool governor</dt><dd>compute limiter: launches spend tokens, an NVML-sampling watcher refills them toward the target percentage</dd>
+          <dt>mutating webhook</dt><dd>admission component rewriting GPU-fraction pods to use HAMi's scheduler</dd>
+          <dt>scheduler extender</dt><dd>filter/score/bind add-on holding the real per-GPU memory and compute ledger; writes placements into pod annotations</dd>
+          <dt>gpumem / gpucores</dt><dd>HAMi's resource names: MiB of VRAM and percent of compute, schedulable separately per card</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace <code>torch.zeros(..., device='cuda')</code> in a HAMi pod from the framework call to physical VRAM, naming every library crossed and where the quota check fires.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>PyTorch's caching allocator calls the CUDA runtime, <code>libcudart</code>, which calls the driver API's <code>cuMemAlloc_v2</code>. Because <code>libvgpu.so</code> was preloaded, that symbol resolves to HAMi-core's hook first. The hook consults its memory ledger against <code>CUDA_DEVICE_MEMORY_LIMIT</code>: if the request would cross the limit it returns <code>CUDA_ERROR_OUT_OF_MEMORY</code> and the driver is never called; otherwise it records the size and forwards to the genuine <code>libcuda</code>, which asks RM through an ioctl to allocate VRAM and map it into the context's GMMU page tables. Libraries crossed: <code>libtorch</code>, <code>libcudart</code>, <code>libvgpu.so</code>, <code>libcuda.so</code>. The quota check fires inside the hook, in the tenant's own process, before any driver code runs.</p>
+          <p>Check it against the HAMi fractions diagram (diagram 9.1), or run with <code>LD_DEBUG=bindings</code> and watch <code>cuMemAlloc_v2</code> resolve into <code>libvgpu.so</code>. The near miss is placing the check in the device plugin or the kernel. Neither sees allocations.</p>
+        </details>
+        <p>2. <code>nvidia-smi</code> inside a HAMi container shows 3000 MiB total on an 80 GB card. Name the exact function whose interception produces this, and explain why HAMi must fake it for the memory limit to be operationally usable.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p><code>nvmlDeviceGetMemoryInfo</code>, the NVML call that <code>nvidia-smi</code> and most frameworks use to read total and used memory. HAMi-core exports it too and answers with the quota as the total and the ledger's figure as used. It has to, because frameworks size their caches and batch sizes from that figure. PyTorch would otherwise see 80 GB free, allocate optimistically, and hit the hook's fake OOM at an unpredictable point, while operators saw 80 GB on every dashboard as pods failed at 3 GB. Consistent lying makes the limit behave like a small card, which is the point.</p>
+          <p>Check it in the HAMi-core README's list of hijacked calls, and by running <code>nvidia-smi</code> with and without the preload in the same container. The near miss is thinking the hook shrinks the card in the driver. The GPU never learns; only the answers given to the tenant change.</p>
+        </details>
+        <p>3. A tenant statically links against the driver API. State precisely which HAMi guarantees fail, which component still "believes" the tenant is limited, and which chapters' technologies would have kept their limits under the same trick.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Both enforcement guarantees fail. The memory quota, because <code>cuMemAlloc</code> no longer resolves to the hook, so allocations reach the real driver and RM hands out VRAM until the card is full. The compute cap, because the rate limiter ran only on intercepted launches. The scheduler extender still believes the tenant is limited: its ledger records 3000 MiB committed on that card and keeps placing other pods against the remainder, now overlapping memory the tenant took. MIG and vGPU would have held: MIG's walls are programmed into hardware by GSP-RM, and vGPU's share is enforced by the Virtual GPU Manager and firmware below the VM. MPS would fail as well; its limits are environment variables.</p>
+          <p>Check it against the "holds against a hostile tenant" row of the epilogue's choosing table. The near miss is expecting the kubelet or device plugin to notice. They ran at start and never look again.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="ORCH"><span class="tag ORCH">ORCH</span><a href="https://project-hami.io/docs/core-concepts/architecture/">HAMi — Architecture</a> — the four components on one page, authoritative. Read first; then <a href="https://project-hami.io/docs/core-concepts/gpu-virtualization">GPU Virtualization Principles</a> for the interception mechanics this chapter summarized.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://github.com/Project-HAMi/HAMi-core">Project-HAMi/HAMi-core</a> — the hook library itself: env vars, the hijack diagram, and the source if you want to watch <code>rate_limiter</code> work. Read after trying the sidebar.</li>
+          <li class="ref" data-layer="ORCH"><span class="tag ORCH">ORCH</span><a href="https://github.com/Project-HAMi/HAMi">Project-HAMi/HAMi</a> — the main repo: install, the resource-request YAML, supported devices (v2.9.0 current as of this writing).</li>
+          <li class="ref" data-layer="ORCH"><span class="tag ORCH">ORCH</span><a href="https://volcano.sh/en/docs/gpu_virtualization/">Volcano — GPU Virtualization</a> — the same HAMi-core enforcement under a batch scheduler; read to see that family 4 is a pattern several products share.</li>
+          <li class="ref" data-layer="ORCH"><span class="tag ORCH">ORCH</span><a href="https://github.com/NVIDIA/KAI-Scheduler">NVIDIA KAI Scheduler</a> — Run:ai's scheduler, open-sourced; fractional GPU scheduling at fleet scale. Skim the README for the scheduler-side view.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="ch10" class="chapter">
+      <span class="chnum">Chapter 10 · Epilogue</span>
+      <h2>Choosing, the traps that remain, and what comes next</h2>
+      <p class="chmeta">~8 min · all layers — Our kernel launch has now travelled every road: alternating turns, a merged context, a walled instance, a virtual machine, and a policed library. Time to stack the whole tower once, walk the launch end to end one last time, and be honest about the traps.</p>
+
+      <h3>The whole tower, once</h3>
+      <p>Every box below was earned in some chapter. Read it bottom-up if you came for hardware, top-down if you came for Kubernetes.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph K8S_L["Kubernetes control plane"]
+    YAML["pod YAML — gpu, mig-3g.40gb, gpumem/gpucores"]
+    SCHED["scheduler + HAMi extender or DRA claims"]
+  end
+  subgraph NODE["node"]
+    KL["kubelet"]
+    DP["device plugin — replicas, MPS, MIG strategy"]
+    CDI2["container toolkit + CDI spec"]
+  end
+  subgraph CONT["container"]
+    FW2["framework"]
+    RT2["CUDA runtime libcudart"]
+    HK["libvgpu.so hook — only under HAMi"]
+    DA["CUDA driver API libcuda"]
+  end
+  subgraph HKERN["host kernel"]
+    NVKO["nvidia.ko RM client + nvidia-uvm"]
+  end
+  subgraph GPUL["GPU"]
+    GSP2["GSP-RM firmware — contexts, walls, policies"]
+    RLS["runlist scheduler — turns, TSGs"]
+    GI4["GPU instance walls — MIG"]
+    SM4["work distributor, SM slices, memory slices"]
+  end
+  YAML -.-> SCHED -.-> KL -.-> DP -.-> CDI2 -.-> CONT
+  FW2 ==> RT2 ==> HK ==> DA
+  DA -.->|"setup ioctls once"| NVKO -.-> GSP2 -.-> RLS
+  DA ==>|"pushbuffer + doorbell"| RLS ==> GI4 ==> SM4
+  style HK fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style GSP2 fill:#fde8ec,stroke:#be123c,stroke-width:2px
+  style SM4 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 10.1 — The full stack, with both planes.</b> Notice the dotted control cascade from YAML all the way to GSP-RM (red), a dozen hops, all setup, and the single thick data path from <code>libcuda</code> to the SM slices (blue) that skips every one of them. The amber hook is present only under HAMi; the GPU-instance walls only under MIG. Everything else is always there.</figcaption>
+      </figure>
+
+      <h3>The last walk</h3>
+      <p>One final trace, on the stack you are most likely to build: a MIG-partitioned H100 behind the GPU Operator. A pod requests <code>nvidia.com/mig-3g.40gb: 1</code>. The scheduler finds a node with a free instance. The kubelet calls the device plugin; the plugin answers with the instance's CDI name and <code>CUDA_VISIBLE_DEVICES=MIG-&lt;uuid&gt;</code>; the runtime mounts the device nodes, the cap nodes, and the host's <code>libcuda</code>. The process starts. <code>libcuda</code> opens the device files, and its setup ioctls travel to GSP-RM, which builds a context <em>inside the instance</em>: private GMMU page tables over 40 GB of walled memory slices, channels in a TSG on the instance's own runlist. Then the application serves traffic: <code>cuLaunchKernel</code>, pushbuffer write, doorbell ring, the instance's runlist scheduler grants the turn, the instance's work distributor deals thread blocks onto the instance's SM slices, and the GMMU translates every access into memory slices no neighbour can reach.</p>
+      <p><b>When a pod asks for a slice of a GPU, all the sharing has already happened by the time the doorbell rings: the scheduler chose the card, the device plugin named the instance, CDI mounted the device nodes, GSP-RM built the walls, and the launch itself travels a path that no sharing technology touches.</b></p>
+      <p>That sentence is the whole document. Every technology you met differs only in <em>which</em> walls get built at setup (scheduler turns, a merged context, silicon partitions, a virtual machine, a library's ledger) and never in the launch's runtime path, which has been the undisturbed launch path (diagram 2.1) since the launch-path chapter and never changed once.</p>
+
+      <h3>Choosing, honestly</h3>
+      <table>
+        <tr><th></th><th>time-slicing</th><th>MPS</th><th>MIG</th><th>vGPU</th><th>HAMi</th></tr>
+        <tr><td>VRAM quota</td><td>none — first come, OOM</td><td>opt-in pinned limit</td><td>hard, in silicon</td><td>hard, per profile</td><td>ledger, in-process</td></tr>
+        <tr><td>address spaces</td><td>isolated (GMMU)</td><td>isolated since Volta</td><td>isolated</td><td>isolated + IOMMU</td><td>isolated (GMMU)</td></tr>
+        <tr><td>fault blast radius</td><td>worst Xids hit all</td><td>one fault hits every client</td><td>contained to instance</td><td>contained to VM share</td><td>same as time-slicing</td></tr>
+        <tr><td>performance isolation</td><td>none</td><td>SM cap; L2 + bandwidth shared</td><td>strong — private slices</td><td>policy or MIG-backed</td><td>statistical governor</td></tr>
+        <tr><td>holds against a hostile tenant</td><td>no limits to bypass</td><td>no</td><td>yes</td><td>yes</td><td>no — preload can be shed</td></tr>
+        <tr><td>granularity / cost</td><td>free, coarse</td><td>free, fine, cooperative</td><td>7 fixed shapes, drain to reshape</td><td>license + matched drivers</td><td>free, any fraction, no drain</td></tr>
+      </table>
+      <p>The decision procedure that falls out: <b>strangers or SLAs → MIG</b> (add vGPU when tenants are VMs); <b>your own team's small jobs → MPS</b> inside whatever wall you already have; <b>dev clusters and laptops-writ-large → HAMi</b> or plain time-sliced replicas, with eyes open about enforcement; and compose freely; the families are layers (the layer-cut diagram, diagram 7.1, one last time).</p>
+
+      <h3>Traps to respect</h3>
+      <p>The ones that cost real incidents: MIG reshaping requires draining the affected instances, so plan partitions in advance; improvising them per pod does not work (DRA is changing exactly this, slowly). A time-sliced replica number is a promise your hardware never made. MPS between teams turns one team's bug into everyone's outage, unattributed. HAMi's <code>nvidia-smi</code> lies to the tenant by design; teach your users before they file tickets about the shrunken card. vGPU version-locks host and guest drivers, so an upgrade is a coordinated sequence of steps. And every family still shares one physical card: an Xid that announces the GPU fell off the bus takes every tenant down, so monitoring (the exporter for <b>DCGM</b>, NVIDIA's Data Center GPU Manager, which the GPU Operator ships) is not optional at any layer.</p>
+
+      <h3>Where the field is going</h3>
+      <p>Two currents worth watching from here. First, the scheduling brain is moving up: DRA went stable, NVIDIA's DRA driver can express MIG shapes as claims, and schedulers like KAI treat fractions, topology and preemption as first-class fleet problems; the direction is partitions created on demand for the pod that needs them. Second, the trust boundary is moving down: H100-class hardware added <b>confidential computing</b> modes that encrypt VRAM and attest firmware, aiming sharing at tenants who distrust not just each other but the <em>operator</em>. Both currents deepen the pattern you now know by heart: model the share in a scheduler, enforce it as low in the stack as the hardware allows.</p>
+      <p>What this document owes you and could not pay: vGPU's internals past the public docs (the licensed stack is documented behind NVIDIA's enterprise portal; the architecture here is complete, the tuning detail is not), AMD and Intel's parallel universes (AMD's <b>MxGPU</b> shares a GPU as plain SR-IOV Virtual Functions with no licensed manager; a future appendix could compare), and hands-on numbers from the H100 that was "arriving later". Rerun the sidebars when it arrives, and the Try-it commands become your lab.</p>
+
+      <div class="recap">
+        <h4>Recap — of everything</h4>
+        <p>A GPU is countable units behind one launch path. Sharing means choosing walls at setup: the runlist alternates turns (free, no quotas), MPS merges contexts (max packing, shared fate), MIG partitions silicon (real walls, seven shapes, drain to redraw), vGPU wraps VMs around borrowed walls (licensed, IOMMU-backed), HAMi impersonates walls from inside the process (any card, any fraction, cooperative trust). Kubernetes counts whatever the walls produce: integers today, claims tomorrow. The launch itself never changes (pushbuffer, doorbell, runlist, work distributor, SMs), with the sharing decided long before the bell.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>DCGM</dt><dd>Data Center GPU Manager — NVIDIA's monitoring and health library; its exporter, shipped by the GPU Operator, is how Xids reach your dashboards</dd>
+          <dt>confidential computing (GPU)</dt><dd>Hopper-onward mode that encrypts VRAM and attests the firmware, aimed at tenants who distrust the operator</dd>
+          <dt>MxGPU</dt><dd>AMD's GPU sharing: plain SR-IOV Virtual Functions, no licensed manager</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself — the finish line</h4>
+        <p>1. The sentence this document promised: explain, out loud, how a pod requesting a GPU fraction ends up running kernels on real silicon, once for MIG and once for HAMi, naming what enforces the memory wall in each.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>MIG: the pod requests <code>nvidia.com/mig-3g.40gb</code>; the scheduler finds a node with a free instance; the device plugin returns the instance's CDI name and MIG UUID; the runtime mounts device nodes, capability tokens and the host's <code>libcuda</code>; GSP-RM builds a context inside the instance; launches then take the ordinary hardware path on the instance's SM slices. The memory wall is the instance's memory slices, programmed into hardware by GSP-RM. HAMi: the pod requests <code>gpumem</code> and <code>gpucores</code>; the webhook and extender pick a node and a GPU and write annotations; HAMi's device plugin preloads <code>libvgpu.so</code> and sets the two limit variables; every <code>cu*</code> call passes through the hook, and launches that pass the token check reach an unpartitioned GPU by the same path. The memory wall is the hook's ledger inside the tenant's process.</p>
+          <p>Check it against the full-stack diagram (diagram 10.1). The near miss is describing two different runtime paths; only the setup differs.</p>
+        </details>
+        <p>2. Design call: 40 data scientists, bursty notebooks, one 8×H100 box, all employees. Pick your stack, chapter by chapter, and name the one failure mode you accepted.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>HAMi, or plain time-sliced replicas, under the GPU Operator. The launch path is untouched, so latency is fine; bursty notebooks are idle most of the time, so time-slicing already gives them turns; HAMi adds per-pod memory quotas of any size and dozens of tenants per card, which seven MIG slices per GPU cannot match for 40 people; vGPU buys a license and VM isolation that employees do not need. The failure mode accepted: shared fate and cooperative enforcement. One notebook's context-level Xid, or a user who strips the preload, affects neighbours, accepted because the tenants are colleagues you can talk to.</p>
+          <p>Check it against the "holds against a hostile tenant" row of the choosing table, which reads "no" for this stack. The near miss is MIG "because it is safer". Fifty-six small slices for 40 bursty users would idle most of the silicon, and reshaping per user needs drains.</p>
+        </details>
+        <p>3. Same box, but the tenants are three external customers with SLAs. What changes, and which row of the choosing table forced it?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Move to MIG, and to MIG-backed vGPU if the customers need VMs or their own drivers. Give each customer fixed instances and keep HAMi and MPS out. Two rows force it. "Holds against a hostile tenant" reads "no" for HAMi, MPS and time-slicing, because their limits are in-process or advisory. "Performance isolation" is delivered in silicon only by MIG, with private L2 slices and bandwidth, and an SLA is a promise about performance that only a hardware wall lets you make without depending on the neighbour's behaviour. Fault blast radius follows: under MIG a customer's fault stays in its instance.</p>
+          <p>Check it against those rows of the choosing table and the MIG chapter's account of what a GPU instance owns. The near miss is choosing vGPU alone. Time-sliced vGPU isolates the VM but still shares engines and bandwidth; the SLA needs the MIG-backed flavour.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper — the two that summarize</h4>
+        <ul>
+          <li class="ref" data-layer="K8S"><span class="tag K8S">K8S</span><a href="https://developer.nvidia.com/blog/improving-gpu-utilization-in-kubernetes/">Improving GPU Utilization in Kubernetes</a> — reread it now; every row of its comparison table should feel obvious.</li>
+          <li class="ref" data-layer="FW"><span class="tag FW">FW</span><a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/index.html">MIG User Guide</a> — the document you will actually hold when the H100 arrives.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="glossary" class="card">
+      <h2>Merged glossary</h2>
+      <p class="note">Every term, grouped by the chapter that defined it. If a word in a later chapter puzzles you, its home is earlier in this list.</p>
+      <div class="words"><h4>Chapter 0 — One GPU, many tenants</h4><dl>
+        <dt>kernel (GPU)</dt><dd>one function launched onto the GPU, executed by thousands of parallel threads; unrelated to the host kernel</dd>
+        <dt>CUDA</dt><dd>Compute Unified Device Architecture — NVIDIA's programming model and software stack</dd>
+        <dt>SM</dt><dd>streaming multiprocessor — the GPU's core-like unit; 108 on A100, 132 on H100 SXM</dd>
+        <dt>VRAM</dt><dd>the GPU's on-board memory; not swappable in practice</dd>
+        <dt>context (GPU)</dt><dd>per-process bundle of GPU-side state — precise form in the launch-path chapter</dd>
+        <dt>time-slicing</dt><dd>sharing family 1: tenants alternate use of the whole GPU</dd>
+        <dt>MPS</dt><dd>Multi-Process Service — family 1's cooperative variant: one shared context, concurrent SMs</dd>
+        <dt>MIG</dt><dd>Multi-Instance GPU — family 2: the silicon is partitioned</dd>
+        <dt>vGPU</dt><dd>NVIDIA's virtualization product — family 3: each VM sees a fake whole GPU</dd>
+        <dt>HAMi</dt><dd>CNCF middleware — family 4: a library enforces software-only limits</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 1 — The silicon</h4><dl>
+        <dt>GPC</dt><dd>graphics processing cluster — largest repeated compute block; 8 per die</dd>
+        <dt>TPC</dt><dd>texture processing cluster — 2 SMs; up to 8 per GPC</dd>
+        <dt>CUDA core</dt><dd>FP32 arithmetic unit; 64 per SM</dd>
+        <dt>tensor core</dt><dd>matrix-multiply unit; 4 per SM</dd>
+        <dt>warp</dt><dd>32 threads executing one instruction together — the SM's scheduling unit</dd>
+        <dt>thread block</dt><dd>programmer-sized group of threads placed on one SM as a unit</dd>
+        <dt>work distributor</dt><dd>die-level dispatcher dealing thread blocks to SMs (GigaThread Engine)</dd>
+        <dt>HBM</dt><dd>high-bandwidth stacked DRAM on the GPU package — the physical VRAM</dd>
+        <dt>L2 slice</dt><dd>independent section of L2, each caching one VRAM region</dd>
+        <dt>memory controller</dt><dd>unit driving one portion of HBM</dd>
+        <dt>crossbar</dt><dd>any-to-any on-die switch between SMs and L2 slices</dd>
+        <dt>memory slice</dt><dd>one eighth of the memory system — VRAM + serving L2 + bandwidth; MIG's memory unit</dd>
+        <dt>engine</dt><dd>independent non-SM work unit: copy engines, decoders, similar</dd>
+        <dt>copy engine</dt><dd>DMA engine moving data host↔VRAM alongside compute</dd>
+        <dt>NVDEC</dt><dd>video decoder engine; 5 on A100, 7 on H100</dd>
+        <dt>host interface</dt><dd>the GPU's PCIe endpoint logic — the way in</dd>
+        <dt>BAR1 aperture</dt><dd>PCIe window for host access into VRAM</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 2 — How a launch reaches the silicon</h4><dl>
+        <dt>CUDA runtime</dt><dd><code>libcudart</code> — the high-level library applications link</dd>
+        <dt>CUDA driver API</dt><dd><code>libcuda.so</code> — ships with the driver; the narrow funnel (<code>cuLaunchKernel</code>)</dd>
+        <dt>context (precise)</dt><dd>private GMMU page tables + channels in a TSG + bookkeeping</dd>
+        <dt>GMMU</dt><dd>the GPU's MMU; per-context page tables in VRAM</dd>
+        <dt>GPU virtual address space</dt><dd>per-context pointer space — the memory-isolation floor</dd>
+        <dt>UVM</dt><dd>unified virtual memory — CPU/GPU managed memory migrating on fault</dd>
+        <dt>channel</dt><dd>command queue in memory the GPU reads; mapped into the owning process</dd>
+        <dt>pushbuffer</dt><dd>the command stream written into a channel</dd>
+        <dt>doorbell (GPU)</dt><dd>MMIO register announcing new pushbuffer work</dd>
+        <dt>TSG</dt><dd>time-slice group — a context's channels as one scheduling unit</dd>
+        <dt>runlist</dt><dd>ordered list of TSGs the hardware walks</dd>
+        <dt>runlist scheduler</dt><dd>host-interface hardware granting TSGs their turns</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 3 — Driver and firmware</h4><dl>
+        <dt>Resource Manager (RM)</dt><dd>the driver's core — object system owning contexts, channels, memory, engines</dd>
+        <dt>GSP</dt><dd>GPU System Processor — RISC-V core on the die, Turing onward</dd>
+        <dt>GSP-RM</dt><dd>RM compiled as firmware running on the GSP; host driver is its RPC client</dd>
+        <dt>open GPU kernel modules</dt><dd>NVIDIA's published host kernel driver; GSP-only; userspace stays closed</dd>
+        <dt>NVML</dt><dd>management library under <code>nvidia-smi</code> and every k8s GPU component</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 4 — Time-slicing</h4><dl>
+        <dt>round-robin (runlist)</dt><dd>default policy: equal turns per TSG, in rotation</dd>
+        <dt>GPU context switch</dt><dd>megabytes of engine state saved/restored via VRAM preemption buffers</dd>
+        <dt>compute preemption</dt><dd>instruction-granularity kernel interruption, Pascal onward</dd>
+        <dt>Xid</dt><dd>numbered driver error in the kernel log; blast radius varies by number</dd>
+        <dt>time-sliced replicas</dt><dd>device-plugin fiction advertising one GPU as N, unenforced</dd>
+        <dt>oversubscription</dt><dd>admitting more tenants than can be served at once, betting on gaps</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 5 — MPS</h4><dl>
+        <dt>MPS control daemon</dt><dd><code>nvidia-cuda-mps-control</code> — the rendezvous point</dd>
+        <dt>MPS server</dt><dd>per-user owner of the single shared GPU context</dd>
+        <dt>MPS client</dt><dd>CUDA process that joined the shared context</dd>
+        <dt>active thread percentage</dt><dd>cap on a client's share of execution resources; shrink-only below the daemon's ceiling</dd>
+        <dt>stream</dt><dd>ordered kernel queue inside a context; many per context, free to overlap</dd>
+        <dt>pinned device memory limit</dt><dd>per-device VRAM allocation cap for an MPS client</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 6 — MIG</h4><dl>
+        <dt>MIG mode</dt><dd>per-GPU switch enabling hardware partitioning</dd>
+        <dt>SM slice</dt><dd>MIG's compute unit — roughly one GPC; 7 per card</dd>
+        <dt>GPU instance (GI)</dt><dd>walled bundle of SM slices, memory slices and engines; private fault domain</dd>
+        <dt>compute instance (CI)</dt><dd>subdivision of a GI's SM slices sharing the GI's memory</dd>
+        <dt>MIG profile</dt><dd>fixed shape <code>[N]g.[M]gb</code> from the per-card menu</dd>
+        <dt>MIG device / UUID</dt><dd>what CUDA targets via <code>CUDA_VISIBLE_DEVICES=MIG-…</code></dd>
+        <dt>nvidia-caps</dt><dd>capability device nodes — per-instance permission tokens under cgroups</dd>
+        <dt>drain</dt><dd>emptying instances of work — precondition for reshaping</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 7 — vGPU</h4><dl>
+        <dt>NVIDIA vGPU</dt><dd>licensed product: per-VM virtual GPUs on one physical card</dd>
+        <dt>mediated device (mdev)</dt><dd>VFIO framework where a driver fabricates virtual devices in software</dd>
+        <dt>Virtual GPU Manager</dt><dd>hypervisor-side driver package mediating all guest control-plane requests</dd>
+        <dt>vGPU type / profile</dt><dd>menu entry pairing VRAM share and workload class, one per VM</dd>
+        <dt>time-sliced vGPU</dt><dd>share = scheduler turns on common engines</dd>
+        <dt>best effort / equal share / fixed share</dt><dd>the three time-sliced policies: demand-driven; equal among running VMs; fixed even beside idle VMs</dd>
+        <dt>MIG-backed vGPU</dt><dd>share = a dedicated MIG instance under the VM</dd>
+        <dt>license service</dt><dd>what the guest driver activates against; cloud or on-prem</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 8 — Kubernetes plumbing</h4><dl>
+        <dt>NVIDIA Container Toolkit</dt><dd>injects device nodes + driver userspace into containers; generates CDI specs</dd>
+        <dt>CDI</dt><dd>Container Device Interface — declarative device-injection spec; CNI's design for devices</dd>
+        <dt>MIG strategy</dt><dd>plugin setting <code>none</code> / <code>single</code> / <code>mixed</code> controlling how instances are advertised</dd>
+        <dt>GPU Operator</dt><dd>runs driver, toolkit, plugin, discovery, MIG manager as cluster-managed containers</dd>
+        <dt>GPU Feature Discovery</dt><dd>labels nodes with GPU model and capabilities</dd>
+        <dt>DRA</dt><dd>Dynamic Resource Allocation — claim-based device model, GA in Kubernetes v1.34</dd>
+        <dt>ResourceClaim</dt><dd>API object stating a device need with scheduler-evaluable structured parameters</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 9 — HAMi</h4><dl>
+        <dt>HAMi-core / libvgpu.so</dt><dd>interception library shadowing <code>cu*</code> and NVML symbols; HAMi's enforcement half</dd>
+        <dt>API interception</dt><dd>preloading a library so its symbols shadow the real ones</dd>
+        <dt>memory ledger</dt><dd>the hook's per-container VRAM account, checked before the driver hears anything</dd>
+        <dt>token pool governor</dt><dd>launches spend tokens; an NVML-sampling watcher refills toward the target percent</dd>
+        <dt>mutating webhook</dt><dd>rewrites GPU-fraction pods to use HAMi's scheduler</dd>
+        <dt>scheduler extender</dt><dd>filter/score/bind add-on holding the real per-GPU ledger; writes placements to annotations</dd>
+        <dt>gpumem / gpucores</dt><dd>HAMi resources: MiB of VRAM, percent of compute, schedulable per card</dd>
+      </dl></div>
+      <div class="words"><h4>Chapter 10 — Epilogue</h4><dl>
+        <dt>DCGM</dt><dd>Data Center GPU Manager — NVIDIA's monitoring library; exporter shipped by the GPU Operator</dd>
+        <dt>confidential computing (GPU)</dt><dd>Hopper-onward VRAM encryption and firmware attestation</dd>
+        <dt>MxGPU</dt><dd>AMD's SR-IOV-native GPU sharing</dd>
+      </dl></div>
+    </section>
+
+    <section id="references" class="card">
+      <h2>All references, by layer</h2>
+      <p class="note">Every URL below was fetched and verified in August 2026. Use the filter buttons in "How to read this" to hide layers.</p>
+      <div class="refs"><h4><span class="tag HW">HW</span> silicon</h4><ul>
+        <li class="ref" data-layer="HW"><a href="https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf">NVIDIA A100 Tensor Core GPU Architecture</a> — whitepaper; architecture chapters for the silicon chapter, its MIG chapter for the MIG chapter.</li>
+        <li class="ref" data-layer="HW"><a href="https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c">NVIDIA H100 Tensor Core GPU Architecture</a> — the deltas: HBM3, 132 SMs, per-instance decoders, confidential computing.</li>
+        <li class="ref" data-layer="HW"><a href="https://images.nvidia.com/content/pdf/tesla/whitepaper/pascal-architecture-whitepaper.pdf">NVIDIA Tesla P100 whitepaper</a> — Compute Preemption section (p.9) only.</li>
+        <li class="ref" data-layer="HW"><a href="https://github.com/NVIDIA/open-gpu-doc">NVIDIA/open-gpu-doc</a> — hardware classes, methods and registers; where pushbuffers and doorbells are documented for real.</li>
+      </ul></div>
+      <div class="refs"><h4><span class="tag FW">FW</span> firmware and partitioning</h4><ul>
+        <li class="ref" data-layer="FW"><a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/index.html">NVIDIA Multi-Instance GPU User Guide</a> — the MIG authority: concepts, profiles, commands.</li>
+        <li class="ref" data-layer="FW"><a href="https://download.nvidia.com/XFree86/Linux-x86_64/580.65.06/README/gsp.html">GSP Firmware — driver README, GSP chapter</a> — the official GSP offload explanation (versioned URL).</li>
+        <li class="ref" data-layer="FW"><a href="https://docs.nvidia.com/vgpu/index.html">NVIDIA Virtual GPU Software docs hub</a> — all vGPU releases; 20.2 current at writing.</li>
+        <li class="ref" data-layer="FW"><a href="https://docs.nvidia.com/vgpu/20.0/grid-vgpu-user-guide/index.html">Virtual GPU Software User Guide</a> — architecture, vGPU types, manager install, SR-IOV setup.</li>
+        <li class="ref" data-layer="FW"><a href="https://docs.nvidia.com/ai-enterprise/release-8/latest/infra-software/vgpu/features/scheduling.html">Scheduling Policies — NVIDIA AI Enterprise</a> — best effort / equal share / fixed share, with tuning guidance.</li>
+      </ul></div>
+      <div class="refs"><h4><span class="tag KERNEL">KERNEL</span> host kernel driver</h4><ul>
+        <li class="ref" data-layer="KERNEL"><a href="https://github.com/NVIDIA/open-gpu-kernel-modules">NVIDIA Linux Open GPU Kernel Module Source</a> — README for the GSP requirement; source as the public window into RM.</li>
+        <li class="ref" data-layer="KERNEL"><a href="https://developer.nvidia.com/blog/nvidia-releases-open-source-gpu-kernel-modules">NVIDIA Releases Open-Source GPU Kernel Modules</a> — the 2022 announcement and what stayed closed.</li>
+        <li class="ref" data-layer="KERNEL"><a href="https://docs.nvidia.com/deploy/nvml-api/index.html">NVML API Reference</a> — the control-plane API; for monitoring and programmatic MIG/vGPU control.</li>
+        <li class="ref" data-layer="KERNEL"><a href="https://docs.nvidia.com/deploy/xid-errors/latest/index.html">Xid Errors</a> — the error-number catalog; bookmark for the bad day.</li>
+        <li class="ref" data-layer="KERNEL"><a href="https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/device-nodes-and-capabilities.html">MIG — Device Nodes and Capabilities</a> — <code>/dev/nvidia-caps</code>, capability tree, cgroup mechanism.</li>
+      </ul></div>
+      <div class="refs"><h4><span class="tag CUDA">CUDA</span> user-space stack</h4><ul>
+        <li class="ref" data-layer="CUDA"><a href="https://docs.nvidia.com/cuda/cuda-driver-api/index.html">CUDA Driver API reference</a> — ground truth for <code>cu*</code>; <a href="https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EXEC.html">Execution Control</a> has <code>cuLaunchKernel</code>.</li>
+        <li class="ref" data-layer="CUDA"><a href="https://docs.nvidia.com/deploy/mps/architecture.html">CUDA MPS — Architecture</a> — daemon/server/client and the Volta rework.</li>
+        <li class="ref" data-layer="CUDA"><a href="https://docs.nvidia.com/deploy/mps/when-to-use-mps.html">CUDA MPS — When to Use MPS</a> — the isolation fine print.</li>
+        <li class="ref" data-layer="CUDA"><a href="https://docs.nvidia.com/deploy/mps/appendix-tools-and-interface-reference.html">CUDA MPS — Tools and Interface Reference</a> — every env var and daemon command.</li>
+        <li class="ref" data-layer="CUDA"><a href="https://github.com/Project-HAMi/HAMi-core">Project-HAMi/HAMi-core</a> — the hook library: env vars, hijack diagram, source.</li>
+      </ul></div>
+      <div class="refs"><h4><span class="tag K8S">K8S</span> Kubernetes</h4><ul>
+        <li class="ref" data-layer="K8S"><a href="https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/">Kubernetes — Device Plugins</a> — the base protocol.</li>
+        <li class="ref" data-layer="K8S"><a href="https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/">Kubernetes — Dynamic Resource Allocation</a> — claims, DeviceClasses, structured parameters.</li>
+        <li class="ref" data-layer="K8S"><a href="https://github.com/cncf-tags/container-device-interface">Container Device Interface</a> — the CDI spec repo; five-minute README.</li>
+        <li class="ref" data-layer="K8S"><a href="https://github.com/NVIDIA/k8s-device-plugin">NVIDIA device plugin for Kubernetes</a> — time-slicing, MPS and MIG-strategy config schema.</li>
+        <li class="ref" data-layer="K8S"><a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html">NVIDIA GPU Operator</a> — with <a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html">Time-Slicing GPUs</a> and <a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-operator-mig.html">GPU Operator with MIG</a>.</li>
+        <li class="ref" data-layer="K8S"><a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/arch-overview.html">NVIDIA Container Toolkit — Architecture Overview</a> — the injector's layers, and the bridge to CDI.</li>
+        <li class="ref" data-layer="K8S"><a href="https://developer.nvidia.com/blog/improving-gpu-utilization-in-kubernetes/">Improving GPU Utilization in Kubernetes</a> — the 2022 comparison-table blog.</li>
+        <li class="ref" data-layer="K8S"><a href="https://developer.nvidia.com/blog/maximize-ai-infrastructure-throughput-by-consolidating-underutilized-gpu-workloads/">Maximize AI Infrastructure Throughput…</a> — March 2026 time-slicing vs MIG benchmarks.</li>
+      </ul></div>
+      <div class="refs"><h4><span class="tag ORCH">ORCH</span> orchestrators</h4><ul>
+        <li class="ref" data-layer="ORCH"><a href="https://github.com/Project-HAMi/HAMi">Project-HAMi/HAMi</a> — main repo: install, request YAML, device support.</li>
+        <li class="ref" data-layer="ORCH"><a href="https://project-hami.io/docs/core-concepts/architecture/">HAMi — Architecture</a> — the four components; plus <a href="https://project-hami.io/docs/core-concepts/gpu-virtualization">GPU Virtualization Principles</a> for mechanism detail.</li>
+        <li class="ref" data-layer="ORCH"><a href="https://www.cncf.io/blog/2026/07/15/hami-becomes-a-cncf-incubating-project/">HAMi becomes a CNCF incubating project</a> — July 2026; project status and adoption.</li>
+        <li class="ref" data-layer="ORCH"><a href="https://volcano.sh/en/docs/gpu_virtualization/">Volcano — GPU Virtualization</a> — HAMi-core and MIG modes under the Volcano scheduler; how-to in the <a href="https://volcano.sh/en/docs/user-guide/how_to_use_volcano_vgpu/">vGPU user guide</a>.</li>
+        <li class="ref" data-layer="ORCH"><a href="https://run-ai-docs.nvidia.com/saas/platform-management/runai-scheduler/resource-optimization/fractions">NVIDIA Run:ai — GPU Fractions</a> — the commercial cousin of family 4.</li>
+        <li class="ref" data-layer="ORCH"><a href="https://github.com/NVIDIA/KAI-Scheduler">NVIDIA KAI Scheduler</a> — Run:ai's scheduler, open-sourced 2025.</li>
+      </ul></div>
+    </section>
+  </main>
+</div>
+<footer>One GPU, Many Tenants — written August 2026. All URLs verified at time of writing.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script>
+  document.querySelectorAll('#filters button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      b.classList.toggle('off');
+      const off=[...document.querySelectorAll('#filters button.off')].map(x=>x.dataset.l);
+      document.querySelectorAll('li.ref').forEach(li=>{
+        li.style.display = off.includes(li.dataset.layer) ? 'none' : '';
+      });
+    });
+  });
+  const ctl=document.getElementById('answerctl');
+  if(ctl){ctl.addEventListener('click',()=>{
+    const all=[...document.querySelectorAll('details.ans')];
+    const open=all.every(d=>d.open);
+    all.forEach(d=>d.open=!open);
+    ctl.textContent = open ? 'Open all answers' : 'Close all answers';
+  });}
+  window.addEventListener('beforeprint',()=>document.querySelectorAll('details.ans').forEach(d=>d.open=true));
+</script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<section id="ch1" class="chapter">
+<span class="chnum">Chapter 1</span>
+<h2>Birth of an skb: the NIC, the interrupt, NAPI, and the backlog</h2>
+<p class="chmeta">~RT1 min · <span class="tag HW">HW</span> · <em>Spine:</em> a frame carrying our TCP segment has just arrived at the network card. There is no skb yet. By the end of this chapter there is one, and it is standing at the door of the L2 receive loop.</p>
+
+<p>This chapter skips link training, PHY negotiation, and the PCIe transaction layer. All real, all irrelevant here. It treats one Ethernet driver, <code>igb</code> for Intel gigabit cards, as the worked example, because its receive loop is short enough to read. Your laptop's Wi-Fi driver takes a longer road through the wireless stack and arrives at the same door; the last section shows where.</p>
+
+<h3>The ring: the card writes before anyone asks</h3>
+<p>The driver does not fetch packets. It prepares empty buffers in advance and the card fills them. The structure that holds this arrangement is the <b>receive ring</b>: a circular array of <b>descriptors</b>, each a small record with the physical address of one buffer and, after the card has used it, the length and status of the frame it wrote there. In <code>igb</code> the ring is <code>struct igb_ring</code> (<code>drivers/net/ethernet/intel/igb/igb.h:319</code>), with the descriptor array at <code>desc</code>, the ring size at <code>count</code>, and two indices: <code>next_to_use</code>, the next slot the driver will hand to the card, and <code>next_to_clean</code>, the next slot the driver expects the card to have filled. The gap between them is the number of frames waiting.</p>
+<p>The card writes into those buffers by <b>DMA</b>, direct memory access: it moves bytes into RAM without the CPU touching them, then writes the length into the descriptor. The buffers come from a <b>page pool</b>, a per-ring recycling allocator that hands out page fragments already mapped for DMA, so the driver does not pay a mapping cost per frame. <code>igb_alloc_rx_buffers</code> (<code>igb_main.c:9205</code>) refills empty slots. When the ring is full of unread frames and the card has nowhere to write, it drops on the wire side and increments a counter you read with <code>ethtool -S</code>.</p>
+
+<h3>The interrupt does almost nothing</h3>
+<p>When a frame lands, the card raises an interrupt. The handler that runs, <code>igb_msix_ring</code> (<code>igb_main.c:7153</code>), is a <b>hardirq</b>: it executes with interrupts disabled on that CPU, so it must be short. It does one thing, at line 7160: <code>napi_schedule_irqoff</code>. That marks the ring's <b>NAPI</b> instance as needing service, adds it to this CPU's poll list, raises a software interrupt, and returns. The card's interrupt is left masked. No packet has been looked at.</p>
+<p>NAPI, the "new API" that is now twenty years old, is the contract between drivers and the core. Instead of one interrupt per frame, the driver takes one interrupt, then <b>polls</b> the ring in a loop until it is empty or a quota is spent, and only then re-enables the interrupt. Under load the interrupt fires rarely and the CPU spends its time in the poll. Under light load each frame costs an interrupt plus a short poll. The quota per poll call is the NAPI <b>weight</b>, 64 by default.</p>
+
+<h3>The softirq: budgets and the poll</h3>
+<p>A <b>softirq</b> is deferred work that runs with interrupts enabled, either right after the hardirq returns or in the <code>ksoftirqd</code> kernel thread when there is too much of it. Networking receive is <code>NET_RX_SOFTIRQ</code>, and its handler is <code>net_rx_action</code> (<code>net/core/dev.c:7920</code>). It sets two limits at the top: a <b>budget</b> of packets, <code>netdev_budget</code>, default 300 (line 7926), and a time limit, <code>netdev_budget_usecs</code>, default 2,000 microseconds (line 7923). Then it takes NAPI instances off the poll list one at a time and calls <code>napi_poll</code> (line 7958), subtracting what each one processed. When the budget or the time is gone it stops, increments the <b>time squeeze</b> counter (lines 7964 to 7970, visible as the third column of <code>/proc/net/softnet_stat</code>), and re-raises itself so the rest is handled later.</p>
+<p>For our ring, <code>napi_poll</code> calls the driver's poll function, <code>igb_poll</code> (<code>igb_main.c:8278</code>), which calls <code>igb_clean_rx_irq</code> with the weight as its budget (line 8300). That function is the loop that turns descriptors into skbs (<code>igb_main.c:9016</code>). Read its head, lines 9035 to 9058: refill the ring if enough slots have been consumed; read the descriptor at <code>next_to_clean</code>; if its length field is zero the card has not written it yet, so stop; otherwise issue a <code>dma_rmb</code> so the CPU does not read the buffer before it has read the length that says the buffer is ready.</p>
+
+<h3>The skb is born</h3>
+<p>Now the skb appears. <code>igb_build_skb</code> (<code>igb_main.c:8664</code>) allocates only the metadata block, through <code>napi_build_skb</code>, and points it at the page fragment the card already filled. The bytes are not copied. This is the general rule for modern drivers: the box was filled by DMA, and the driver only clips a label to it. <code>igb_process_skb_fields</code> (line 9131) fills in the label: <code>skb-&gt;protocol</code> from the Ethernet type through <code>eth_type_trans</code> (line 8929), the hardware checksum result, the receive hash, any VLAN tag. Then, at line 9133, the driver hands the skb to the core with <code>napi_gro_receive</code>.</p>
+<p>That name is a small lie in 7.2. <code>napi_gro_receive</code> is now an inline wrapper (<code>include/linux/netdevice.h:4311</code>) around <code>gro_receive_skb</code> (<code>net/core/gro.c:638</code>), so when you trace it with bpftrace you probe the second name. What it does is <b>GRO</b>, generic receive offload: it holds back consecutive segments of the same TCP flow and merges them into one larger skb, so the rest of the stack does its work once per merged packet instead of once per wire frame. Merging is bounded at about 64 KB, and the merged skb keeps the original frames as a list of fragments. When a flow's merged skb is complete, or the poll is ending, <code>gro_normal_one</code> (<code>include/net/gro.h:537</code>) adds it to a per-NAPI list, and <code>gro_normal_list</code> (line 519) flushes that list into <code>netif_receive_skb_list_internal</code> after 8 skbs, the <code>gro_normal_batch</code> default.</p>
+<p><code>netif_receive_skb_list_internal</code> (<code>net/core/dev.c:6420</code>) is where the driver's world ends. It checks once whether receive packet steering wants this skb on another CPU (below), and otherwise calls <code>__netif_receive_skb_list</code>, which hands each skb to <code>__netif_receive_skb_core</code>, the loop that chapter 3 is about.</p>
+
+<h3>The second door: netif_rx and the backlog</h3>
+<p>Not every skb arrives from a poll. Sometimes a piece of code already holding a fully formed skb wants the receive path to run on it: the loopback driver, a veth, a tunnel decapsulating an inner packet, a driver too old to have NAPI. For those there is <code>netif_rx</code>, and its variant <code>__netif_rx</code> for callers already in softirq context (<code>net/core/dev.c:5778</code> and 5746). Both call <code>netif_rx_internal</code> (line 5706), and it calls <code>enqueue_to_backlog</code> (line 5381).</p>
+<p>The <b>backlog</b> is a per-CPU queue, <code>softnet_data.input_pkt_queue</code> (<code>include/linux/netdevice.h:3622</code>), with a per-CPU fake NAPI instance attached to it, <code>softnet_data.backlog</code> (line 3624). <code>enqueue_to_backlog</code> checks the queue against <code>netdev_max_backlog</code>, default 1,000 (read at line 5396 as <code>net_hotdata.max_backlog</code>), drops if full, appends the skb (line 5414), and if the queue was empty schedules the fake NAPI (line 5413). From there the backlog is a device like any other: <code>net_rx_action</code> polls it, and its poll function is <code>process_backlog</code> (line 6658), which splices the input queue into a processing queue (line 6704) and calls <code>__netif_receive_skb</code> on each skb (line 6680). So <code>netif_rx</code> is not a way around NAPI. It is NAPI with a software queue in front and no hardware behind.</p>
+<p>Keep that shape in mind. When chapter 9 shows a packet entering the far end of a veth, the trace will read <code>__netif_rx</code>, <code>netif_rx_internal</code>, <code>enqueue_to_backlog</code>, then <code>__netif_receive_skb</code>. Every one of those names is on this page.</p>
+
+<h3>Which CPU: RSS and RPS</h3>
+<p><b>RSS</b>, receive side scaling, is the card's job: it hashes each frame's addresses and ports and picks one of several rings, each with its own interrupt and NAPI instance, so flows spread across CPUs while each flow stays on one. <b>RPS</b>, receive packet steering, is the software copy of the same idea for cards with one ring: in <code>netif_receive_skb_list_internal</code> and in <code>netif_rx_internal</code>, <code>get_rps_cpu</code> (lines 6438 and 5721) may pick another CPU, in which case the skb goes to that CPU's backlog through <code>enqueue_to_backlog</code> and an inter-processor interrupt wakes it. That is the one case where a frame from a real NIC shows <code>enqueue_to_backlog</code> in a trace, and it is a diagnostic worth remembering.</p>
+
+<h3>Your NIC is a Wi-Fi card</h3>
+<p>The <code>mt76</code> driver behind <code>mt7921e</code> uses NAPI too: <code>mt76_dma_rx_poll</code> (<code>drivers/net/wireless/mediatek/mt76/dma.c:1073</code>) is its poll function. But a Wi-Fi frame is not an Ethernet frame; it goes through the mac80211 stack first, which decrypts it and rewrites the 802.11 header into an Ethernet header. The skb re-enters the core in <code>mt76_rx_complete</code> (<code>mac80211.c:1514</code>), through <code>napi_gro_receive</code> at line 1550 when a NAPI instance is attached and through <code>netif_receive_skb_list</code> at line 1544 when one is not. Same door, longer corridor. Everything from this chapter's third section onward is identical.</p>
+
+<figure class="dia">
+<div class="mermaid">
+sequenceDiagram
+  participant NIC as network card
+  participant RING as receive ring in RAM
+  participant IRQ as hardirq igb_msix_ring
+  participant SIRQ as NET_RX softirq net_rx_action
+  participant POLL as igb_poll and igb_clean_rx_irq
+  participant GRO as gro_receive_skb
+  participant CORE as netif_receive_skb_list_internal
+  NIC->>RING: DMA the frame into a pre-posted buffer, write its length into the descriptor
+  NIC->>IRQ: interrupt
+  IRQ->>SIRQ: napi_schedule_irqoff, leave the interrupt masked, return
+  Note over SIRQ: budget 300 packets or 2000 us per run
+  SIRQ->>POLL: napi_poll with weight 64
+  POLL->>RING: read descriptor, dma_rmb, build the skb around the buffer, no copy
+  POLL->>GRO: napi_gro_receive once per frame
+  GRO->>CORE: gro_normal_list, every 8 skbs or at the end of the poll
+  POLL-->>NIC: ring empty, re-enable the interrupt
+</div>
+<figcaption><strong>Diagram 1.1 — from a frame in the ring to an skb at the core, for one Ethernet driver.</strong> Notice that the interrupt handler never touches the packet, and that the skb is built inside the poll, around a buffer the card filled earlier. The dashed return is the only moment the card is allowed to interrupt again.</figcaption>
+</figure>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  subgraph napi["Door one: a NAPI poll"]
+    A["driver poll builds the skb"] ==> B["napi_gro_receive"] ==> C["gro_normal_list"] ==> D["netif_receive_skb_list_internal"]
+  end
+  subgraph rx["Door two: netif_rx"]
+    E["caller already holds an skb<br/>loopback, veth, tunnels"] ==> F["netif_rx_internal"] ==> G["enqueue_to_backlog<br/>softnet_data.input_pkt_queue"] ==> H["process_backlog<br/>polled like a device"]
+  end
+  D -.->|"RPS picks another CPU"| G
+  D ==> I["__netif_receive_skb"]
+  H ==> I
+  I ==> J["__netif_receive_skb_core<br/>chapter 3"]
+  style G fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 1.2 — the two doors into the receive path.</strong> Notice that both doors meet at <code>__netif_receive_skb</code>, and that the backlog queue is the only thing that makes door two different. The dotted edge is receive packet steering sending a real NIC's frame through door two on purpose.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Count which door each device uses, then watch one softirq run as a call tree.</p>
+<pre><code># ten seconds of counting, by device: NAPI door versus netif_rx door
+sudo bpftrace -e '
+kprobe:gro_receive_skb   { @napi[((struct sk_buff *)arg1)->dev->name] = count(); }
+kprobe:netif_rx_internal { @netif_rx[((struct sk_buff *)arg0)->dev->name] = count(); }
+interval:s:10 { exit(); }'
+# budget exhaustion: third column is time_squeeze, one row per CPU
+cat /proc/net/softnet_stat
+# ring sizes and queue count; many Wi-Fi drivers answer "Operation not supported"
+ethtool -g wlan0; ethtool -l wlan0
+# one softirq run as a call tree; stop with Ctrl-C, then restore the nop tracer
+cd /sys/kernel/tracing &amp;&amp; echo net_rx_action &gt; set_graph_function &amp;&amp; echo function_graph &gt; current_tracer &amp;&amp; head -80 trace_pipe; echo nop &gt; current_tracer</code></pre>
+<p>On this laptop the first command shows <code>wlan0</code> only under <code>@napi</code>, and <code>lo</code> plus every <code>veth</code> only under <code>@netif_rx</code>. In the function graph, look for <code>__napi_poll</code> calling your driver's poll, and under it the GRO calls, then <code>netif_receive_skb_list_internal</code> appearing once for a batch of frames.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>The card fills pre-posted buffers by DMA and records lengths in ring descriptors. The hardirq only schedules NAPI. <code>net_rx_action</code> polls under a budget of 300 packets and 2 ms, calling each driver's poll with weight 64. The poll builds skbs around the filled buffers without copying and hands them to GRO, which merges same-flow segments and flushes batches into <code>netif_receive_skb_list_internal</code>. Callers that already hold an skb use <code>netif_rx</code>, which queues into the per-CPU backlog and gets polled the same way. RPS uses that same backlog to move frames between CPUs.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>receive ring, descriptor</dt><dd>Circular array of records, each pointing at a buffer; the card writes frame lengths into them.</dd>
+<dt>DMA</dt><dd>The card writing frame bytes into RAM without the CPU.</dd>
+<dt>page pool</dt><dd>Per-ring recycling allocator of DMA-mapped page fragments for receive buffers.</dd>
+<dt>hardirq</dt><dd>The interrupt handler proper; runs with interrupts off; here it only schedules NAPI.</dd>
+<dt>softirq, NET_RX_SOFTIRQ</dt><dd>Deferred work with interrupts on; the receive softirq's handler is <code>net_rx_action</code>.</dd>
+<dt>NAPI, poll, weight</dt><dd>Interrupt once, then poll the ring up to <code>weight</code> (64) frames per call.</dd>
+<dt>budget, time squeeze</dt><dd><code>net_rx_action</code>'s limits: 300 packets or 2,000 us; exceeding them increments <code>time_squeeze</code>.</dd>
+<dt>GRO</dt><dd>Generic receive offload: merging consecutive same-flow segments into one skb inside the poll.</dd>
+<dt>backlog, softnet_data</dt><dd>Per-CPU queue <code>input_pkt_queue</code> plus a fake NAPI; filled by <code>netif_rx</code>, drained by <code>process_backlog</code>.</dd>
+<dt>netif_rx</dt><dd>The entry for callers already holding an skb; queues into the backlog.</dd>
+<dt>RSS, RPS</dt><dd>Hardware and software spreading of flows across CPUs; RPS uses another CPU's backlog.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Predict the value: a burst of 1,000 frames sits in one ring with weight 64 and default budgets. How many times does <code>igb_poll</code> run inside the first <code>net_rx_action</code>, and how many <code>net_rx_action</code> runs does the burst need?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Five polls in the first run, and four runs in total. <code>net_rx_action</code> subtracts each poll's work from a budget of 300 and stops when the budget is zero or negative (<code>net/core/dev.c:7958</code> to 7966): 300 minus 64 four times leaves 44, still positive, so a fifth poll runs and takes the budget to minus 20, then the loop breaks. Five polls of 64 is 320 frames per run; 1,000 frames need three full runs (960) plus one short run.</p>
+<p>The near miss is "four polls, because four times 64 is 256 and a fifth would exceed 300". The check is on the budget after the poll, so a poll is allowed to overshoot. Each break also increments <code>time_squeeze</code>, so this burst leaves that counter three higher in <code>/proc/net/softnet_stat</code>.</p>
+</details>
+<p>2. A trace of a packet arriving on your wired Ethernet card shows <code>enqueue_to_backlog</code> and <code>process_backlog</code> before <code>__netif_receive_skb</code>. Nothing in the driver calls <code>netif_rx</code>. What happened?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Receive packet steering moved the frame to another CPU. <code>netif_receive_skb_list_internal</code> asked <code>get_rps_cpu</code> (<code>net/core/dev.c:6438</code>), it chose a different CPU, and the skb was queued into that CPU's <code>input_pkt_queue</code> by <code>enqueue_to_backlog</code> (line 6444); the far CPU's <code>process_backlog</code> then delivered it. Check <code>/sys/class/net/eth0/queues/rx-0/rps_cpus</code>; a non-zero mask confirms it. The pwru CPU column also changes between the two lines.</p>
+<p>The wrong answer is "the driver is a legacy driver without NAPI". Those exist, but you would see <code>netif_rx</code> or <code>netif_rx_internal</code> in the trace before <code>enqueue_to_backlog</code>, and the RPS path does not pass through them.</p>
+</details>
+<p>3. Predict the value: you download 1 MB over TCP with a 1,448-byte payload per segment. Roughly how many skbs does the driver's poll hand to the core with GRO on, and how many with GRO off?</p>
+<details class="ans"><summary>Answer</summary>
+<p>About 720 with GRO off, and at best around 16 with GRO on. One megabyte at 1,448 bytes per segment is about 724 segments, and with GRO off each becomes its own skb and its own trip through the stack. GRO merges up to about 64 KB per skb (<code>gro_receive_skb</code>, <code>net/core/gro.c:638</code>), so 1,048,576 divided by 65,536 is 16 merged skbs at the ideal. Real numbers land in between, because a merge is flushed whenever the poll ends or a segment arrives out of order.</p>
+<p>The near miss is counting GRO as a hardware feature you cannot turn off. It is software in the poll loop, toggled with <code>ethtool -K DEV gro off</code>, and turning it on for a veth is how chapter 9 flips that device into a different receive mode.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.kernel.org/networking/napi.html">NAPI</a>, kernel documentation. Read the driver API and IRQ mitigation sections; the busy-polling part is optional.</li>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.kernel.org/networking/scaling.html">Scaling in the Linux Networking Stack</a>, kernel documentation. The RSS and RPS sections, ten minutes; they also define RFS and XPS, which this document skips.</li>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.kernel.org/networking/page_pool.html">Page Pool API</a>, kernel documentation. Skim the architecture overview to see why buffer allocation is off the per-frame path.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/segmentation-offloads.html">Segmentation Offloads</a>, kernel documentation. The GRO and GSO paragraphs; the rest returns in chapter 6.</li>
+<li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://blog.packagecloud.io/monitoring-tuning-linux-networking-stack-receiving-data/">Monitoring and Tuning the Linux Networking Stack: Receiving Data</a>, Packagecloud, 2016. Third-party and written against an older kernel, still the best long walk through this chapter with every sysctl named. Read after you have run the lab once.</li>
+</ul>
+</div>
+</section>

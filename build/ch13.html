@@ -1,0 +1,152 @@
+<section id="ch13" class="chapter">
+<span class="chnum">Chapter 13</span>
+<h2>IPVS: the NAT that hides in INPUT</h2>
+<p class="chmeta">~RT13 min · <span class="tag L3">L3</span> · <em>Spine:</em> every chapter so far kept our skb moving forward through the chart. This one sends it backwards. A packet that the routing decision of chapter 4 classified as local, and that is therefore on its way to a socket, is picked up in INPUT, rewritten, and pushed back out through OUTPUT without a socket ever seeing it.</p>
+
+<h3>Why INPUT, of all places</h3>
+<p>IPVS load-balances a <b>virtual service</b>, an address and port clients connect to, across a set of <b>real servers</b>. The virtual address has to be configured as a local address on the director, and that one configuration choice decides everything about where the code runs.</p>
+<p>Chapter 4 showed <code>ip_route_input_slow</code> returning <code>RTN_LOCAL</code> for any address the host owns, which stores <code>ip_local_deliver</code> as the route's input function. So a packet to the virtual address is routed for local delivery, runs the LOCAL_IN hooks, and would next be handed to <code>tcp_v4_rcv</code> to find a socket that does not exist. IPVS intercepts it in the last place it can, which is why a load balancer appears in a chain most people associate with host firewalling.</p>
+<p>The registrations are <code>ip_vs_ops4[]</code> (<code>net/netfilter/ipvs/ip_vs_core.c:2325</code> to 2372), six entries, and the priorities are chosen with care:</p>
+<table>
+<thead><tr><th>Hook</th><th>Function</th><th>Priority</th><th>Job</th></tr></thead>
+<tbody>
+<tr><td>LOCAL_IN</td><td><code>ip_vs_out_hook</code></td><td><code>NAT_SRC - 2</code></td><td>Reply direction, rewrite the source back to the virtual address</td></tr>
+<tr><td>LOCAL_IN</td><td><code>ip_vs_in_hook</code></td><td><code>NAT_SRC - 1</code></td><td>Request direction: schedule and send to a real server</td></tr>
+<tr><td>LOCAL_OUT</td><td><code>ip_vs_out_hook</code></td><td><code>NAT_DST + 1</code></td><td>Replies from a local real server</td></tr>
+<tr><td>LOCAL_OUT</td><td><code>ip_vs_in_hook</code></td><td><code>NAT_DST + 2</code></td><td>Requests from a process on the director itself</td></tr>
+<tr><td>FORWARD</td><td><code>ip_vs_forward_icmp</code></td><td>99</td><td>ICMP for IPVS connections</td></tr>
+<tr><td>FORWARD</td><td><code>ip_vs_out_hook</code></td><td>100</td><td>Reply rewriting on the forwarded path</td></tr>
+</tbody>
+</table>
+<p>Both LOCAL_IN entries sit just below <code>NF_IP_PRI_NAT_SRC</code>, so IPVS runs before conntrack's source NAT would; both LOCAL_OUT entries sit just above <code>NF_IP_PRI_NAT_DST</code>, so it runs after conntrack's destination NAT. Note also that the names changed: older material calls these <code>ip_vs_in</code>, <code>ip_vs_reply4</code> and friends, and in 7.2 there are two family-agnostic hooks, <code>ip_vs_in_hook</code> (line 2097) and <code>ip_vs_out_hook</code> (line 1510), with <code>ip_vs_ops6[]</code> (line 2374) mirroring the table above.</p>
+
+<h3>Lookup, schedule, rewrite, re-inject</h3>
+<p><code>ip_vs_in_hook</code> first asks whether this packet belongs to a connection it already knows, <code>pp->conn_in_get</code> reaching <code>ip_vs_conn_in_get_proto</code> (lines 2176 to 2180). On a miss it schedules: <code>ip_vs_try_to_schedule</code> (line 1648) leads to <code>ip_vs_schedule</code> (line 619), which finds the service, calls the scheduler's <code>sched->schedule</code> (line 706) to pick a real server, and records the decision with <code>ip_vs_conn_new</code> (line 727). The scheduler is a small pluggable module, <code>rr</code>, <code>wrr</code>, least-connection and so on, and it is consulted once per connection.</p>
+<p>What <code>ip_vs_conn_new</code> builds is a <code>struct ip_vs_conn</code> (<code>include/net/ip_vs.h:813</code>) holding the client address and port, the virtual address and port, the real server's address and port, and a function pointer <code>packet_xmit</code> (line 877). That pointer is the forwarding method, and it is what the hook calls at line 2257 once the connection is known:</p>
+<pre><code>ip_vs_in_stats(cp, skb);
+ip_vs_set_state(cp, IP_VS_DIR_INPUT, skb, pd, iph.len);
+if (cp->packet_xmit)
+        ret = cp->packet_xmit(skb, cp, pp, &iph);
+        /* do not touch skb anymore */</code></pre>
+<p>For the masquerading method, <code>packet_xmit</code> is <code>ip_vs_nat_xmit</code> (<code>net/netfilter/ipvs/ip_vs_xmit.c:787</code>). It routes to the real server, makes the header writable with <code>skb_ensure_writable</code> (line 840) because the skb may be shared, calls the protocol's <code>dnat_handler</code> to fix the port and checksums (line 847), then does the rewrite itself:</p>
+<pre><code>ip_hdr(skb)->daddr = cp->daddr.ip;
+ip_send_check(ip_hdr(skb));</code></pre>
+<p>Then the part that makes this chapter's title true, <code>ip_vs_nat_send_or_cont</code> (line 666):</p>
+<pre><code>skb->ipvs_property = 1;
+if (likely(!(cp->flags &amp; IP_VS_CONN_F_NFCT)))
+        ip_vs_notrack(skb);
+else
+        ip_vs_update_conntrack(skb, cp, 1);
+...
+NF_HOOK(pf, NF_INET_LOCAL_OUT, cp->ipvs->net, NULL, skb,
+        NULL, skb_dst(skb)->dev, dst_output);</code></pre>
+<p>A packet that is inside LOCAL_IN calls the LOCAL_OUT hooks directly and then <code>dst_output</code>, and the function returns <code>NF_STOLEN</code> so the input path it came from stops. The skb has jumped from one side of the chart to the other without passing through a socket, and it will run POST_ROUTING on the way out as a normal transmitted packet.</p>
+<p><code>skb->ipvs_property</code> (<code>include/linux/skbuff.h:1010</code>, a single bit) is how that does not become a loop: the hooks test it and leave a packet IPVS already owns alone. Chapter 9 met the other half of this bit without needing it, in the list of things <code>skb_scrub_packet</code> clears through <code>ipvs_reset</code> (<code>skbuff.h:5154</code>). An IPVS-owned skb that crosses into another namespace or another device arrives with the flag gone, which is correct, because the new namespace's IPVS knows nothing about it.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["packet to the virtual address arrives"] ==> B["PRE_ROUTING"]
+  B ==> C["routing decision: RTN_LOCAL<br/>the virtual address is a local address"]
+  C ==> D["LOCAL_IN"]
+  D ==> E["ip_vs_in_hook 2097<br/>conn_in_get, else ip_vs_schedule 619<br/>ip_vs_conn_new 727"]
+  E ==> F["packet_xmit = ip_vs_nat_xmit 787<br/>daddr = real server, ip_send_check"]
+  F ==> G["ip_vs_nat_send_or_cont 666<br/>skb ipvs_property = 1<br/>NF_HOOK LOCAL_OUT, then dst_output"]
+  G ==> H["POST_ROUTING"]
+  H ==> I["out to the real server"]
+  D -.->|"the path never taken"| X["tcp_v4_rcv<br/>no socket is listening on the virtual address"]
+  style E fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style G fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style X fill:#f4f6f8,stroke:#999
+</div>
+<figcaption><strong>Diagram 13.1 — the jump from INPUT to OUTPUT, drawn on the chart you already know.</strong> Notice the greyed box: local delivery is where the routing decision was sending the packet, and IPVS takes it one hook earlier. The thick path crosses from the left half of the chart to the right half without a socket in between.</figcaption>
+</figure>
+
+<h3>The reply, and the three forwarding methods</h3>
+<p>The return packet from the real server carries its own address as the source, and the client will reject that, so it must be rewritten back to the virtual address. That is <code>ip_vs_out_hook</code> (line 1510), which looks the connection up in the reverse direction with <code>ip_vs_conn_out_get_proto</code> (line 1579) and calls <code>handle_response</code> (line 1439). That applies the protocol's <code>snat_handler</code> and then <code>ip_vs_route_me_harder</code> (line 1483), because changing the source address can change which route and which source address the packet should use.</p>
+<p>Masquerading is only one of three methods, and the other two exist to keep the return traffic away from the director entirely:</p>
+<table>
+<thead><tr><th>Method</th><th>Function</th><th>What it changes</th><th>Return path</th></tr></thead>
+<tbody>
+<tr><td>Masquerade</td><td><code>ip_vs_nat_xmit</code> (<code>ip_vs_xmit.c:787</code>)</td><td>Destination address and port</td><td>Back through the director, rewritten</td></tr>
+<tr><td>Direct routing</td><td><code>ip_vs_dr_xmit</code> (line 1439)</td><td>Only the destination MAC address</td><td>Straight from the real server to the client</td></tr>
+<tr><td>Tunnelling</td><td><code>ip_vs_tunnel_xmit</code> (line 1147)</td><td>Wraps the packet in an outer IP header</td><td>Straight from the real server to the client</td></tr>
+</tbody>
+</table>
+<p>Direct routing leaves the IP header untouched, which means every real server must itself own the virtual address, usually on a loopback alias with ARP suppressed, and must be on the same link as the director. Tunnelling removes the same-link requirement at the cost of an encapsulation header and the reduced usable size that goes with it. Both give up the ability to rewrite ports, and both mean the director sees only half of each connection.</p>
+<p>One knob deserves naming. By default IPVS asks conntrack to stay out of the way, which is the <code>ip_vs_notrack</code> branch above. Setting <code>net.ipv4.vs.conntrack</code> to 1 makes it call <code>ip_vs_update_conntrack</code> instead, teaching conntrack about the translation so that other NAT rules and stateful firewall rules behave. The cost is a conntrack entry per connection on a machine whose whole purpose is to carry a great many of them.</p>
+
+<h3>kube-proxy in IPVS mode</h3>
+<p>Kubernetes uses exactly this machinery, and knowing the chapter above makes its odd-looking setup obvious. kube-proxy creates a dummy device, conventionally <code>kube-ipvs0</code>, and adds every service cluster address to it. That is not because anything listens there; it is because the addresses must be local for the routing decision to return <code>RTN_LOCAL</code> and send the packet into LOCAL_IN where <code>ip_vs_in_hook</code> is waiting. Each service becomes a virtual service and each ready endpoint a real server, with masquerading as the forwarding method.</p>
+<p>The iptables rules that remain are few, and they use ipsets rather than one rule per service, which is the whole performance argument: adding a service adds a hash-table entry rather than lengthening a chain that is walked linearly for every packet. What the rules still do is mark traffic that needs source NAT, for the cases where the reply would otherwise not come back through the node.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>ipvsadm</code> (package <code>ipvsadm</code>), <code>iproute2</code>, <code>curl</code>, <code>pwru</code>, and the <code>ip_vs</code> and <code>ip_vs_rr</code> modules.</p>
+<pre><code>sudo lab/13-ipvs.sh up      # pp-vip 10.15.0.100 on a dummy device, two real servers in netns
+
+sudo ipvsadm -Ln                    # the virtual service and its real servers
+ip addr show pp-ipvs0               # the virtual address, local, with nothing listening
+ip route get 10.15.0.100            # local, dev lo: the routing decision this chapter needs
+
+# the jump: LOCAL_IN, then ip_vs functions, then LOCAL_OUT, with no tcp_v4_rcv
+sudo pwru --kmods ip_vs --output-meta 'tcp and host 10.15.0.100' &amp;
+curl -s --max-time 2 -o /dev/null http://10.15.0.100:80/
+
+sudo ipvsadm -Lnc                   # the ip_vs_conn entries, one per connection
+sudo lab/13-ipvs.sh down</code></pre>
+<p>This output is <em>expected</em> rather than observed. The bench for this dossier had no <code>ipvsadm</code> on the host or in the node, and installing it was out of scope, so no virtual service could be configured and nothing was traced. The <code>ip_vs</code> module itself does load on this kernel, which corrects a note made earlier in the project; it was loaded once to check, found inert with no services configured, and unloaded again. Expect the trace to show <code>nf_hook_slow</code> for LOCAL_IN, then <code>ip_vs_in_hook</code>, <code>ip_vs_schedule</code>, <code>ip_vs_conn_new</code>, <code>ip_vs_nat_xmit</code>, then <code>nf_hook_slow</code> again for LOCAL_OUT and POST_ROUTING, and no <code>tcp_v4_rcv</code> anywhere.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A virtual address must be local on the director, so the routing decision returns <code>RTN_LOCAL</code> and the packet enters LOCAL_IN, which is where <code>ip_vs_in_hook</code> is registered just below the source-NAT priority. It looks the connection up, and on a miss <code>ip_vs_schedule</code> picks a real server and <code>ip_vs_conn_new</code> records the choice in a <code>struct ip_vs_conn</code> whose <code>packet_xmit</code> pointer is the forwarding method. For masquerading that is <code>ip_vs_nat_xmit</code>, which rewrites the destination and then calls the LOCAL_OUT hooks directly from inside LOCAL_IN, returning <code>NF_STOLEN</code>; <code>skb->ipvs_property</code> marks the skb so the hooks do not act on it twice, and <code>skb_scrub_packet</code> clears that bit at a namespace boundary. Replies are rewritten by <code>ip_vs_out_hook</code> and re-routed. Direct routing and tunnelling avoid the return trip entirely. kube-proxy's <code>kube-ipvs0</code> dummy device exists only to make service addresses local so this path is reached.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>virtual service, real server</dt><dd>The address and port clients connect to, and the backends it is balanced across.</dd>
+<dt>director</dt><dd>The host running IPVS, which owns the virtual address as a local address.</dd>
+<dt>ip_vs_in_hook, ip_vs_out_hook</dt><dd>The two family-agnostic hook functions in 7.2, replacing the older per-family names; request direction and reply direction.</dd>
+<dt>ip_vs_ops4</dt><dd>The registration array: two entries on LOCAL_IN, two on LOCAL_OUT, two on FORWARD, with priorities placed around the NAT priorities.</dd>
+<dt>ip_vs_schedule</dt><dd>Finds the service and calls the scheduler module once per connection to pick a real server.</dd>
+<dt>struct ip_vs_conn</dt><dd>The per-connection record holding client, virtual and real addresses and the <code>packet_xmit</code> function pointer.</dd>
+<dt>packet_xmit</dt><dd>The forwarding method stored in the connection: masquerade, direct routing or tunnelling.</dd>
+<dt>ip_vs_nat_xmit</dt><dd>The masquerading method: rewrite the destination, fix checksums, then re-inject.</dd>
+<dt>ip_vs_nat_send_or_cont</dt><dd>The re-injection: set <code>ipvs_property</code>, call the LOCAL_OUT hooks, then <code>dst_output</code>, and report the skb as stolen.</dd>
+<dt>ipvs_property</dt><dd>The skb bit marking a packet IPVS already owns, so the hooks do not act on it again.</dd>
+<dt>direct routing, tunnelling</dt><dd>Forwarding methods that rewrite only the destination MAC, or add an outer IP header, so replies bypass the director.</dd>
+<dt>kube-ipvs0</dt><dd>The dummy device kube-proxy puts every service address on, purely to make the routing decision answer local.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Why must the virtual address be configured on a local interface, and what would the packet's fate be if it were not?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Because IPVS's request-direction hook is registered on LOCAL_IN, and only a local address gets a packet there. <code>ip_route_input_slow</code> returns <code>RTN_LOCAL</code> for an address the host owns, which stores <code>ip_local_deliver</code> as the route's input function; without the address configured, the lookup returns <code>RTN_UNICAST</code> and the packet takes the forward path or is dropped as unroutable, never reaching <code>ip_vs_in_hook</code> (<code>net/netfilter/ipvs/ip_vs_core.c:2097</code>). This is exactly why kube-proxy puts every service address on the <code>kube-ipvs0</code> dummy device.</p>
+<p>The near miss is "something has to listen on it". Nothing listens; the packet is taken one hook before <code>tcp_v4_rcv</code> would look for a socket, which is why <code>ss</code> shows nothing on a working director.</p>
+</details>
+<p>2. Trace the path: a client SYN reaches a director using the masquerading method. List the hooks it visits in order, and name the moment a socket lookup would have happened but did not.</p>
+<details class="ans"><summary>Answer</summary>
+<p>PRE_ROUTING, then the routing decision, then LOCAL_IN, then LOCAL_OUT, then POST_ROUTING. Inside LOCAL_IN, <code>ip_vs_in_hook</code> schedules and calls <code>ip_vs_nat_xmit</code> (<code>ip_vs_xmit.c:787</code>), which rewrites the destination and calls <code>ip_vs_nat_send_or_cont</code> (line 666); that runs <code>NF_HOOK(..., NF_INET_LOCAL_OUT, ...)</code> followed by <code>dst_output</code> and returns <code>NF_STOLEN</code>. The socket lookup that did not happen is <code>tcp_v4_rcv</code>, which <code>ip_local_deliver_finish</code> would have reached had LOCAL_IN completed normally.</p>
+<p>The near miss is "it is forwarded, so it visits FORWARD". FORWARD is never entered; the route type was local, and IPVS provides the crossing itself.</p>
+</details>
+<p>3. A colleague reports that IPVS on their director stops working for traffic that arrives through a veth pair from a container, but works for traffic from the physical interface. Which single bit would you suspect, and which function clears it?</p>
+<details class="ans"><summary>Answer</summary>
+<p><code>skb->ipvs_property</code> (<code>include/linux/skbuff.h:1010</code>), cleared by <code>skb_scrub_packet</code> through <code>ipvs_reset</code> (<code>skbuff.h:5154</code>, called at <code>net/core/skbuff.c:6292</code>). Every veth crossing runs <code>__dev_forward_skb</code> and therefore the scrub, so an skb that IPVS had already claimed arrives on the far side with the flag gone and the hooks will act on it again. That is deliberate: the flag is meaningful only within one namespace's IPVS state, which knows nothing of the other's.</p>
+<p>The near miss is "conntrack state was lost". Conntrack is also reset by the same scrub, but IPVS does not rely on conntrack by default; <code>ip_vs_notrack</code> is the normal path unless <code>net.ipv4.vs.conntrack</code> is set.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://www.linuxvirtualserver.org/VS-NAT.html">Virtual Server via NAT</a>, Linux Virtual Server project. The original description of the masquerading method, with the packet-rewriting diagram this chapter traces in code.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://manpages.debian.org/unstable/ipvsadm/ipvsadm.8.en.html">ipvsadm(8)</a>, Debian manual pages. The only interface for configuring virtual services; read the <code>-A</code>, <code>-a</code> and <code>-L</code> forms before the lab.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/ipvs-sysctl.html">IPvs-sysctl</a>, Linux kernel documentation. Every <code>net.ipv4.vs.*</code> knob including <code>conntrack</code> and <code>conn_reuse_mode</code>, which is the one that sends a new connection to a stale backend under connection churn.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://kubernetes.io/docs/reference/networking/virtual-ips/">Virtual IPs and Service Proxies</a>, Kubernetes documentation. The IPVS mode section explains the dummy device and the ipset arrangement from the operator's side.</li>
+</ul>
+</div>
+</section>

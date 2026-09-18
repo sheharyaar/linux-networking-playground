@@ -1,0 +1,135 @@
+<section id="ch0" class="chapter">
+<span class="chnum">Chapter 0 · Prologue</span>
+<h2>The chart, the skb, and the tracer</h2>
+<p class="chmeta">~RT0 min · <span class="tag LAB">LAB</span> · <em>Spine:</em> our skb does not exist yet. Before it is born you need the one object you will follow, the map you already own, and the instruments that make the map move.</p>
+
+<h3>The chart is a map of hooks, and a hook is not a function</h3>
+<p>The netfilter packet-flow chart you have studied is correct, and it is complete for what it draws: the places where netfilter may look at a packet, in order, with the bridge layer below and the routing decisions between them. What it leaves out is everything that is not a hook. The chart says <em>PREROUTING</em>. The kernel says: <code>ip_rcv</code> validates the header, calls a hook macro that walks a list of registered functions, and, if the list says accept, calls <code>ip_rcv_finish</code>, which does the routing lookup that the chart draws as a diamond. The chart says <em>bridging decision</em>. The kernel says: a function pointer stored on the device, consulted from inside one loop, takes the packet away.</p>
+<p>When a packet misbehaves, the chart tells you which hook to suspect. Only the functions tell you what to trace. This document is the chart with the function names filled in, and a tracer running next to it so you can watch the names go by in order, on your own kernel.</p>
+
+<h3>The one object: the skb</h3>
+<p>Everything in this document happens to one thing. An <b>skb</b>, short for <b>socket buffer</b> and spelled <code>struct sk_buff</code> in the source, is the kernel's description of one packet: a small block of metadata plus pointers into a separate data buffer that holds the bytes. The struct starts at <code>include/linux/skbuff.h:886</code>. Think of it as the shipping label clipped to a box. The label carries the routing state, the box carries the goods, and most of the kernel only reads and rewrites the label.</p>
+<p>Five groups of fields decide where a packet goes, and you will see every one of them again:</p>
+<table>
+<thead><tr><th>Field</th><th>What it decides</th><th>Line in skbuff.h</th></tr></thead>
+<tbody>
+<tr><td><code>skb-&gt;dev</code></td><td>Which network device the packet belongs to right now. Every layer reads it, and virtual devices rewrite it. This one field is most of the veth chapter.</td><td>894</td></tr>
+<tr><td><code>skb-&gt;head</code>, <code>data</code>, <code>tail</code>, <code>end</code></td><td>The data buffer and the current cursor into it. <code>data</code> moves forward as headers are consumed and backward as they are added. The offsets <code>mac_header</code>, <code>network_header</code> and <code>transport_header</code> remember where each layer's header starts.</td><td>1083 to 1095</td></tr>
+<tr><td><code>skb-&gt;protocol</code>, <code>pkt_type</code></td><td>The Ethernet type that picks the L3 handler, and whether the frame was addressed to this host, was broadcast, or was seen only because the device was told to accept every frame.</td><td>1082, 975</td></tr>
+<tr><td><code>skb-&gt;sk</code>, <code>skb-&gt;mark</code>, <code>skb-&gt;_nfct</code></td><td>The owning socket, the firewall mark, and a pointer to the connection-tracking entry. The last two are what netfilter reads and writes.</td><td>907, 1069, 933</td></tr>
+<tr><td><code>skb-&gt;users</code>, <code>skb-&gt;cb</code></td><td>A reference count, and 48 bytes of scratch space each layer uses for its own bookkeeping.</td><td>1097, 919</td></tr>
+</tbody>
+</table>
+<p>The reference count matters more than it looks. When two consumers need the same packet, the kernel does not copy the bytes. It bumps the count, or it allocates a second label pointing at the same box. Which of those happens, and where, is a recurring question in chapters 3 and 10.</p>
+
+<h3>The stage: devices and namespaces</h3>
+<p>A <b>net_device</b>, <code>struct net_device</code>, is anything the kernel can hand a packet to: a NIC driver instance, the loopback device <code>lo</code>, one end of a veth pair, a bridge, a bond, a tunnel. Each one has a transmit function the core calls, named <code>ndo_start_xmit</code> in its operations table, and each one may install a <b>receive handler</b>, a function pointer the receive loop consults before it does anything else with a frame from that device. Bridges, bonds and macvlan are all built on that one pointer.</p>
+<p>A <b>network namespace</b>, or <b>netns</b>, is a private copy of the whole networking state: its own devices, addresses, routing tables, netfilter tables and sockets. A device belongs to exactly one namespace at a time, so <code>skb-&gt;dev</code> also tells you which namespace a packet is in. A container is a process in a namespace whose only device is one end of a veth. The tracer prints the namespace as an inode number, and watching that number change is how you will see a packet cross into a container.</p>
+
+<h3>Hooks, and what calling one costs</h3>
+<p>A <b>netfilter hook</b> is one of five points in the IP code, <code>PRE_ROUTING</code>, <code>LOCAL_IN</code>, <code>FORWARD</code>, <code>LOCAL_OUT</code> and <code>POST_ROUTING</code> (the enum is at <code>include/uapi/linux/netfilter.h:42</code>), where the code calls <code>nf_hook</code> with the skb and a continuation function. Two gates stand before any list is walked (<code>include/linux/netfilter.h:227</code> onward). First a global jump label, <code>nf_hooks_needed</code>, which is off until some module registers at that hook anywhere on the machine. Second the namespace's own list head for that hook, which is empty in a fresh namespace even on a heavily firewalled host. Only if both pass does <code>nf_hook_slow</code> (<code>net/netfilter/core.c:612</code>) walk the entries in priority order and act on each <b>verdict</b>: accept continues, drop frees the skb, stolen means the entry took the skb and the caller must forget it. Conntrack and NAT are entries on those lists with fixed priorities. That is all chapter 5 is: the lists, the priorities, and what the entries write into <code>skb-&gt;_nfct</code>.</p>
+
+<h3>The instruments</h3>
+<p>A <b>kprobe</b> is a breakpoint the kernel plants at the entry of a function; when the function is called, a small program runs and the function then continues. Every tool below is built on kprobes.</p>
+<p><b>pwru</b>, "packet, where are you", plants a kprobe on every kernel function that takes an skb argument. On this kernel that is 1,598 functions, and attaching them takes about a second. You give it a filter in tcpdump syntax; it prints one line each time a matching skb enters a probed function: the skb address, the CPU, the process, the netns inode, the mark, the interface, the protocol, the MTU, the length, the L4 tuple, and the function name. That line, repeated, is the trace you will read in every chapter. Two blind spots matter. It probes only functions built into the kernel image unless you add <code>--kmods veth,bridge</code> or <code>--all-kmods</code>, so a packet crossing a veth appears to jump over the driver until you ask for the module. And it cannot match a packet with no IP header, so unix sockets need the next tool.</p>
+<p><b>bpftrace</b> plants a kprobe on one function you name and runs a one-line program: count by device, print a stack, read a struct field. It is the tool for functions pwru does not cover, for driver internals that take no skb, and for anything in the socket layer.</p>
+<p><b>nft monitor trace</b> works inside netfilter. A rule that says <code>meta nftrace set 1</code> sets one bit on the skb, <code>skb-&gt;nf_trace</code> (<code>include/linux/skbuff.h:1013</code>, written at <code>net/netfilter/nft_meta.c:501</code>), and from then on every chain the skb enters reports each rule it evaluates and the verdict. It shows the rule walk that pwru sees only as one function name.</p>
+<p><b>ftrace</b> with the <code>function_graph</code> tracer records every function call under a chosen root, with entry and exit timing. It is expensive and noisy, and it is the only tool here that shows the call tree rather than a flat list. You will use it once, in the next chapter, to watch an interrupt turn into a packet.</p>
+<table>
+<thead><tr><th>Tool</th><th>Sees</th><th>Blind to</th><th>Needs</th></tr></thead>
+<tbody>
+<tr><td>pwru</td><td>Every skb-taking function, in order, across namespaces</td><td>Module functions unless asked; BPF programs unless <code>--filter-trace-tc</code>; packets without an IP header</td><td>Kernel BTF, root</td></tr>
+<tr><td>bpftrace</td><td>Any one function, with arguments and stacks</td><td>Everything you did not name</td><td>Kernel BTF, root</td></tr>
+<tr><td>nft monitor trace</td><td>Rule-by-rule evaluation inside netfilter chains</td><td>Anything outside netfilter</td><td>A rule setting nftrace</td></tr>
+<tr><td>ftrace function_graph</td><td>The full call tree under a root, with timing</td><td>Which packet is which</td><td>tracefs, root</td></tr>
+</tbody>
+</table>
+
+<h3>The bench</h3>
+<p>The host labs run on your laptop as root. A second bench is worth knowing about: a kind node is a privileged container sharing your kernel, so <code>docker exec kind-worker</code> gives you a root shell where namespaces, veths, bridges, bonds and VRFs can be created and torn down without touching your host configuration, and the kernel loads the needed modules from the host when you ask for a device type. Two things differ from the host. The kind image ships no <code>ping</code>, <code>tcpdump</code> or <code>bpftool</code>, so the labs use <code>curl</code> against <code>python3 -m http.server</code> for traffic. And a handful of global knobs under <code>net.core</code>, the ones that tune the receive loop you meet in chapter 1, exist only in the initial namespace, so <code>sysctl</code> inside the node reports them as missing. Every trace transcript in this document was produced on that bench, on the same 7.2 kernel the source citations point at.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  NIC["NIC and driver<br/>chapter 1"] ==> XDP["XDP<br/>chapter 2"] ==> L2["L2 receive: taps, tc, receive handler<br/>chapter 3"]
+  L2 ==> PRE["PRE_ROUTING hook<br/>chapters 4 and 5"] ==> RD{"routing decision<br/>chapter 4"}
+  RD ==>|"for me"| IN["LOCAL_IN hook"] ==> SOCK["socket<br/>chapter 7"]
+  RD ==>|"for someone else"| FWD["FORWARD hook"] ==> POST["POST_ROUTING hook"] ==> TX["transmit: qdisc, driver<br/>chapter 6"]
+  SOCK ==> OUT["LOCAL_OUT hook<br/>chapter 6"] ==> POST
+  S8["scenarios 1, 2, 3, 8<br/>lo and unix sockets<br/>chapter 8"] -.-> SOCK
+  S9["scenarios 5, 6, 10, 12<br/>veth, bridge, bond, macvlan<br/>chapters 9 to 12"] -.-> L2
+  S11["scenario 11 VRF<br/>chapter 11"] -.-> RD
+  S13["scenario 9 IPVS<br/>chapter 13"] -.-> IN
+  S7["scenario 7 pod to pod<br/>Cilium, chapters 14 and 15"] -.-> L2
+  S4["scenario 4 default gateway<br/>chapter 6"] -.-> TX
+  style L2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 0.1 — your twelve scenarios placed on the chart you know.</strong> Thick arrows are the path one skb takes; dotted arrows show where each scenario attaches. Notice how many scenarios land on the L2 receive box. Bridges, bonds, macvlan and Cilium all do their work in one loop that runs before IP ever sees the packet, which is why that loop gets a chapter of its own.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Confirm the bench, then take one look at a trace without trying to read it yet.</p>
+<pre><code>sudo lab/00-check.sh                      # tools, modules, BTF, tracefs
+# 60 lines of trace for a ping to your default gateway; read the column headers, count distinct function names
+GW=$(ip route show default | awk '{print $3; exit}')
+sudo pwru --output-limit-lines 60 "icmp and host $GW" &amp; sleep 5; ping -c1 -W1 $GW &gt;/dev/null; wait
+# the same bench inside the kind node
+docker cp "$(command -v pwru)" kind-worker:/usr/local/bin/pwru
+docker cp lab kind-worker:/root/lab</code></pre>
+<p>The functions you will see are the subject of chapters 4 and 6. For now, notice that the netns column stays constant, that the interface column names your real device only on the last few lines before the packet leaves, and that the process column names <code>ping</code> for the outgoing echo and a kernel thread or nothing for the reply.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>One object, the skb, is a label pointing at a buffer; its <code>dev</code>, <code>protocol</code>, <code>mark</code> and <code>_nfct</code> fields decide the path. Devices are anything with a transmit function, and some also install a receive handler. Namespaces are private copies of the networking state, identified in traces by inode. A netfilter hook is a list walked by <code>nf_hook_slow</code>, behind a global jump label and a per-namespace list head. pwru prints one line per skb per function; bpftrace fills its blind spots; nft trace shows the rule walk; ftrace shows the call tree.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>skb, socket buffer</dt><dd><code>struct sk_buff</code>: the metadata block describing one packet, pointing at a separate data buffer.</dd>
+<dt>net_device</dt><dd>Any interface the kernel can transmit through, real or virtual, with an <code>ndo_start_xmit</code> function.</dd>
+<dt>receive handler</dt><dd>A function pointer on a device, consulted in the L2 receive loop; bridges, bonds and macvlan use it to take frames.</dd>
+<dt>network namespace, netns</dt><dd>A private copy of devices, routes, netfilter tables and sockets. Printed as an inode by pwru.</dd>
+<dt>netfilter hook</dt><dd>One of five points where IP code calls <code>nf_hook</code> with a continuation; entries are walked in priority order.</dd>
+<dt>verdict</dt><dd>What a hook entry returns: accept, drop, stolen, queue.</dd>
+<dt>kprobe</dt><dd>A breakpoint at a function entry that runs a program and lets the function continue.</dd>
+<dt>pwru</dt><dd>Kprobe-based tracer printing one line per skb per kernel function, filtered with tcpdump syntax.</dd>
+<dt>bpftrace</dt><dd>One-line kprobe programs on functions you name.</dd>
+<dt>nft monitor trace</dt><dd>Rule-by-rule report of chains an skb with <code>nf_trace</code> set passes through.</dd>
+<dt>ftrace function_graph</dt><dd>Kernel call-tree tracer with timing, driven through tracefs.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. You trace a packet crossing a veth pair and the function list jumps from <code>dev_hard_start_xmit</code> straight to <code>__dev_forward_skb</code>. There is no <code>veth_xmit</code> line. Has the kernel skipped the driver?</p>
+<details class="ans"><summary>Answer</summary>
+<p>No. pwru probes only functions in the kernel image by default, and <code>veth_xmit</code> lives in the <code>veth</code> module. Re-run with <code>--kmods veth</code> and the line appears right after <code>dev_hard_start_xmit</code>, exactly where <code>xmit_one</code> calls the device's <code>ndo_start_xmit</code> (<code>net/core/dev.c:3890</code>).</p>
+<p>The tempting wrong answer is "the compiler inlined it". Inlining does happen to small static helpers, but <code>veth_xmit</code> is the module's transmit entry and a real symbol in <code>veth.ko</code>. When a name is missing from a pwru trace, check whether it belongs to a module before you suspect the compiler.</p>
+</details>
+<p>2. Two processes talk over a unix socket. pwru with a filter of <code>host 127.0.0.1</code> prints nothing, and neither does a filter on the port. Why, and what do you use instead?</p>
+<details class="ans"><summary>Answer</summary>
+<p>pwru's filter is compiled from tcpdump syntax into a program that reads IP and L4 headers out of the skb data. A unix socket skb carries no IP header at all, so no filter can match it, even though the unix functions that handle it are probed. Use bpftrace on <code>unix_stream_sendmsg</code> or <code>unix_dgram_sendmsg</code>, which chapter 8 does.</p>
+<p>The near miss is "there is no skb for unix sockets, so there is nothing to trace". There is an skb; <code>unix_stream_sendmsg</code> allocates one with <code>sock_alloc_send_pskb</code> (<code>net/unix/af_unix.c:2423</code>) and queues it straight onto the peer socket. What is missing is a network header, and that is what the filter needs.</p>
+</details>
+<p>3. A trace taken inside a freshly created namespace shows <code>ip_rcv</code>, <code>ip_rcv_core</code>, then <code>ip_rcv_finish_core</code>, with no <code>nf_hook_slow</code> between them. The host has hundreds of firewall rules. Is netfilter broken in that namespace?</p>
+<details class="ans"><summary>Answer</summary>
+<p>No. <code>nf_hook</code> has two gates (<code>include/linux/netfilter.h:227</code> onward). The global jump label <code>nf_hooks_needed</code> is on, because the host has hooks registered, so the first gate passes. The second gate reads the namespace's own <code>net-&gt;nf.hooks_ipv4[hook]</code> list head, and a fresh namespace has nothing registered there, so it is NULL and <code>nf_hook_slow</code> is never called. Load an nftables table into that namespace and the line appears.</p>
+<p>The wrong answer is "netfilter is global, so the rules apply everywhere". Hook registration is per namespace; that is why a container can have its own firewall, and why a packet crossing a veth into a namespace with no tables walks no hooks there even though the host is firewalled.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://commons.wikimedia.org/wiki/File:Netfilter-packet-flow.svg">File:Netfilter-packet-flow.svg</a>, Jan Engelhardt, CC BY-SA 3.0. Keep it open beside every chapter from 3 to 13; each chapter names which box it is filling in.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://docs.kernel.org/networking/skbuff.html">struct sk_buff</a>, kernel documentation. Read the data buffer and cloning sections once now; skip the rest until chapter 3.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://github.com/cilium/pwru">pwru (packet, where are you?)</a>. Read the flag table; you will use <code>--filter-netns</code>, <code>--kmods</code>, <code>--filter-track-skb</code> and <code>--filter-trace-tc</code>.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://wiki.nftables.org/wiki-nftables/index.php/Ruleset_debug/tracing">Ruleset debug/tracing</a>, nftables wiki. Five minutes; it is the whole <code>nft monitor trace</code> workflow.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://bpftrace.org/docs/release_027/docs">bpftrace documentation, version 0.27</a>. Skim the probe types and the <code>kstack</code>, <code>count</code> and struct-access examples.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://docs.kernel.org/trace/ftrace.html">ftrace - Function Tracer</a> and <a href="https://docs.kernel.org/trace/kprobes.html">Kernel Probes (Kprobes)</a>, kernel documentation. Reference only; read the function_graph section before chapter 1's lab.</li>
+</ul>
+</div>
+</section>

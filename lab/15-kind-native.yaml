@@ -1,0 +1,56 @@
+# Lab 15 — a THROWAWAY cluster for seeing the datapath with NO tunnel at all.
+# Written for the dossier and deliberately NOT created on the bench.
+#
+#   kind create cluster --config lab/15-kind-native.yaml
+#
+# Native routing needs Cilium to know the per-node pod CIDRs and needs the
+# underlay to carry them. Inside kind every node is a container on one docker
+# bridge, so autoDirectNodeRoutes can install the routes for you:
+#
+#   helm install cilium ./install/kubernetes/cilium \
+#     --namespace kube-system \
+#     --set image.repository=localhost:5000/cilium/cilium-dev \
+#     --set image.tag=local \
+#     --set image.useDigest=false \
+#     --set operator.image.repository=localhost:5000/cilium/operator \
+#     --set operator.image.tag=local \
+#     --set operator.image.useDigest=false \
+#     --set operator.replicas=1 \
+#     --set kubeProxyReplacement=true \
+#     --set k8sServiceHost=pp-native-control-plane \
+#     --set k8sServicePort=6443 \
+#     --set routingMode=native \
+#     --set autoDirectNodeRoutes=true \
+#     --set ipv4NativeRoutingCIDR=10.244.0.0/16 \
+#     --set bpf.masquerade=true \
+#     --set enableTCX=true
+#
+#   kubectl -n kube-system rollout status ds/cilium
+#
+# What to look for, against chapter 15's tunnel capture:
+#   * no cilium_geneve or cilium_vxlan device exists
+#   * the sender takes fib_redirect_v4 (bpf/lib/fib.h:263) instead of
+#     encap_and_redirect_lxc, so there is no outer packet at all
+#   * the pod address appears on the wire; `ip route` on each node shows the
+#     other nodes' pod CIDRs
+#   * on the far node, cil_from_netdev finds the address in the ipcache as a
+#     local endpoint and finishes with the same peer redirect as chapter 14
+#
+# To see the OTHER half of chapter 15's table, repeat the pod-to-world capture
+# on this cluster with legacy host routing and count nf_hook_slow inside the node:
+#   helm upgrade cilium ... --set bpf.hostLegacyRouting=true
+# Expect the count to stop being zero, because ipv4_forward_to_destination then
+# falls through to pass_to_stack (bpf/bpf_lxc.c:1565) instead of fib_redirect_v4.
+#
+# Tear down with:  kind delete cluster --name pp-native
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pp-native
+networking:
+  disableDefaultCNI: true
+  kubeProxyMode: none
+  podSubnet: "10.244.0.0/16"
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

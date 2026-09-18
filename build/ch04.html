@@ -1,0 +1,117 @@
+<section id="ch4" class="chapter">
+<span class="chnum">Chapter 4</span>
+<h2>L3 receive: ip_rcv, PREROUTING, and the routing decision</h2>
+<p class="chmeta">~RT4 min · <span class="tag L3">L3</span> · <em>Spine:</em> the protocol demux has handed our skb to <code>ip_rcv</code>. This chapter walks the IP receive path up to the routing decision, and then through whichever of two doors it opens: local delivery towards a socket, or forwarding back out.</p>
+
+<h3>The checks, and the moment the sender lets go</h3>
+<p><code>ip_rcv</code> (<code>net/ipv4/ip_input.c:603</code>) is four lines: call <code>ip_rcv_core</code>, then call the PRE_ROUTING hook with <code>ip_rcv_finish</code> as the continuation (lines 612 to 614). The work is in <code>ip_rcv_core</code> (line 499). It drops frames marked <code>PACKET_OTHERHOST</code> (line 508), the promiscuous leftovers of chapter 3. It makes sure the first 20 bytes are readable (line 523), checks version 4 and a header length of at least five words (line 539), pulls the options if the header is longer (line 549), verifies the header checksum (line 554), and trims the skb to the IP total length. Then it wipes the 48 bytes of scratch space, <code>skb-&gt;cb</code>, for IP's own use.</p>
+<p>And then, at lines 581 to 583, under the comment "Must drop socket now because of tproxy", it calls <code>skb_orphan</code>. That runs the skb's destructor, which is the sending socket's accounting callback: <code>tcp_wfree</code> for a data segment, <code>sock_edemux</code> for a SYN-ACK built from a request socket (<code>net/ipv4/tcp_output.c:3958</code>). This is the <code>tcp_wfree</code> line you have seen in every trace so far, right after <code>ip_rcv_core</code>. It says something worth knowing: on a veth or on <code>lo</code>, the skb still belonged to the sender's socket until the receiver's IP layer ran, and the sender's send buffer is credited back only here. On a real NIC the driver's transmit completion did this long before.</p>
+<p>When the skb arrived through the GRO door in a batch, the same steps happen through <code>ip_list_rcv</code> (line 687), which calls <code>ip_rcv_core</code> per skb and then the hook once for the whole list with <code>NF_HOOK_LIST</code> (line 679). That is why a trace from a NAPI device shows <code>ip_rcv_core</code> with no <code>ip_rcv</code> before it.</p>
+
+<h3>PRE_ROUTING, as a black box for one more chapter</h3>
+<p>Between <code>ip_rcv_core</code> and <code>ip_rcv_finish</code> sits the PRE_ROUTING hook. In the fresh namespace of the veth bench the trace goes straight from <code>ip_rcv_core</code> to <code>ip_rcv_finish_core</code>; in the router namespace with one nftables table loaded, eleven function names appear in between. Chapter 5 opens that box. One fact about it belongs here because it shapes the routing decision: every entry in the hook runs before the route lookup. An entry may rewrite the destination address, and the lookup that follows sees the rewritten one. That single ordering is why the chart puts destination NAT in PREROUTING, before the routing diamond.</p>
+
+<h3>The routing decision is a function pointer</h3>
+<p><code>ip_rcv_finish</code> (line 478) first offers the skb to a VRF master if the incoming device has one, through <code>l3mdev_ip_rcv</code> (line 486); with no VRF this returns the skb untouched, and chapter 11 is where it does not. Then <code>ip_rcv_finish_core</code> (line 361) tries a shortcut, <b>early demux</b> (lines 376 to 400): if <code>net.ipv4.ip_early_demux</code> and <code>tcp_early_demux</code> are on, <code>tcp_v4_early_demux</code> (line 322) looks up an established TCP socket by the four-tuple before any routing happens, and if it finds one, attaches that socket's cached route to the skb so the lookup below is skipped. In the loopback trace this shows as two <code>inet_lhash2_lookup</code> lines before <code>ip_rcv_finish_core</code>: the SYN found only a listener, so the shortcut did nothing, and the full lookup ran.</p>
+<p>The full lookup is <code>ip_route_input_noref</code> (line 407), which reaches <code>ip_route_input_slow</code> (<code>net/ipv4/route.c:2286</code>). The name is historical. The route cache it was slow compared to was removed in Linux 3.6, and this is now the normal path for every packet that early demux did not catch. It calls <code>fib_lookup</code> (line 2380), which walks the policy rules that <code>ip rule</code> shows to pick a table (<code>fib4_rule_match</code>, <code>net/ipv4/fib_rules.c:180</code>), then does a longest-prefix match in that table's <b>FIB</b>, the forwarding information base, stored as a level-compressed trie (<code>fib_table_lookup</code>, <code>net/ipv4/fib_trie.c:1420</code>). What comes back is a route type, and the type decides everything.</p>
+<p><b><code>RTN_LOCAL</code></b> (checked at line 2397): the destination is one of this host's own addresses, on any interface. The source is validated against reverse-path rules, <code>fib_validate_source</code>, the two lines you see in every trace, and the code jumps to <code>local_input</code> (line 2437), which allocates the route entry with <code>RTCF_LOCAL</code> set, so that <code>rt_dst_alloc</code> (line 1670) stores <code>ip_local_deliver</code> as its input function (line 1693). <b><code>RTN_UNICAST</code></b>: the destination is somewhere else. First the forwarding switch is checked, at lines 2405 to 2407: if <code>net.ipv4.ip_forward</code>, or the per-device <code>forwarding</code> sysctl, is off, the packet gets a route whose input function is <code>ip_error</code>. Otherwise <code>ip_mkroute_input</code> leads to <code>__mkroute_input</code> (line 1908), which stores <code>ip_forward</code> as the input function (line 1918).</p>
+<p>The result is a <b>dst_entry</b>, the route object, attached to the skb and readable as <code>skb_dst(skb)</code>. It carries two function pointers, <code>input</code> and <code>output</code>, and the next hop. When <code>ip_rcv_finish</code> regains control it calls <code>dst_input(skb)</code> (<code>include/net/dst.h:478</code>), which is nothing more than <code>skb_dst(skb)-&gt;input(skb)</code>. That indirect call is the routing diamond on the chart. The decision was made when the pointer was stored; the diamond is just the call.</p>
+
+<h3>Door one: local delivery</h3>
+<p><code>ip_local_deliver</code> (<code>net/ipv4/ip_input.c:250</code>) reassembles fragments if the packet is one, then calls the LOCAL_IN hook with <code>ip_local_deliver_finish</code> (line 229) as the continuation. That reaches <code>ip_protocol_deliver_rcu</code> (line 189), which first offers the packet to any raw sockets, <code>raw_local_deliver</code>, then looks up the transport protocol number in <code>inet_protos</code> (line 198) and calls its handler (line 205): <code>tcp_v4_rcv</code>, <code>udp_rcv</code> or <code>icmp_rcv</code>. Watch the length column in a trace at this point. It drops from 60 to 40 for a SYN, because the 20-byte IP header has been pulled and <code>skb-&gt;data</code> now points at the TCP header. Chapter 7 picks the skb up there.</p>
+
+<h3>Door two: forwarding</h3>
+<p><code>ip_forward</code> (<code>net/ipv4/ip_forward.c:83</code>) checks the TTL first (line 118) and answers with an ICMP time exceeded if it is one or less. Then, at line 144, it calls <code>skb_cow</code>: before writing to the header, make sure this skb owns its head privately and has room for the outgoing link-layer header. A TCP segment fails that test, because TCP transmits a clone of the skb it keeps for retransmission (<code>net/ipv4/tcp_output.c:1563</code>), and the clone shares its head with the original. So the router trace shows <code>pskb_expand_head</code>, <code>skb_release_data</code> and <code>skb_headers_offset_update</code> between <code>ip_forward</code> and the FORWARD hook: the header is copied so it can be modified. Then <code>ip_decrease_ttl</code> (line 149), then the FORWARD hook (lines 162 to 164) with <code>ip_forward_finish</code> (line 65) as the continuation, which calls <code>dst_output</code> (line 80): <code>skb_dst(skb)-&gt;output</code>, which <code>rt_dst_alloc</code> set to <code>ip_output</code> (<code>route.c:1691</code>). From there the packet is on the transmit path of chapter 6, joining it at the POST_ROUTING hook. No socket was involved. The FORWARD hook is the only place a firewall on this host sees transit traffic.</p>
+<p>And when forwarding is off, <code>ip_error</code> (<code>route.c:990</code>) receives the packet instead. Its first branch is for exactly this case: it increments <code>IpInAddrErrors</code> and frees the skb, and it does not send an ICMP error. The client sees nothing and retransmits until it gives up. The bench trace ends with <code>ip_route_input_slow</code>, <code>ip_error</code>, then <code>sk_skb_reason_drop(SKB_DROP_REASON_IP_INADDRERRORS)</code>, because pwru prints the drop reason when a function frees the skb.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["ip_rcv<br/>ip_input.c 603"] ==> B["ip_rcv_core: checks, clear cb, skb_orphan<br/>499 to 583"]
+  B ==> H1["PRE_ROUTING hook<br/>chapter 5"]
+  H1 ==> C["ip_rcv_finish 478<br/>l3mdev detour, chapter 11"]
+  C ==> D["ip_rcv_finish_core 361<br/>early demux, then ip_route_input_slow"]
+  D ==> E{"fib_lookup result<br/>route.c 2380"}
+  E ==>|"RTN_LOCAL 2397"| F["dst input = ip_local_deliver<br/>route.c 1693"]
+  E ==>|"RTN_UNICAST, forwarding on"| G["dst input = ip_forward<br/>route.c 1918"]
+  E -->|"RTN_UNICAST, forwarding off 2405"| X["dst input = ip_error<br/>count IpInAddrErrors, drop, no ICMP"]
+  F ==> I["dst_input: the indirect call<br/>dst.h 478"]
+  G ==> I
+  I ==> J["ip_local_deliver 250<br/>LOCAL_IN hook"] ==> K["ip_protocol_deliver_rcu 189<br/>tcp_v4_rcv, chapter 7"]
+  I ==> L["ip_forward 83<br/>ttl, skb_cow, ttl minus one"] ==> M["FORWARD hook"] ==> N["ip_forward_finish 65<br/>dst_output"] ==> O["ip_output<br/>chapter 6"]
+  style I fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style X fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 4.1 — the IP receive path and the two doors.</strong> Notice that the decision is made inside <code>ip_route_input_slow</code>, when a function pointer is stored in the route, and that the diamond the chart draws is only the indirect call that reads it. The forwarding sysctl is enforced inside the lookup, before any FORWARD hook could run.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Bring up the three-namespace router, watch both doors, then close one.</p>
+<pre><code>sudo lab/05-router.sh up
+sudo ip netns exec pp-s python3 -m http.server 8080 --bind 10.5.2.2 &amp;
+# what the router will decide, before sending anything
+sudo ip netns exec pp-rt ip route get 10.5.2.2 from 10.5.1.2 iif r0
+# trace only the router namespace, then request from the client
+sudo pwru --filter-netns /run/netns/pp-rt 'tcp and port 8080'
+sudo ip netns exec pp-c curl -s -o /dev/null http://10.5.2.2:8080/
+# close the forwarding door and watch where the SYN dies
+sudo ip netns exec pp-rt sysctl -w net.ipv4.ip_forward=0
+sudo ip netns exec pp-c curl -s -m 3 http://10.5.2.2:8080/ ; echo "exit $?"
+sudo ip netns exec pp-rt nstat -az IpInAddrErrors
+sudo ip netns exec pp-rt sysctl -w net.ipv4.ip_forward=1</code></pre>
+<p>With forwarding on, the SYN reads <code>ip_rcv_finish_core</code>, <code>ip_route_input_noref</code>, <code>ip_route_input_slow</code>, <code>fib_validate_source</code>, <code>ip_forward</code>, <code>pskb_expand_head</code>, then the hook, then <code>ip_forward_finish</code> and <code>ip_output</code> on the far interface. With forwarding off it reads <code>ip_route_input_slow</code>, <code>ip_error</code>, and a drop with reason <code>IP_INADDRERRORS</code>; curl exits 28 after its timeout, and the counter has gone up by the number of retransmitted SYNs.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p><code>ip_rcv_core</code> validates the header and orphans the skb from the sending socket. The PRE_ROUTING hook runs before any route lookup. <code>ip_route_input_slow</code> consults policy rules and the FIB trie and stores one of three input functions in the route: <code>ip_local_deliver</code> for a local address, <code>ip_forward</code> for a remote one when forwarding is on, <code>ip_error</code> when it is off. <code>dst_input</code> is the indirect call through that pointer. Local delivery passes the LOCAL_IN hook and hands the skb to the transport handler. Forwarding checks the TTL, copies a shared header, decrements the TTL, passes the FORWARD hook and calls the route's output function, <code>ip_output</code>.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>ip_rcv_core</dt><dd>Header validation, scratch-space reset and <code>skb_orphan</code>; the function before the PRE_ROUTING hook.</dd>
+<dt>skb_orphan, destructor</dt><dd>Detaching an skb from its owning socket by running the socket's accounting callback (<code>tcp_wfree</code>, <code>sock_edemux</code>).</dd>
+<dt>early demux</dt><dd>Looking up an established socket before routing so its cached route can be reused.</dd>
+<dt>ip_route_input_slow, fib_lookup</dt><dd>The normal input route lookup: policy rules pick a table, the FIB trie gives the longest prefix match.</dd>
+<dt>FIB</dt><dd>Forwarding information base: the routing table as the kernel stores it, a level-compressed trie.</dd>
+<dt>RTN_LOCAL, RTN_UNICAST</dt><dd>Route types: one of my addresses, or somebody else's.</dd>
+<dt>dst_entry, skb_dst</dt><dd>The route object attached to the skb, carrying the <code>input</code> and <code>output</code> function pointers and the next hop.</dd>
+<dt>dst_input, dst_output</dt><dd>The indirect calls through the route's pointers; the routing diamond of the chart.</dd>
+<dt>fib_validate_source, rp_filter</dt><dd>Reverse-path check on the source address at input.</dd>
+<dt>ip_local_deliver, ip_protocol_deliver_rcu</dt><dd>Door one: LOCAL_IN hook, then dispatch by protocol number to <code>tcp_v4_rcv</code> and friends.</dd>
+<dt>ip_forward, skb_cow, ip_forward_finish</dt><dd>Door two: TTL check, private header, FORWARD hook, then the route's output function.</dd>
+<dt>ip_error</dt><dd>The input function of a route that cannot be forwarded; counts <code>IpInAddrErrors</code> and drops silently when forwarding is off.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. Predict the outcome: the router has <code>net.ipv4.ip_forward=0</code> and the nftables table of the lab loaded. A client sends a SYN through it. Which chains see the packet, where does it die, and what does the client observe?</p>
+<details class="ans"><summary>Answer</summary>
+<p>The PRE_ROUTING chains see it; the FORWARD chain never does; the client gets no answer and times out. The forwarding switch is tested inside <code>ip_route_input_slow</code> at <code>net/ipv4/route.c:2405</code>, after the hook has already run, and it makes the route's input function <code>ip_error</code> (line 990). <code>ip_error</code>'s first branch, for an incoming device with forwarding disabled, increments <code>IpInAddrErrors</code> and frees the skb without sending ICMP. The trace ends at <code>ip_error</code> with drop reason <code>IP_INADDRERRORS</code>; the nftables <code>forward</code> chain counters do not move.</p>
+<p>The near miss is "the router sends ICMP host unreachable". It does that only when forwarding is on and the lookup finds no route. With forwarding off the drop is silent, which is exactly what makes a forgotten sysctl hard to diagnose from the client side.</p>
+</details>
+<p>2. Every trace of a packet arriving over a veth or over <code>lo</code> shows <code>tcp_wfree</code> immediately after <code>ip_rcv_core</code>, in the receiver's namespace. Traces of packets arriving from a real NIC never show it. What does the line mean, and why the difference?</p>
+<details class="ans"><summary>Answer</summary>
+<p>It is the sender's socket releasing its send-buffer accounting for that skb. <code>ip_rcv_core</code> calls <code>skb_orphan</code> at <code>net/ipv4/ip_input.c:583</code>, which runs the skb's destructor, and a TCP data skb's destructor is <code>tcp_wfree</code>. On a veth or on <code>lo</code> the skb is the very same object the sender's TCP built, handed across with <code>skb-&gt;sk</code> still set, so the orphan happens here, in the receiver's IP layer. A frame from a real NIC was built by the driver in chapter 1 and never had an owning socket; the sender's copy was orphaned by the sender's driver on transmit completion.</p>
+<p>The near miss is reading it as "the receiver is freeing the packet". Nothing is freed; the skb continues into <code>ip_rcv_finish_core</code> on the next line. Only the ownership link is cut.</p>
+</details>
+<p>3. In the router trace, every forwarded TCP segment shows <code>pskb_expand_head</code> right after <code>ip_forward</code>, but forwarded ICMP echo requests from <code>ping</code> do not. What is the router copying, and why only for TCP?</p>
+<details class="ans"><summary>Answer</summary>
+<p>The skb head, so it can write the decremented TTL into a private copy. <code>ip_forward</code> calls <code>skb_cow</code> at <code>net/ipv4/ip_forward.c:144</code> before <code>ip_decrease_ttl</code> at line 149. <code>skb_cow</code> reallocates when the head is shared or headroom is short. A TCP segment is a clone made by <code>__tcp_transmit_skb</code> (<code>net/ipv4/tcp_output.c:1563</code>), sharing its head with the copy TCP keeps for retransmission, so it is always shared here. An echo request from <code>ping</code> is built once and sent once, is not cloned, and has ample headroom, so <code>skb_cow</code> does nothing.</p>
+<p>The near miss is "the veth strips headroom". The headroom is fine; the test that fails is <code>skb_cloned</code>. The same copy happens on a real router with real NICs, for the same reason.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/ip-sysctl.html">IP Sysctl</a>, kernel documentation. Search for <code>ip_forward</code>, <code>forwarding</code>, <code>rp_filter</code> and <code>ip_early_demux</code>; each entry is a paragraph.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://docs.kernel.org/networking/fib_trie.html">LC-trie implementation notes</a>, kernel documentation. Ten minutes on how the FIB is stored; read it if you have ever wondered why a million routes lookup in constant time.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://man7.org/linux/man-pages/man8/ip-rule.8.html">ip-rule(8)</a>, Linux manual page. The policy rules <code>fib_lookup</code> walks before the table; the VRF chapter uses one of them.</li>
+<li class="ref" data-layer="L3"><span class="tag L3">L3</span><a href="https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks">Netfilter hooks</a>, nftables wiki. The diagram on that page places the routing decision between the hooks exactly as this chapter's code does; keep it beside chapter 5.</li>
+</ul>
+</div>
+</section>

@@ -1,0 +1,175 @@
+<section id="ch8" class="chapter">
+<span class="chnum">Chapter 8</span>
+<h2>Two programs on one host: lo, same pod, unix sockets</h2>
+<p class="chmeta">~RT8 min · <span class="tag SOCK">SOCK</span> · <em>Spine:</em> chapters 1 to 7 followed one skb in from a network card and back out. Now both ends live on the same machine and the card is never involved. This chapter shows where that skb goes instead, then removes the device layer entirely.</p>
+
+<h3>Three scenarios that collapse into one</h3>
+<p>Two programs on two ports of one interface; two programs on two different interfaces of one machine; two containers in one Kubernetes pod. Three questions, one answer, because the decision is made in the output route lookup and it does not consult the interface you expect.</p>
+<p><code>ip_route_output_key_hash_rcu</code> (<code>net/ipv4/route.c:2736</code>) runs the FIB lookup, and when the answer is <code>RTN_LOCAL</code> it overrides the device (lines 2872 to 2890):</p>
+<pre><code>if (res->type == RTN_LOCAL) {
+        /* L3 master device is the loopback for that domain */
+        dev_out = l3mdev_master_dev_rcu(FIB_RES_DEV(*res)) ? :
+                net->loopback_dev;
+        flags |= RTCF_LOCAL;</code></pre>
+<p>The matching route entry named a real interface; the output device is overwritten anyway. The bench shows both halves on one node:</p>
+<pre><code># ip route show table local
+local 172.18.0.4 dev eth0 proto kernel scope host src 172.18.0.4
+# ip route get 172.18.0.4 from 10.128.0.75
+local 172.18.0.4 from 10.128.0.75 dev lo table local</code></pre>
+<p>The table entry says <code>dev eth0</code>; the lookup answers <code>dev lo</code>. Traffic from one local address to another goes through the loopback device even when the two addresses sit on different physical cards. The interface an address is configured on decides which card answers ARP for it and which card may receive it from outside. It decides nothing about locally generated traffic to it.</p>
+<p>One more line matters shortly. <code>RTCF_LOCAL</code> is set here, and <code>rt_dst_alloc</code> (<code>route.c:1670</code>) reads it: <code>rt->dst.output = ip_output</code> at line 1691, and <code>if (flags &amp; RTCF_LOCAL) rt->dst.input = ip_local_deliver</code> at lines 1692 to 1693. The output route is born already knowing what the input side should do.</p>
+
+<h3>Down the transmit path and straight back up</h3>
+<p>The skb then takes the transmit path of chapter 6: LOCAL_OUT, POST_ROUTING, a loopback neighbour that is permanently valid and needs no ARP, and <code>__dev_queue_xmit</code> finding <code>lo</code> set to <code>noqueue</code>, so the driver is called directly. That driver is <code>loopback_xmit</code> (<code>drivers/net/loopback.c:70</code> to 94), and four lines decide everything:</p>
+<pre><code>skb_orphan(skb);                             /* line 80 */
+skb_dst_force(skb);                          /* line 85 */
+skb->protocol = eth_type_trans(skb, dev);    /* line 87 */
+if (likely(__netif_rx(skb) == NET_RX_SUCCESS))    /* line 90 */</code></pre>
+<p><code>skb_orphan</code> releases the sending socket's accounting, which is why the trace shows <code>tcp_wfree</code> here. <code>skb_dst_force</code> takes a real reference on the route. <code>eth_type_trans</code> does what a receive path expects: read the Ethernet header, set <code>skb->pkt_type</code> and <code>skb->protocol</code>, pull the header off. Then <code>__netif_rx</code> hands the skb to the per-CPU backlog of chapter 1. The transmit path ends inside a receive path, same softirq, same skb.</p>
+<p>A live SYN on the node, condensed, one skb address on every line:</p>
+<pre><code>ip_local_out > nf_hook_slow > ip_output > nf_hook_slow > ip_finish_output2 >
+__dev_queue_xmit > dev_hard_start_xmit > loopback_xmit > tcp_wfree >
+eth_type_trans > __netif_rx > enqueue_to_backlog > ip_rcv > ip_rcv_core >
+nf_hook_slow > ip_rcv_finish_core > ip_local_deliver > nf_hook_slow > tcp_v4_rcv</code></pre>
+<p>Count the <code>nf_hook_slow</code> calls: four. LOCAL_OUT, POST_ROUTING, PRE_ROUTING, LOCAL_IN. The skb walks the netfilter chart twice, in one namespace, and every rule applies both times. A POSTROUTING rule counting bytes that leave the machine counts this packet, which never leaves the machine.</p>
+<p>Now what the trace lacks: no <code>ip_route_input_noref</code> and no <code>ip_route_input_slow</code> in the whole 1,631-line capture. The receive half does no routing lookup. <code>skb_dst_force</code> kept the output route attached, that route was built with <code>RTCF_LOCAL</code> so its input function is already <code>ip_local_deliver</code>, and <code>ip_rcv_finish_core</code> looks up a route only when <code>!skb_valid_dst(skb)</code> (<code>net/ipv4/ip_input.c:406</code>, <code>skb_valid_dst</code> at <code>include/net/dst_metadata.h:93</code>). The route the sender computed is the route the receiver uses. Remember this when the next chapter sends the same skb through a veth pair and gets the opposite result.</p>
+
+<figure class="dia">
+<div class="mermaid">
+sequenceDiagram
+  participant S as sender socket
+  participant OUT as output route lookup
+  participant NF1 as LOCAL_OUT and POST_ROUTING
+  participant LO as loopback_xmit
+  participant BL as backlog and core
+  participant NF2 as PRE_ROUTING and LOCAL_IN
+  participant R as receiver socket
+  S->>OUT: daddr is a local address
+  OUT-->>S: RTN_LOCAL, dev_out = loopback_dev<br/>RTCF_LOCAL sets dst.input = ip_local_deliver
+  S->>NF1: same skb
+  NF1->>LO: ip_finish_output2, noqueue, direct call
+  Note over LO: skb_orphan, skb_dst_force, eth_type_trans
+  LO->>BL: __netif_rx, same skb, same softirq
+  BL->>NF2: ip_rcv, no route lookup: skb_valid_dst is true
+  NF2->>R: ip_local_deliver, tcp_v4_rcv
+  style LO fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 8.1 — one skb through the loopback device, chart twice, lookup once.</strong> Notice that the route decided at the first step is still the one used at the last, so the input lookup is skipped. The four netfilter boxes are four real <code>nf_hook_slow</code> calls in the bench trace.</figcaption>
+</figure>
+
+<h3>What a tap on lo sees, and how often</h3>
+<p>A packet socket on <code>lo</code> sees every packet twice, and this is worth settling by measurement because both answers sound plausible.</p>
+<p><code>xmit_one</code> (<code>net/core/dev.c:3878</code>) calls <code>dev_queue_xmit_nit</code> when a tap is active (lines 3883 to 3884), which clones the skb and sets <code>skb2->pkt_type = PACKET_OUTGOING</code> (line 2597). The <code>ptype_all</code> walk of chapter 3 then delivers it again on the way in, as <code>PACKET_HOST</code>. Two deliveries, one per direction through the device. A suppression mechanism exists and does not apply: <code>packet_rcv</code> (<code>net/packet/af_packet.c:2144</code>), <code>packet_rcv_spkt</code> (line 1893) and <code>tpacket_rcv</code> (line 2273) discard <code>pkt_type</code> <code>PACKET_LOOPBACK</code>, but only <code>dev_loopback_xmit</code> (<code>dev.c:4345</code>) sets that, and it serves multicast and broadcast self-copies.</p>
+<p>Measured with a packet socket bound to <code>lo</code>, one local HTTP request gave twenty-four frames for twelve packets, in pairs with identical sequence numbers:</p>
+<pre><code>('OUTGOING', 35726, 4240, 1415493697)
+('HOST',     35726, 4240, 1415493697)
+TOTAL frames seen by the tap: 24</code></pre>
+<p>So <code>tcpdump -i lo</code> showing an apparent duplicate of every packet is correct, and <code>pkt_type</code> is how you tell the two apart.</p>
+
+<h3>Same pod: one namespace, two containers</h3>
+<p>Kubernetes gives every container in a pod the same network namespace, and everything follows from that. Two containers of a throwaway pod on the bench:</p>
+<pre><code>alpha# readlink /proc/self/ns/net  ->  net:[4026532689]
+beta#  readlink /proc/self/ns/net  ->  net:[4026532689]
+alpha# ip -br a  ->  lo ..., eth0@if19 10.128.0.82/32
+beta#  ip -br a  ->  lo ..., eth0@if19 10.128.0.82/32</code></pre>
+<p>Same inode, same device index, same address, so a connection between them addressed to the pod IP is the first scenario of this chapter happening inside the pod. Traced on the node while one container talked to a listener in the other, the capture held 390 events, every one carrying the pod's namespace inode and an interface column reading <code>lo</code>. Searching it for the host-side veth device, for <code>veth_xmit</code>, for any Cilium program name and for <code>nf_hook_slow</code> returned zero lines. The pod's veth device is idle, the BPF program on its host end is never called, and since that namespace has no registered hook entries the four hook points cost nothing. The Cilium chapters show what that program does when it is called.</p>
+<p>One detail catches people. <code>ss -tlnp</code> in the container owning a listener prints the socket and the process; in the sibling container it prints the same socket with an empty process column. They share a network namespace and read the same socket table, and they do not share a process namespace, so the second cannot map the socket inode to anything in its own <code>/proc</code>.</p>
+
+<h3>Unix sockets: an skb with nothing attached</h3>
+<p>Now take the device layer away. A unix socket still allocates an skb, which surprises people who expect a plain memory copy, and that skb is the only thing the two paths share.</p>
+<p><code>unix_stream_sendmsg</code> (<code>net/unix/af_unix.c:2377</code>) loops over the caller's data. Each turn calls <code>sock_alloc_send_pskb</code> (line 2437), charging the bytes to the sender's send buffer and blocking at that limit, then <code>skb_copy_datagram_from_iter</code> (line 2467) copies the payload in. Delivery is three lines:</p>
+<pre><code>__skb_queue_tail(&other->sk_receive_queue, skb);   /* line 2488 */
+unix_state_unlock(other);
+READ_ONCE(other->sk_data_ready)(other);            /* line 2492 */</code></pre>
+<p>The skb goes on the peer's <code>sk_receive_queue</code>, the list <code>recvmsg</code> drains in chapter 7, and <code>sk_data_ready</code> wakes the reader through <code>sock_def_readable</code>. The reader is <code>unix_stream_read_generic</code> (line 2907). The datagram variant <code>unix_dgram_sendmsg</code> (line 2083) queues at line 2291 and adds peer-wake machinery (<code>unix_dgram_peer_wake_me</code>, line 571) so a sender blocked on a full receiver is woken when the receiver drains.</p>
+<p>What makes this fast is everything that is absent:</p>
+<table>
+<thead><tr><th>Stage</th><th>TCP over lo</th><th>Unix socket</th></tr></thead>
+<tbody>
+<tr><td>Route and <code>dst_entry</code></td><td><code>RTN_LOCAL</code>, route pinned by <code>skb_dst_force</code></td><td>none; the peer is a pointer</td></tr>
+<tr><td>Device</td><td><code>skb->dev</code> is the loopback device</td><td><code>skb->dev</code> is never set</td></tr>
+<tr><td>Netfilter and qdisc</td><td>four hook points, then <code>noqueue</code></td><td>no hook exists in this path</td></tr>
+<tr><td>Headers, checksums, MTU</td><td>Ethernet, IP and TCP built and parsed</td><td>payload only</td></tr>
+<tr><td>Visible to a tap</td><td>yes, twice</td><td>invisible to <code>tcpdump</code></td></tr>
+<tr><td>Naming</td><td>address and port</td><td>a filesystem path or an abstract name</td></tr>
+</tbody>
+</table>
+<p>That last row has its own code. <code>unix_find_other</code> (line 1273) chooses on one condition, <code>if (sunaddr->sun_path[0])</code> at line 1279. A non-zero first byte means a filesystem path, and <code>unix_find_bsd</code> (line 1189) resolves it through the normal path walk to an inode, so file permissions and the mount namespace control who may connect. A zero first byte means an <b>abstract socket</b>, and <code>unix_find_abstract</code> (line 1254) looks it up in a hash table keyed by name and by network namespace. Abstract unix sockets are scoped by the network namespace although no packet touches a device, which is why two pods can both bind the same abstract name. Alongside, <code>SCM_RIGHTS</code> sends open file descriptors in <code>UNIXCB(skb).fp</code>, refused at line 2478 if the receiver has not opted in, and <code>SOCK_SEQPACKET</code> offers record boundaries with connections and reliability.</p>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Host lab, run as root. Prerequisites: <code>iproute2</code>, <code>python3</code>, <code>curl</code>, <code>tcpdump</code> (package <code>tcpdump</code>), <code>pwru</code>, and <code>bpftrace</code> (package <code>bpftrace</code>) for the last block.</p>
+<pre><code>sudo lab/08-lo-unix.sh up      # adds pp-dummy0 10.8.0.1 and a listener on 8082
+
+# 1. the lookup ignores the interface the address lives on
+ip route show table local | grep 10.8.0.1   # says dev pp-dummy0
+ip route get 10.8.0.1 from 192.168.1.10     # answers dev lo
+
+# 2. four nf_hook_slow lines for one SYN, one skb address
+sudo pwru --output-meta 'tcp and port 8082'
+curl -s -o /dev/null --interface 192.168.1.10 http://10.8.0.1:8082/
+
+# 3. every packet twice, once out and once in
+sudo tcpdump -i lo -n -Q inout -c 8 'tcp port 8082'
+
+# 4. the unix socket: sendmsg and the wakeup fire, nothing else does
+sudo bpftrace -e '
+kprobe:unix_stream_sendmsg { @send = count(); }
+kprobe:sock_def_readable   { @wake = count(); }
+kprobe:__netif_rx          { @rx   = count(); }
+kprobe:nf_hook_slow        { @nf   = count(); }
+interval:s:5 { exit(); }' &amp;
+sudo python3 lab/unix_pair.py
+sudo lab/08-lo-unix.sh down</code></pre>
+<p>Steps 1 to 3 match what was measured on the bench. Step 4 is <em>expected</em> rather than observed: the send and wake counters should move together while the other two stay still, but the bench node has no <code>bpftrace</code> and the host labs were not run for this dossier.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>An output lookup returning <code>RTN_LOCAL</code> replaces the output device with the namespace's loopback device (<code>route.c:2881</code>), so local-to-local traffic uses <code>lo</code> whatever interface the addresses live on. The same lookup sets <code>RTCF_LOCAL</code>, making <code>rt_dst_alloc</code> store <code>ip_local_deliver</code> as the route's input function (line 1693), and because <code>loopback_xmit</code> calls <code>skb_dst_force</code> the receive half reuses that route and does no lookup. One skb walks the netfilter chart twice in one namespace. A tap on <code>lo</code> sees each packet twice, <code>PACKET_OUTGOING</code> then <code>PACKET_HOST</code>. Containers in one pod share the network namespace, so traffic between them is this same loopback path with no veth device and no BPF program involved. A unix socket keeps the skb and the receive queue and discards the device, the route, the headers and the hooks.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>loopback_xmit</dt><dd>The loopback driver's transmit function: orphan the skb, pin the route, run <code>eth_type_trans</code>, call <code>__netif_rx</code>.</dd>
+<dt>skb_dst_force</dt><dd>Takes a real reference on the skb's route so it stays valid across the transmit and receive boundary.</dd>
+<dt>skb_valid_dst</dt><dd>The test <code>ip_rcv_finish_core</code> uses to decide whether an input route lookup is needed at all.</dd>
+<dt>PACKET_OUTGOING, PACKET_LOOPBACK</dt><dd>The <code>pkt_type</code> a tap sees on the transmit side, and the one <code>dev_loopback_xmit</code> sets for multicast self-copies so packet sockets discard it.</dd>
+<dt>unix_stream_sendmsg, unix_dgram_sendmsg</dt><dd>The unix socket send paths: allocate an skb, copy the payload, queue it on the peer.</dd>
+<dt>unix_stream_read_generic</dt><dd>The unix socket read path, draining the peer's <code>sk_receive_queue</code>.</dd>
+<dt>sock_alloc_send_pskb</dt><dd>The allocator charging an outgoing skb to the sender's send buffer, which is where unix socket backpressure comes from.</dd>
+<dt>abstract socket</dt><dd>A unix socket whose name begins with a zero byte; it lives in a per namespace hash table rather than on a filesystem.</dd>
+<dt>SCM_RIGHTS, SOCK_SEQPACKET</dt><dd>File descriptors carried in <code>UNIXCB(skb).fp</code>, and the unix socket type with record boundaries plus connections.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. A machine has <code>10.0.0.1</code> on <code>eth0</code> and <code>10.0.0.2</code> on <code>eth1</code>, two cards on two switches. A program binds <code>10.0.0.1</code> and connects to <code>10.0.0.2</code>. Which cards carry the traffic, and which firewall chains can match it?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Neither card; the packet goes through <code>lo</code>, and OUTPUT, POSTROUTING, PREROUTING and INPUT can all match it. The output lookup returns <code>RTN_LOCAL</code> because <code>10.0.0.2</code> is a local address, and <code>net/ipv4/route.c:2881</code> overwrites the output device with <code>net->loopback_dev</code> whatever interface the route entry named. The bench trace shows four <code>nf_hook_slow</code> calls for one SYN.</p>
+<p>The near miss is "it leaves eth0 and comes back on eth1". Nothing reaches a wire, so a rule matching <code>iif eth1</code> never fires and a capture on either card stays empty.</p>
+</details>
+<p>2. Trace the path: the receive half of a loopback packet reaches <code>ip_rcv_finish_core</code>. Why does it do no routing lookup? Name the state that makes it unnecessary and the call that preserved it.</p>
+<details class="ans"><summary>Answer</summary>
+<p>The skb still carries the route the sender computed, and that route already says what to do. The output lookup set <code>RTCF_LOCAL</code>, which made <code>rt_dst_alloc</code> store <code>rt->dst.input = ip_local_deliver</code> (<code>route.c:1693</code>); <code>loopback_xmit</code> called <code>skb_dst_force</code> (<code>drivers/net/loopback.c:85</code>) so the route is still attached and refcounted; and <code>ip_rcv_finish_core</code> calls <code>ip_route_input_noref</code> only when <code>!skb_valid_dst(skb)</code> (<code>net/ipv4/ip_input.c:406</code>).</p>
+<p>The near miss is "early demux found the socket". Early demux helps an established connection, but the route is reused even for the SYN, before any socket exists to demux to.</p>
+</details>
+<p>3. Predict the count: <code>tcpdump -i lo -c 100 'tcp port 8080'</code> while you drive exactly 30 TCP packets over a local connection. How many lines appear, which field separates them, and does the answer change for a multicast datagram the host sends to itself?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Sixty lines, separated by <code>skb->pkt_type</code>, and the multicast answer differs. Each packet reaches the tap once from <code>dev_queue_xmit_nit</code> on the way out, stamped <code>PACKET_OUTGOING</code> (<code>net/core/dev.c:2597</code>), and once from the <code>ptype_all</code> walk on the way in as <code>PACKET_HOST</code>; the bench run gave 24 frames for 12 packets. A multicast self-copy goes through <code>dev_loopback_xmit</code>, which sets <code>PACKET_LOOPBACK</code> (<code>dev.c:4345</code>), and <code>packet_rcv</code> discards that (<code>af_packet.c:2144</code>), so it appears once.</p>
+<p>The near miss is "thirty, because it is one connection". Loopback is a real device with a real transmit side and a real receive side, and a tap sits on both.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span><a href="https://man7.org/linux/man-pages/man7/unix.7.html">unix(7)</a>, Linux manual page. The authority for abstract versus pathname sockets, <code>SOCK_SEQPACKET</code> and <code>SCM_RIGHTS</code>; read the Address format section before the code.</li>
+<li class="ref" data-layer="L2"><span class="tag L2">L2</span><a href="https://man7.org/linux/man-pages/man7/packet.7.html">packet(7)</a>, Linux manual page. The <code>sockaddr_ll</code> section lists every <code>pkt_type</code> value, which is what the double delivery here is measured with.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://www.tcpdump.org/manpages/tcpdump.1.html">tcpdump(1) man page</a>, tcpdump.org. The <code>-Q in|out|inout</code> option splits the two deliveries on <code>lo</code> without reading <code>pkt_type</code> yourself.</li>
+<li class="ref" data-layer="LAB"><span class="tag LAB">LAB</span><a href="https://man7.org/linux/man-pages/man8/ip-netns.8.html">ip-netns(8)</a>, Linux manual page. How to create and enter the namespaces the pod demonstration relies on, and how <code>/proc/PID/ns/net</code> identifies one.</li>
+</ul>
+</div>
+</section>

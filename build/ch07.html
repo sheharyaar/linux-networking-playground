@@ -1,0 +1,130 @@
+<section id="ch7" class="chapter">
+<span class="chnum">Chapter 7</span>
+<h2>The socket is a file: from sk_receive_queue to recvmsg</h2>
+<p class="chmeta">~RT7 min · <span class="tag SOCK">SOCK</span> · <em>Spine:</em> chapter 4 handed our skb to <code>tcp_v4_rcv</code>. The program that wants it is asleep inside a <code>read()</code> on a file descriptor. This chapter connects the two: what a socket is as a file, the three queues the skb may land in, and how the sleeper is woken and given the bytes.</p>
+
+<h3>Two structs behind one descriptor</h3>
+<p><code>socket(2)</code> ends in <code>__sys_socket</code> (<code>net/socket.c:1788</code>) and <code>__sock_create</code> (line 1580), which asks the address family to build the object; for IPv4 that is <code>inet_create</code> (<code>net/ipv4/af_inet.c:259</code>). Two structures come out. <code>struct socket</code> (<code>include/linux/net.h:137</code>) is the file-facing half: a state, a type, a pointer to the <code>struct file</code>, a wait queue <code>wq</code>, and an operations table <code>ops</code>, which for TCP is <code>inet_stream_ops</code> (<code>af_inet.c:1060</code>). <code>struct sock</code>, reached through <code>socket-&gt;sk</code>, is the protocol half: the queues, the buffer limits, the callbacks, and a pointer to the protocol's own operations, <code>tcp_prot</code>.</p>
+<p>Then <code>sock_alloc_file</code> (<code>net/socket.c:525</code>) makes it a file. It allocates a <code>struct file</code> on <code>sockfs</code>, a pseudo-filesystem that exists only to give sockets inodes, using <code>alloc_file_pseudo</code> with the operations table <code>socket_file_ops</code> (lines 531 to 533), and stores the socket in <code>file-&gt;private_data</code> (line 541). That is the entire answer to "a socket is a file": the descriptor names a <code>struct file</code> whose operations table is <code>socket_file_ops</code> (lines 157 to 175), whose <code>read_iter</code> is <code>sock_read_iter</code>, whose <code>poll</code> is <code>sock_poll</code>, whose <code>release</code> is <code>sock_close</code>, and whose private data is the <code>struct socket</code>. <code>ls -l /proc/PID/fd</code> shows the sockfs inode as <code>socket:[12345]</code>, and <code>ss -tp</code> prints the same inode next to the process that owns it.</p>
+<p>So <code>read(fd)</code> is <code>sock_read_iter</code> (line 1201), then <code>sock_recvmsg</code> (line 1144), then <code>sock_recvmsg_nosec</code> (line 1123), which calls <code>sock-&gt;ops-&gt;recvmsg</code> (lines 1126 to 1128). That is <code>inet_recvmsg</code> (<code>af_inet.c:884</code>), which calls <code>sk-&gt;sk_prot-&gt;recvmsg</code> (lines 894 to 895), which is <code>tcp_recvmsg</code> (<code>net/ipv4/tcp.c:2930</code>). <code>recvfrom(2)</code> gets there slightly differently, through <code>__sys_recvfrom</code> (<code>net/socket.c:2277</code>): look up the descriptor (line 2290), check that its file really is a socket with <code>sock_from_file</code> (line 2294), then <code>sock_recvmsg</code> (line 2301). Three indirect calls, and the read has gone from a file to TCP.</p>
+
+<h3>Three queues, and who processes them</h3>
+<p>Now the receive side. <code>tcp_v4_rcv</code> (<code>net/ipv4/tcp_ipv4.c:2070</code>) looks up the socket for the segment's four-tuple, established sockets first, then listeners. The chapter's trace of a SYN ended in <code>tcp_v4_conn_request</code>: a listener was found, and the decision at lines 2236 to 2239 sent the SYN straight into <code>tcp_v4_do_rcv</code>, where TCP creates a small <b>request socket</b>, sends the SYN-ACK, and consumes the skb. For an established connection the interesting decision is at lines 2244 to 2254, and it turns on one question: is a process holding this socket's lock right now?</p>
+<p><b>Not owned by user.</b> <code>tcp_v4_do_rcv</code> (line 1830) runs immediately, in softirq context, and reaches <code>tcp_rcv_established</code> (<code>net/ipv4/tcp_input.c:6500</code>) and <code>tcp_data_queue</code> (line 5607). If the segment is the next one expected, <code>tcp_queue_rcv</code> (line 5532) tries to merge it with the tail of the queue and otherwise appends it with <code>tcp_add_receive_queue</code> (<code>include/net/tcp.h:803</code> to 807): <code>__skb_queue_tail(&amp;sk-&gt;sk_receive_queue, skb)</code>. That is the <b>receive queue</b>, <code>sk_receive_queue</code> (<code>include/net/sock.h:411</code>), queue one, the one <code>recvmsg</code> reads. If the segment arrived ahead of a gap, <code>tcp_data_queue_ofo</code> (line 5381) files it in the <b>out-of-order queue</b>, a red-black tree, queue two, and moves it to the receive queue when the gap closes.</p>
+<p><b>Owned by user.</b> A process is inside <code>recvmsg</code> or <code>sendmsg</code> and holds the socket lock. The softirq cannot touch the queues, so <code>tcp_add_backlog</code> (line 1901) appends the skb to the <b>socket backlog</b>, <code>sk_backlog</code> (<code>include/net/sock.h:420</code> to 425: a head, a tail, a length), queue three, after a size check. When the process releases the lock, <code>__release_sock</code> (<code>net/core/sock.c:3243</code>) drains the backlog (lines 3250 to 3262), calling <code>tcp_v4_do_rcv</code> for each skb, in the process's own context. The same packet is therefore processed either by the softirq or by the reader, depending on timing, and in a pwru trace the CPU and process columns change accordingly. This is the third thing in this document called a backlog: the per-CPU <code>input_pkt_queue</code> of chapter 1, this per-socket list, and the listen backlog below are unrelated structures that share a word.</p>
+<p>Every queue has a limit, and the limits are all expressed in <code>skb-&gt;truesize</code>, the memory an skb occupies including its metadata and buffer, not in payload bytes. <code>sk_rcvbuf</code> (<code>sock.h:443</code>) is the receive buffer limit, set from <code>net.ipv4.tcp_rmem</code> and grown by autotuning, or fixed by <code>SO_RCVBUF</code>. <code>sk_rmem_alloc</code> counts what is queued. <code>sk_rcvqueues_full</code> (<code>sock.h:1153</code>) adds the backlog length to it and compares. <code>ss -tm</code> prints these as <code>rb</code> and <code>skmem</code>.</p>
+
+<h3>Waking the reader</h3>
+<p>After queueing, <code>tcp_data_queue</code> calls <code>sk-&gt;sk_data_ready</code> (line 5660). For a normal socket that is <code>sock_def_readable</code> (<code>net/core/sock.c:3649</code>), which wakes whoever waits on the socket's wait queue, <code>sk_wq</code> (<code>sock.h:447</code>). Two kinds of waiter live there. A process blocked in <code>tcp_recvmsg_locked</code> (<code>tcp.c:2655</code>) at <code>sk_wait_data</code> (line 2794), and an epoll instance whose callback was registered through <code>sock_poll</code>. The woken reader walks <code>sk_receive_queue</code> (lines 2723 to 2726), copies bytes to user space, advances the sequence it has consumed, and frees skbs it has fully drained. That free runs the skb's receive destructor, <code>sock_rfree</code>, which decrements <code>sk_rmem_alloc</code>; in the veth trace of the HTTP response those are the <code>sock_rfree</code>, <code>skb_attempt_defer_free</code> and <code>napi_consume_skb</code> lines after <code>tcp_queue_rcv</code>, executed later, in curl's process context.</p>
+
+<h3>UDP, for contrast: one queue, one limit, no backpressure</h3>
+<p><code>udp_rcv</code> (<code>net/ipv4/udp.c:2588</code>) finds the socket and reaches <code>udp_queue_rcv_one_skb</code> (line 2349) and <code>__udp_enqueue_schedule_skb</code> (line 1655). It reads <code>sk_rcvbuf</code> (line 1669), and if the queued memory plus this skb's <code>truesize</code> exceeds it (line 1679), the packet is dropped on the spot, counted in <code>UdpRcvbufErrors</code>. Otherwise it goes on the tail of <code>sk_receive_queue</code> (line 1733) and <code>sk_data_ready</code> fires (line 1745). There is no out-of-order tree because UDP has no order, and no socket backlog because UDP does not take the socket lock in its receive path. A UDP reader that falls behind loses packets; a TCP reader that falls behind fills its queues, closes its advertised window, and the sender slows down.</p>
+
+<h3>The listen side, briefly</h3>
+<p>A SYN to a listening socket creates a request socket, not a full one, and the completed handshake's third ACK, matched by <code>tcp_check_req</code> (<code>tcp_ipv4.c:2165</code>), turns it into a full <code>struct sock</code> placed on the listener's <b>accept queue</b>. <code>accept()</code> dequeues it and calls <code>sock_alloc_file</code> for it, which is why a server has one sockfs inode per connection. The length of that queue is the "backlog" argument of <code>listen()</code>, capped by <code>net.core.somaxconn</code>: the third backlog, and the only one an application controls directly.</p>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart LR
+  FD["file descriptor 5"] ==> FILE["struct file<br/>f_op = socket_file_ops<br/>private_data"]
+  FILE ==> SOCKET["struct socket<br/>ops = inet_stream_ops<br/>wq, file, sk"]
+  SOCKET ==> SOCK["struct sock<br/>sk_receive_queue<br/>out_of_order_queue<br/>sk_backlog<br/>sk_rcvbuf, sk_rmem_alloc<br/>sk_data_ready<br/>sk_prot = tcp_prot"]
+  READ["read on fd 5"] -.-> R1["sock_read_iter<br/>socket.c 1201"] -.-> R2["sock_recvmsg<br/>ops recvmsg = inet_recvmsg"] -.-> R3["tcp_recvmsg<br/>walk sk_receive_queue, copy to user"]
+  R3 -.-> SOCK
+  style SOCK fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 7.1 — from a descriptor to the protocol object.</strong> Notice that the file layer knows nothing about TCP; it only stores a pointer and an operations table, and three indirect calls carry a <code>read()</code> down to <code>tcp_recvmsg</code>. The dotted path is the read; the thick path is the ownership chain.</figcaption>
+</figure>
+
+<figure class="dia">
+<div class="mermaid">
+flowchart TB
+  A["tcp_v4_rcv 2070<br/>look up the socket"] ==> B{"listener?"}
+  B ==>|"yes"| C["tcp_v4_do_rcv: request socket, SYN-ACK<br/>consume the SYN"]
+  B ==>|"established"| D{"sock_owned_by_user?<br/>2244 to 2254"}
+  D ==>|"no: softirq context"| E["tcp_v4_do_rcv, tcp_rcv_established<br/>tcp_data_queue 5607"]
+  D ==>|"yes: a process holds the lock"| F["tcp_add_backlog 1901<br/>queue three: sk_backlog"]
+  F -.->|"lock released"| G["__release_sock 3243<br/>tcp_v4_do_rcv in process context"]
+  G -.-> E
+  E ==>|"in order"| H["tcp_queue_rcv<br/>queue one: sk_receive_queue"]
+  E ==>|"gap before it"| I["tcp_data_queue_ofo<br/>queue two: out_of_order_queue"]
+  I -.->|"gap filled"| H
+  H ==> J["sk_data_ready: sock_def_readable<br/>wake recvmsg or epoll"]
+  style H fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style F fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+</div>
+<figcaption><strong>Diagram 7.2 — which of three queues a TCP segment enters.</strong> Notice that the socket backlog is chosen by timing alone: the same segment goes to queue one if the reader happens to be asleep and to queue three if it happens to be inside <code>recvmsg</code>, and in the second case the reader itself finishes the protocol work.</figcaption>
+</figure>
+
+<aside class="tryit">
+<h4>Try it</h4>
+<p>Look at a socket as a file, then watch the queues fill and drain.</p>
+<pre><code># the server from the veth lab: its listening socket as a file
+SRV=$(pgrep -f 'http.server 8080'); sudo ls -l /proc/$SRV/fd | grep socket
+sudo ip netns exec pp-b ss -tlnpm                      # same inode, rb = sk_rcvbuf, skmem counters
+# which queue did each segment take? count the two doors for ten seconds while curl runs in a loop
+sudo bpftrace -e '
+kprobe:tcp_v4_do_rcv   { @direct  = count(); }
+kprobe:tcp_add_backlog { @backlog = count(); }
+kprobe:sock_def_readable { @wakeups = count(); }
+interval:s:10 { exit(); }'
+sudo ip netns exec pp-a sh -c 'for i in $(seq 200); do curl -s -o /dev/null http://10.9.0.2:8080/; done'
+# UDP: a reader that never reads, a sender that floods, and the drop counter
+sudo ip netns exec pp-b python3 -c 'import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("10.9.0.2",9000)); time.sleep(20)' &amp;
+sudo ip netns exec pp-a python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); [s.sendto(b"x"*1400,("10.9.0.2",9000)) for _ in range(5000)]'
+sudo ip netns exec pp-b nstat -az UdpRcvbufErrors</code></pre>
+<p>Expected: the backlog counter is small but not zero, because a reader that is copying data when the next segment arrives sends that segment to queue three. The UDP counter jumps by roughly the number of datagrams that did not fit in the default receive buffer, a few hundred kilobytes, and the rest are still queued for a reader who never came.</p>
+</aside>
+
+<div class="recap">
+<h4>Recap</h4>
+<p>A socket descriptor is a <code>struct file</code> on sockfs whose operations table is <code>socket_file_ops</code> and whose private data is a <code>struct socket</code>, which points at the protocol's <code>struct sock</code>; <code>read()</code> reaches <code>tcp_recvmsg</code> through three indirect calls. <code>tcp_v4_rcv</code> puts an established segment in the receive queue or the out-of-order tree if nobody holds the socket lock, and in the socket backlog if a process does, to be processed by that process when it releases the lock. All limits are in <code>truesize</code> against <code>sk_rcvbuf</code>. Queueing calls <code>sk_data_ready</code>, which wakes the reader or epoll. UDP has one queue and drops on overflow. The accept queue is the listen backlog, a third unrelated meaning of the word.</p>
+</div>
+
+<div class="words">
+<h4>New words in this chapter</h4>
+<dl>
+<dt>struct socket, struct sock</dt><dd>The file-facing half with <code>ops</code> and a wait queue, and the protocol half with queues, limits and callbacks.</dd>
+<dt>sockfs, socket_file_ops, private_data</dt><dd>The pseudo-filesystem giving sockets inodes; the file operations table; the pointer from file to socket.</dd>
+<dt>sock_recvmsg, inet_recvmsg, tcp_recvmsg</dt><dd>The three indirect calls from a read to TCP.</dd>
+<dt>request socket, accept queue</dt><dd>The mini-socket a SYN creates, and the queue of completed connections <code>accept()</code> drains.</dd>
+<dt>sk_receive_queue</dt><dd>Queue one: in-order data waiting for <code>recvmsg</code>.</dd>
+<dt>out_of_order_queue</dt><dd>Queue two: a tree of segments that arrived ahead of a gap.</dd>
+<dt>socket backlog, sk_backlog</dt><dd>Queue three: segments that arrived while a process held the socket lock; drained by <code>__release_sock</code>.</dd>
+<dt>sock_owned_by_user</dt><dd>The test that picks queue three over queue one.</dd>
+<dt>sk_rcvbuf, sk_rmem_alloc, truesize</dt><dd>The receive memory limit, the running total, and the unit both are measured in.</dd>
+<dt>sk_data_ready, sock_def_readable, sk_wq</dt><dd>The wakeup callback, its default, and the wait queue readers and epoll sit on.</dd>
+<dt>sock_rfree</dt><dd>The receive destructor that returns memory to the socket when the reader frees an skb.</dd>
+</dl>
+</div>
+
+<div class="check">
+<h4>Check yourself</h4>
+<p>1. A process is inside <code>recvmsg</code>, copying a large buffer to user space, when three more segments for the same connection arrive on another CPU. Which queue do they enter, in whose context are they eventually processed, and what could make the kernel drop them?</p>
+<details class="ans"><summary>Answer</summary>
+<p>The socket backlog, in the reader's own context, and the receive-memory limit. <code>tcp_v4_rcv</code> finds <code>sock_owned_by_user</code> true (<code>net/ipv4/tcp_ipv4.c:2248</code>) and calls <code>tcp_add_backlog</code> (line 1901), which appends to <code>sk_backlog</code>. When <code>recvmsg</code> releases the lock, <code>__release_sock</code> (<code>net/core/sock.c:3250</code> to 3262) runs <code>tcp_v4_do_rcv</code> on each of them, so the reader's thread does the protocol work the softirq would otherwise have done. <code>tcp_add_backlog</code> drops when the backlog plus queued memory exceeds a limit derived from <code>sk_rcvbuf</code> and <code>sk_sndbuf</code>, counted as <code>TCPBacklogDrop</code> in <code>nstat</code>.</p>
+<p>The near miss is "they wait in the per-CPU backlog of chapter 1". That queue is before the IP layer and has nothing to do with sockets; these segments have already passed <code>ip_local_deliver</code>.</p>
+</details>
+<p>2. <code>ls -l /proc/4242/fd</code> shows <code>7 -&gt; socket:[91133]</code>. Starting from that number, name the objects and the function pointers a <code>read(7)</code> passes through before TCP code runs.</p>
+<details class="ans"><summary>Answer</summary>
+<p>91133 is a sockfs inode. Descriptor 7 names a <code>struct file</code> whose <code>f_op</code> is <code>socket_file_ops</code> (<code>net/socket.c:157</code>) and whose <code>private_data</code> is a <code>struct socket</code> (set at line 541). <code>read</code> calls <code>f_op-&gt;read_iter</code>, which is <code>sock_read_iter</code> (line 1201), then <code>sock_recvmsg</code> (line 1144), which calls <code>socket-&gt;ops-&gt;recvmsg</code>, <code>inet_recvmsg</code> (<code>net/ipv4/af_inet.c:884</code>), which calls <code>sk-&gt;sk_prot-&gt;recvmsg</code>, <code>tcp_recvmsg</code> (<code>net/ipv4/tcp.c:2930</code>). <code>ss -tp</code> maps the inode back to the process and shows the connection.</p>
+<p>The near miss is imagining a socket-specific system call table. There is none; the same <code>read</code> that works on a pipe works here, because the file operations table is the only thing that differs.</p>
+</details>
+<p>3. Predict the outcome: a UDP receiver binds a socket and never calls <code>recv</code>. A sender delivers 5,000 datagrams of 1,400 bytes at line rate. Roughly how many are dropped, which line drops them, and would the same experiment over TCP lose data?</p>
+<details class="ans"><summary>Answer</summary>
+<p>Most of them, at <code>net/ipv4/udp.c:1679</code>, and TCP would lose nothing. The default <code>sk_rcvbuf</code> comes from <code>net.core.rmem_default</code>, about 208 KB on this kernel, measured in <code>truesize</code>; a 1,400-byte datagram costs roughly 2 KB of <code>truesize</code>, so around a hundred fit and the remaining four thousand nine hundred fail the test <code>rmem + size &gt; rcvbuf</code> and are freed, incrementing <code>UdpRcvbufErrors</code>. Over TCP the receive queue would fill the same way, but then the advertised window would reach zero and the sender's <code>tcp_write_xmit</code> would stop sending; nothing is dropped, the sender waits.</p>
+<p>The near miss is "the kernel buffers everything until the reader comes". It buffers up to the limit; the limit is the whole point. Raise it with <code>SO_RCVBUF</code> up to <code>net.core.rmem_max</code> and the number that fit scales with it.</p>
+</details>
+</div>
+
+<div class="refs">
+<h4>Go deeper</h4>
+<ul>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span><a href="https://man7.org/linux/man-pages/man7/socket.7.html">socket(7)</a>, Linux manual page. <code>SO_RCVBUF</code>, <code>SO_SNDBUF</code>, <code>SO_RCVLOWAT</code>, and the <code>rmem_default</code> and <code>rmem_max</code> sysctls; the reference for every limit in this chapter.</li>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span><a href="https://man7.org/linux/man-pages/man7/tcp.7.html">tcp(7)</a>, Linux manual page. The <code>tcp_rmem</code> autotuning paragraph and <code>somaxconn</code>; skip the option list.</li>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span><a href="https://man7.org/linux/man-pages/man7/udp.7.html">udp(7)</a>, Linux manual page. Two pages; the one about buffer errors is the UDP section of this chapter.</li>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span><a href="https://man7.org/linux/man-pages/man2/recv.2.html">recv(2)</a>, Linux manual page. The system call that starts the three indirect calls; read the <code>MSG_DONTWAIT</code> and <code>MSG_PEEK</code> paragraphs.</li>
+<li class="ref" data-layer="SOCK"><span class="tag SOCK">SOCK</span>Florian Westphal, <a href="https://github.com/torvalds/linux/commit/e7942d0633c47c791ece6afa038be9cf977226de">tcp: remove prequeue support</a>, Linux 4.13 (GitHub mirror). Until 2017 there was a fourth queue; the commit message explains what it did and why it went, which is the best short explanation of why the three that remain exist.</li>
+</ul>
+</div>
+</section>
