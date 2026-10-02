@@ -1,0 +1,12 @@
+6905 data packets after 2 s, 8.39 s; frame sizes [1514]
+average rate: 9.969 Mbit/s of frames, 9.535 Mbit/s of payload
+gap median 1208 us, mean 1215 us
+      <50us   3358 ##################################################
+   50-500us      4 
+    0.5-1ms      0 
+      1-2ms    190 ###
+      2-3ms   3330 ##################################################
+      3-5ms     22 
+     5-10ms      0 
+      >10ms      0 
+bursts (packets < 30 us apart): 3210 of 2 packets, 263 of 1 packets, 74 of 3 packets; median gap between bursts 2421 us

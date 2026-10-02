@@ -1,0 +1,4 @@
+qdisc netem 80fd: root refcnt 17 limit 21 rate 10Mbit seed 9879799178399006870
+ Sent 18784200 bytes 31866 pkt (dropped 551, overlimits 0 requeues 0) 
+ backlog 590b 1p requeues 0
+  delayed 31867 dropped 0 corrupted 0 duplicated 0 reordered 0 ecn_marked 0

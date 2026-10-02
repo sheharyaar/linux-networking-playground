@@ -1,0 +1,12 @@
+fork: v1.19.6-vpc.25 at 8ab00248bc
+=== RUN   TestPermutations
+--- PASS: TestPermutations (0.20s)
+=== RUN   TestReproducible
+--- PASS: TestReproducible (0.00s)
+=== RUN   TestBackendRemoval
+--- PASS: TestBackendRemoval (0.00s)
+=== RUN   TestWeightedBackendWithRemoval
+--- PASS: TestWeightedBackendWithRemoval (0.00s)
+PASS
+ok  	github.com/cilium/cilium/pkg/maglev	0.209s
+fork still clean: 0 changed files

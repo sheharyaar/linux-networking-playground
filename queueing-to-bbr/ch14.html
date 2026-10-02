@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BIG TCP (side path) · chapter 14 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 14 of 14</p>
+    <h1>BIG TCP (side path)</h1>
+    <p class="sub">A side path off the chain from AIMD to BBR, here because you run Cilium and asked for it. After this chapter you can explain how Linux moves TCP skbs larger than 64 KB through a stack whose IP length fields hold 16 bits, set and read the four size knobs with <code>ip -d link show</code>, and say where BIG TCP pays on a Cilium node and where it changes nothing. It rejoins the main chain at the far end of the capstone's upload, where GRO builds the skbs that TCP reads.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The readings</h2>
+    <ol><li><a href="#book">LWN 2022, Isovalent 2023, three merge messages</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-packet-budget">A budget per packet, spent per skb</a></li>
+        <li><a href="#s-length-field">Sixteen bits of length, and what replaced them</a></li>
+        <li><a href="#s-size-knobs">Four knobs, read when a socket connects</a></li>
+        <li><a href="#s-skb-frags">Where 185,000 bytes sit: page fragments</a></li>
+        <li><a href="#s-where-it-pays">Where BIG TCP pays, and where it changes nothing</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 14 · before you read</span>
+      <h2>BIG TCP (side path)</h2>
+      <p class="chmeta">~6 min before · LWN 884104, the Isovalent post, three kernel merge messages and <code>bigtcp.go</code> (~45 min) · ~22 min after · <span class="tag HOST">HOST</span><br>
+        <span class="spine">One 185,000-byte packet against a 120 ns budget: at 100 Gbit/s a 1,538-byte frame lasts 123 ns, which LWN rounds to "about 120ns" (§2), and Dumazet's benchmark set <code>gso_max_size 185000</code> so the stack handles one skb where the wire carries 128 frames. On this chapter's rootless veth pair that skb is 184,298 bytes.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>At 100 Gbit/s a full-size Ethernet frame lasts 123 ns: 1,500 bytes of packet plus 38 bytes of header, checksum, preamble and gap, 8.1 million frames a second (LWN §2, after Jesper Brouer's 2015 talk). One cache miss costs about that much. This is the congestion-avoidance chapter's packet time \(P_b\) of a <a href="index.html#g-bottleneck">bottleneck</a>, now on the host's own link, and the host has to keep up with it.</p>
+      <p>Linux already batches. On the way out, TCP builds one skb for up to 45 segments, and the NIC or the stack cuts it into packets at the last moment. On the way in, the receive path merges the arriving segments of a flow back into one skb. The stack above pays its per-packet costs once per 64 KB, 5.2 µs at 100 Gbit/s. The small-queues chapter met this limit as the "64 KB GSO limit" at the top of the <a href="index.html#g-tso-autosizing">TSO autosizing</a> formula. Why 64 KB? Because both IPv4 and IPv6 keep the packet's length in 16 bits (LWN §5).</p>
+      <p>BIG TCP lifts the limit to 185,000 bytes and beyond, inside the host only: the wire still carries 1,500-byte packets. This chapter is about how a packet can be longer than its own length field, which knobs set its size, what holds its bytes, and where the bigger skb pays. It is a side path. The main chain asks when each packet should leave; this chapter asks how many skbs the host must touch per second. It rejoins the chain at the far end of the capstone's upload, and it shows why it changes nothing on that upload's 10 Mbit/s path.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-packet-budget">packet budget</dt><dd>The time one packet lasts on the link at full rate. A host that keeps up must finish each packet within it, on average: 123 ns for a 1,538-byte frame at 100 Gbit/s.</dd>
+        <dt id="w-gso-gro">GSO and GRO</dt><dd>Generic segmentation offload: TCP builds one large skb, and the NIC (TSO) or the stack just before the driver cuts it into MTU-size packets. Generic receive offload: the receive path merges consecutive packets of one flow into one skb before IP sees them.</dd>
+        <dt id="w-big-tcp">BIG TCP</dt><dd>Linux's support for TCP GSO and GRO skbs larger than 64 KB: since v5.19 (2022) for IPv6, since v6.3 (2023) for IPv4. Off by default.</dd>
+        <dt id="w-gso-max-size">GSO max size</dt><dd>The knobs <code>gso_max_size</code> (IPv6) and <code>gso_ipv4_max_size</code> (IPv4): per-device limits on the largest skb the stack builds for that device. The default is 65,536; the driver's <code>tso_max_size</code> caps them.</dd>
+        <dt id="w-gro-max-size">GRO max size</dt><dd>The knobs <code>gro_max_size</code> (IPv6) and <code>gro_ipv4_max_size</code> (IPv4): per-device limits on the largest skb GRO may build from packets received on that device. The default is 65,536.</dd>
+        <dt id="w-hbh">hop-by-hop header (HBH)</dt><dd>The IPv6 hop-by-hop options header: an extension header right after the IPv6 header, carrying options every node on the path must read.</dd>
+        <dt id="w-jumbogram">jumbogram</dt><dd>An IPv6 packet longer than 65,535 bytes (RFC 2675): the 16-bit payload length is 0, and a hop-by-hop option carries the real length in 32 bits.</dd>
+        <dt id="w-max-skb-frags">MAX_SKB_FRAGS</dt><dd>An skb keeps most of its payload in page fragments, entries of (page, offset, length) in its shared info. <code>MAX_SKB_FRAGS</code> is the most it may have: 17 by default, and a build option from 17 to 45 since v6.4.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  subgraph S["Sending host"]
+    direction TB
+    A["TCP socket"] ==> T["TCP builds one skb<br/>up to gso_max_size"]
+    T ==> D["NIC or driver: TSO<br/>cuts it into MTU packets"]
+  end
+  subgraph R["Receiving host"]
+    direction TB
+    N["NIC and driver:<br/>one skb per packet"] ==> G["GRO merges them<br/>up to gro_max_size"]
+    G ==> U["IP and TCP receive:<br/>one skb, one pass"]
+  end
+  S ==>|"1,538-byte frames,<br/>123 ns each at 100 Gbit/s"| R
+  style T fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style G fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 14.1 — Where a BIG TCP packet exists.</b> Notice the two shaded boxes. The big skb lives only between TCP and the driver on one host, and between GRO and TCP on the other. The wire between them still carries 1,538-byte frames, so switches and MTUs stay as they are (Isovalent §4). Everything above GSO and GRO pays its per-packet cost once per skb; the NIC, the driver and the wire still pay it per frame.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Reading, section</th><th>Where</th><th>How</th><th>Look for</th></tr>
+        <tr><td>J. Corbet, "Going big with TCP packets", LWN, 14 February 2022: the budget and the costs</td><td>§1–§4</td><td><span class="how close">close</span></td><td>"About 120ns" per packet at 100 Gbit/s, and which costs are paid per packet.</td></tr>
+        <tr><td>Same: the 16-bit length and RFC 2675</td><td>§5–§6</td><td><span class="how close">close</span></td><td>Why 64 KB, and how a jumbogram says its length.</td></tr>
+        <tr><td>Same: fragments, and the drivers</td><td>§7–§10</td><td><span class="how close">close</span></td><td>17 fragments hold 64 KB of single pages; why raising the limit worried driver authors. The merged series dropped the 45; the after half says what landed.</td></tr>
+        <tr><td>Same: the header in the way, and the benchmark</td><td>§11–§13</td><td><span class="how close">close</span></td><td>Why it is off by default, and the 185,000 bytes. The extra header is gone since v7.0; read §11 for the trap it set, which still has a successor.</td></tr>
+        <tr><td>N. Vibert, "BIG Performances with BIG TCP on Cilium", Isovalent, February 2023 (updated August 2023): 100Gbps and beyond</td><td>§1</td><td><span class="how skim">skim</span></td><td>The same budget, restated.</td></tr>
+        <tr><td>Same: BIG TCP over IPv6, BIG TCP over IPv4</td><td>§2–§3</td><td><span class="how close">close</span></td><td>IPv4's total length of 0 with the real length taken from the skb, which v7.0 extended to IPv6.</td></tr>
+        <tr><td>Same: Jumbo Frames vs BIG TCP</td><td>§4</td><td><span class="how close">close</span></td><td>No MTU change, and why.</td></tr>
+        <tr><td>Same: BIG TCP on Cilium</td><td>§5</td><td><span class="how skim">skim</span></td><td>The requirements list and the <code>196608</code> in <code>ip -d -j link show</code>. Skip the helm and kind transcripts; the system card reads Cilium's code instead.</td></tr>
+        <tr><td>Kernel v7.2 tree, merge messages: <code>git log -1 7fa2e481ff2f</code> (BIG TCP, May 2022), <code>983f507c3043</code> (IPv4, February 2023), <code>1fdad81d8803</code> (BIG TCP without HBH in IPv6, February 2026)</td><td>one screen each</td><td><span class="how close">close</span></td><td>The three answers to the 16-bit field, and the benchmarks behind both articles. Read the last one most closely: it changes what both articles say.</td></tr>
+        <tr><td>Cilium v1.19.6-vpc, <code>pkg/datapath/linux/bigtcp/bigtcp.go</code></td><td>lines 25–28, 247–271, 299–370</td><td><span class="how skim">skim</span></td><td>Which size Cilium writes, on which devices, and what makes it refuse.</td></tr>
+      </table>
+      <p class="note">The articles have no page numbers. LWN is cited by paragraph: §n is the nth paragraph from the top, thirteen in all. The Isovalent post is cited by its five headings in order, §1–§5, with §5.1 and §5.2 for the IPv6 and IPv4 parts of "BIG TCP on Cilium". Skip the post's analogies (cars, buses, trains); nothing later uses them.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the readings</h4><ol>
+        <li>Both IP versions keep the packet length in 16 bits. How does a 185,000-byte TCP packet tell the stack its length: in IPv6 as the 2022 article describes, in IPv4 from 2023, and in IPv6 today?</li>
+        <li>The wire still carries 1,500-byte packets. Where does the 185,000-byte packet exist, and what has to change on the network for it?</li>
+        <li>Why did the limit of 17 fragments stand in the way, and why could the patch set not simply raise it?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="packet-budget">A budget per packet, spent per skb</li>
+          <li data-strand="length-field">Sixteen bits of length, and what replaced them</li>
+          <li data-strand="size-knobs">Four knobs, read when a socket connects</li>
+          <li data-strand="skb-frags">Where 185,000 bytes sit: page fragments</li>
+          <li data-strand="where-it-pays">Where BIG TCP pays, and where it changes nothing</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 14 "BIG TCP (side path)" (J. Corbet, "Going big with TCP packets", LWN 2022; N. Vibert, "BIG Performances with BIG TCP on Cilium", Isovalent 2023; Linux v7.2 merge messages 7fa2e481ff2f, 983f507c3043, 1fdad81d8803; Cilium v1.19.6-vpc bigtcp.go), cited by paragraph §1–§13 and section §1–§5.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: packet-budget (A budget per packet, spent per skb), length-field (Sixteen bits of length, and what replaced them), size-knobs (Four knobs, read when a socket connects), skb-frags (Where 185,000 bytes sit: page fragments), where-it-pays (Where BIG TCP pays, and where it changes nothing).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch14.md.
+End with a reading plan: for each row of the reading guide in ch14.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read</h2>
+      <p>The LWN article (<code>web/13a-lwn-884104-big-tcp.md</code>), the Isovalent post (<code>web/13b-isovalent-big-tcp-on-cilium.md</code>), the three merge messages (<code>git -C ~/workspace/repos/linux log -1 1fdad81d8803</code> and the two others) and the lines of <code>bigtcp.go</code> in the reading guide, about 45 minutes in all. Keep the three questions in mind and note the paragraph or line where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 14 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. Both IP versions keep the packet length in 16 bits. How does a 185,000-byte TCP packet tell the stack its length: in IPv6 as the 2022 article describes, in IPv4 from 2023, and in IPv6 today? <span class="pageref">LWN §5–§6; Isovalent §2–§3</span></p>
+        <details class="ans"><summary>Answer</summary><p>Three ways. In 2022 IPv6 set the payload length to 0 and added an 8-byte hop-by-hop header whose jumbo option held the length in 32 bits, an RFC 2675 jumbogram (LWN §6, Isovalent §2). IPv4 has no such option, so from v6.3 it writes <code>tot_len</code> 0 and reads <code>skb-&gt;len</code> (Isovalent §3; <code>iph_totlen()</code>, <code>include/linux/ip.h:39</code>). Since v7.0 IPv6 does the same, with no extra header (merge <code>1fdad81d8803</code>). Near miss: none of this reaches the wire. GSO writes a real length into every segment.</p></details>
+        <p>2. The wire still carries 1,500-byte packets. Where does the 185,000-byte packet exist, and what has to change on the network for it? <span class="pageref">Isovalent §4; LWN §7, §10</span></p>
+        <details class="ans"><summary>Answer</summary><p>Only inside the two hosts: from TCP down to the driver, where TSO or GSO cuts it into MTU-size packets, and from GRO up to TCP on the far side (Isovalent §4). Switches, routers and MTUs stay as they are. Each host's devices must allow the size (the driver's <code>tso_max_size</code>) and be told it (the four knobs), and any code in the host that reads an IP length must cope. Near miss: jumbo frames, which change the wire and every hop on it (Isovalent §4).</p></details>
+        <p>3. Why did the limit of 17 fragments stand in the way, and why could the patch set not simply raise it? <span class="pageref">LWN §7–§9</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because an skb holds most of its payload in page fragments, at most <code>MAX_SKB_FRAGS</code> of them, and 17 single 4 KB pages hold only about 64 KB (LWN §7–§8). Zero-copy sends and many receive paths fill an skb one page at a time. But the constant sizes a structure every driver sees, and Alexander Duyck warned that drivers assume 17 and could lock up the hardware (§8). So it became a build option (§9), <code>CONFIG_MAX_SKB_FRAGS</code> from 17 to 45 in v6.4. Arch builds 17.</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p>The LWN article starts from the budget: at 100 Gbit/s, 1,538-byte packets arrive eight million times a second, about 120 ns each (§2), and the costs are per packet: the trip through the stack, interrupts, the large <code>sk_buff</code> (§3–§4). GSO and GRO already move 64 KB at a time, but both IP versions store the length in 16 bits (§5). For IPv6, RFC 2675's jumbograms are a way out: payload length 0, and the real length in a 32-bit hop-by-hop option (§6).</p>
+      <p>The patch set builds such packets inside the host (§7), and two problems follow. The limit of 17 page fragments fits only 64 KB of single pages; the posting raised it to 45, driver authors objected, and a build option was proposed (§8–§9). And the extra header sits where software expects TCP, so tcpdump and BPF programs misread it, and the feature is off by default (§11). Dumazet's 185,000-byte setting raised transactions per second by nearly half (§12).</p>
+      <p>The Isovalent post adds IPv4, from v6.3: a total length of 0, with the real length taken from the skb (§3). Nothing changes on the wire, unlike jumbo frames (§4). Cilium 1.13 sets 196,608 bytes on node and pod devices, given kernel 5.19 (6.3 for IPv4), BPF host routing, kube-proxy replacement, BPF masquerading, and no tunnels or encryption (§5).</p>
+      <p>Since then, v7.0 removed the hop-by-hop header, so IPv6 does what IPv4 does (merge <code>1fdad81d8803</code>, February 2026), and the fragment limit became a build option in v6.4. Arch ships 17.</p>
+
+      <h3 class="strand" id="s-packet-budget">A budget per packet, spent per skb</h3>
+      <p>The host's cost is mostly a cost per packet it handles: one trip through the stack, interrupts, and one large <code>sk_buff</code> to allocate, fill and free (LWN §4). So the time one packet lasts at line rate is a budget, and GSO and GRO change what the stack spends it on, from a frame to an skb.</p>
+      <p>The arithmetic is the congestion-avoidance chapter's \(P_b\) again. A 1,538-byte frame at 100 Gbit/s lasts \(1{,}538 \times 8 / 10^{11} = 123\) ns, 8.13 million a second (LWN §2 rounds to "about 120ns"). With 64 KB skbs the stack above GSO sees 45 frames as one skb, \(65{,}536 \times 8 / 10^{11} = 5.2\) µs apart. At Dumazet's 185,000 bytes it is 14.8 µs: the same bytes in a third of the skbs.</p>
+      <p class="erratum"><b>The article's slip.</b> Isovalent §1 writes "eight-million packets per second (assuming a MTU of 1,538 bytes)". The MTU is 1,500; 1,538 is the frame on the wire, with Ethernet header, checksum, preamble and gap.</p>
+      <p>On the veth pair from the hands-on section, one IPv6 bulk flow used 0.218 CPU-seconds per GB with 64,260-byte skbs and 0.155 with 184,212-byte skbs, both ends' CPUs counted, and its throughput rose from 55.8 to 69.1 Gbit/s. That is 14.0 and 28.6 µs per skb, which fits a two-term model: about 6.2 µs fixed per skb plus 0.12 ns per byte.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch14-cpu-->
+<svg viewBox="0 0 720 448" role="img" aria-label="CPU seconds per gigabyte and throughput of one bulk TCP flow over a veth pair, at 64 KB and 185,000-byte skbs, with a two-term model" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="234.0" text-anchor="end" fill="#898781">0.1</text>
+<line x1="58" x2="570" y1="180.0" y2="180.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="184.0" text-anchor="end" fill="#898781">0.15</text>
+<line x1="58" x2="570" y1="130.0" y2="130.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="134.0" text-anchor="end" fill="#898781">0.2</text>
+<line x1="58" x2="570" y1="80.0" y2="80.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="84.0" text-anchor="end" fill="#898781">0.25</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">0.3</text>
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="130.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 130.0)">CPU-s per GB</text>
+<line x1="58" x2="570" y1="208.1" y2="208.1" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="212.1" fill="#898781">per-byte floor 0.12</text>
+<polyline points="99.7,68.5 103.5,80.1 107.3,90.0 111.1,98.4 114.9,105.7 118.7,112.1 122.5,117.8 126.3,122.8 130.1,127.3 133.9,131.3 137.6,135.0 141.4,138.3 145.2,141.3 149.0,144.1 152.8,146.7 156.6,149.1 160.4,151.2 164.2,153.3 168.0,155.2 171.8,156.9 175.6,158.6 179.4,160.1 183.2,161.6 186.9,163.0 190.7,164.2 194.5,165.5 198.3,166.6 202.1,167.7 205.9,168.7 209.7,169.7 213.5,170.7 217.3,171.6 221.1,172.4 224.9,173.2 228.7,174.0 232.5,174.7 236.3,175.4 240.0,176.1 243.8,176.8 247.6,177.4 251.4,178.0 255.2,178.6 259.0,179.1 262.8,179.7 266.6,180.2 270.4,180.7 274.2,181.2 278.0,181.6 281.8,182.1 285.6,182.5 289.3,182.9 293.1,183.4 296.9,183.7 300.7,184.1 304.5,184.5 308.3,184.9 312.1,185.2 315.9,185.5 319.7,185.9 323.5,186.2 327.3,186.5 331.1,186.8 334.9,187.1 338.7,187.4 342.4,187.6 346.2,187.9 350.0,188.2 353.8,188.4 357.6,188.7 361.4,188.9 365.2,189.2 369.0,189.4 372.8,189.6 376.6,189.8 380.4,190.1 384.2,190.3 388.0,190.5 391.7,190.7 395.5,190.9 399.3,191.1 403.1,191.2 406.9,191.4 410.7,191.6 414.5,191.8 418.3,192.0 422.1,192.1 425.9,192.3 429.7,192.5 433.5,192.6 437.3,192.8 441.1,192.9 444.8,193.1 448.6,193.2 452.4,193.4 456.2,193.5 460.0,193.6 463.8,193.8 467.6,193.9 471.4,194.0 475.2,194.2 479.0,194.3 482.8,194.4 486.6,194.5 490.4,194.7 494.1,194.8 497.9,194.9 501.7,195.0 505.5,195.1 509.3,195.2 513.1,195.3 516.9,195.4 520.7,195.5 524.5,195.6 528.3,195.7 532.1,195.8 535.9,195.9 539.7,196.0 543.5,196.1 547.2,196.2 551.0,196.3 554.8,196.4 558.6,196.5 562.4,196.6 566.2,196.7 570.0,196.7" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="182.7" y2="182.7" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="186.7" fill="#1b1f24">model: 6.2 µs per skb</text>
+<path d="M115.8,104.8L123.8,112.8M115.8,112.8L123.8,104.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,91.8L123.8,99.8M115.8,99.8L123.8,91.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,114.0L123.8,122.0M115.8,122.0L123.8,114.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,92.0L123.8,100.0M115.8,100.0L123.8,92.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,111.0L123.8,119.0M115.8,119.0L123.8,111.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,181.3L236.4,189.3M228.4,189.3L236.4,181.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,170.2L236.4,178.2M228.4,178.2L236.4,170.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,170.0L236.4,178.0M228.4,178.0L236.4,170.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,159.4L236.4,167.4M228.4,167.4L236.4,159.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,183.4L236.4,191.4M228.4,191.4L236.4,183.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="118.9" cy="112.5" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="115.3" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="117.8" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="106.6" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="103.5" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="174.9" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="174.8" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="180.3" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="172.6" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="172.6" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="553.5" cy="196.4" r="4.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<text x="128.2" y="68.0" fill="#4a5560" text-anchor="start">knobs at 65,536</text>
+<text x="241.9" y="145.0" fill="#4a5560" text-anchor="start">knobs at 185,000</text>
+<text x="553.5" y="178.0" fill="#4a5560" text-anchor="end">ceiling 524,280: 0.134</text>
+<circle cx="72" cy="18" r="4" fill="#2a78d6"/>
+<text x="85" y="22" fill="#1b1f24">IPv6 runs</text>
+<path d="M157,14L165,22M157,22L165,14" stroke="#eb6834" stroke-width="2"/>
+<text x="174" y="22" fill="#1b1f24">IPv4 runs</text>
+<line x1="244" x2="258" y1="18" y2="18" stroke="#1baf7a" stroke-width="2"/>
+<text x="263" y="22" fill="#1b1f24">model through the IPv6 medians</text>
+<line x1="58" x2="570" y1="406.0" y2="406.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="410.0" text-anchor="end" fill="#898781">40</text>
+<line x1="58" x2="570" y1="341.0" y2="341.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="345.0" text-anchor="end" fill="#898781">60</text>
+<line x1="58" x2="570" y1="276.0" y2="276.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="280.0" text-anchor="end" fill="#898781">80</text>
+<line x1="58" x2="570" y1="406.0" y2="406.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="341.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 341.0)">Gbit/s</text>
+<polyline points="118.9,354.6 232.7,311.5" fill="none" stroke="#2a78d6" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3"/>
+<line x1="574" x2="586" y1="311.4" y2="311.4" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="315.4" fill="#1b1f24">IPv6 median 69</text>
+<path d="M115.8,354.5L123.8,362.5M115.8,362.5L123.8,354.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,362.4L123.8,370.4M115.8,370.4L123.8,362.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,343.8L123.8,351.8M115.8,351.8L123.8,343.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,361.8L123.8,369.8M115.8,369.8L123.8,361.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M115.8,347.1L123.8,355.1M115.8,355.1L123.8,347.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,291.3L236.4,299.3M228.4,299.3L236.4,291.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,307.3L236.4,315.3M228.4,315.3L236.4,307.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,307.1L236.4,315.1M228.4,315.1L236.4,307.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,315.6L236.4,323.6M228.4,323.6L236.4,315.6" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M228.4,295.7L236.4,303.7M228.4,303.7L236.4,295.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="118.9" cy="354.6" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="352.8" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="351.9" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="357.4" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.9" cy="361.2" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="311.8" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="310.3" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="304.7" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="315.1" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="232.7" cy="311.5" r="4.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="264" r="4" fill="#2a78d6"/>
+<text x="85" y="268" fill="#1b1f24">IPv6 runs</text>
+<path d="M157,260L165,268M157,268L165,260" stroke="#eb6834" stroke-width="2"/>
+<text x="174" y="268" fill="#1b1f24">IPv4 runs</text>
+<text x="58.0" y="422.0" text-anchor="middle" fill="#898781">0</text>
+<text x="118.7" y="422.0" text-anchor="middle" fill="#898781">64</text>
+<text x="179.4" y="422.0" text-anchor="middle" fill="#898781">128</text>
+<text x="233.4" y="422.0" text-anchor="middle" fill="#898781">185</text>
+<text x="300.7" y="422.0" text-anchor="middle" fill="#898781">256</text>
+<text x="422.1" y="422.0" text-anchor="middle" fill="#898781">384</text>
+<text x="543.5" y="422.0" text-anchor="middle" fill="#898781">512</text>
+<text x="314.0" y="440.0" text-anchor="middle" fill="#4a5560">TCP payload per skb (KB)</text>
+<g class="hit"><title>44 KB of payload per skb · model (IPv6 fit): 0.261 CPU-s per GB, of which 0.140 per-skb and 0.122 per-byte</title><rect x="58.0" y="30" width="45.5" height="376.0" fill="transparent"/><line x1="99.7" x2="99.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>52 KB of payload per skb · model (IPv6 fit): 0.240 CPU-s per GB, of which 0.118 per-skb and 0.122 per-byte</title><rect x="103.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="107.3" x2="107.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>60 KB of payload per skb · model (IPv6 fit): 0.224 CPU-s per GB, of which 0.102 per-skb and 0.122 per-byte</title><rect x="111.1" y="30" width="5.8" height="376.0" fill="transparent"/><line x1="114.9" x2="114.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>IPv6, knobs 65536: 64,260 B per skb · CPU 0.2175 CPU-s per GB (runs 0.212-0.226) · 55.8 Gbit/s (runs 53.8-56.6)</title><rect x="116.9" y="30" width="2.4" height="376.0" fill="transparent"/><line x1="118.9" x2="118.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>IPv4, knobs 65536: 65,160 B per skb · CPU 0.2212 CPU-s per GB (runs 0.212-0.234) · 54.6 Gbit/s (runs 52.2-57.9)</title><rect x="119.4" y="30" width="1.8" height="376.0" fill="transparent"/><line x1="119.8" x2="119.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>68 KB of payload per skb · model (IPv6 fit): 0.212 CPU-s per GB, of which 0.090 per-skb and 0.122 per-byte</title><rect x="121.1" y="30" width="5.1" height="376.0" fill="transparent"/><line x1="122.5" x2="122.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>76 KB of payload per skb · model (IPv6 fit): 0.203 CPU-s per GB, of which 0.081 per-skb and 0.122 per-byte</title><rect x="126.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="130.1" x2="130.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>84 KB of payload per skb · model (IPv6 fit): 0.195 CPU-s per GB, of which 0.073 per-skb and 0.122 per-byte</title><rect x="133.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="137.6" x2="137.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>92 KB of payload per skb · model (IPv6 fit): 0.189 CPU-s per GB, of which 0.067 per-skb and 0.122 per-byte</title><rect x="141.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="145.2" x2="145.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>100 KB of payload per skb · model (IPv6 fit): 0.183 CPU-s per GB, of which 0.061 per-skb and 0.122 per-byte</title><rect x="149.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="152.8" x2="152.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>108 KB of payload per skb · model (IPv6 fit): 0.179 CPU-s per GB, of which 0.057 per-skb and 0.122 per-byte</title><rect x="156.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="160.4" x2="160.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>116 KB of payload per skb · model (IPv6 fit): 0.175 CPU-s per GB, of which 0.053 per-skb and 0.122 per-byte</title><rect x="164.2" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="168.0" x2="168.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>124 KB of payload per skb · model (IPv6 fit): 0.171 CPU-s per GB, of which 0.050 per-skb and 0.122 per-byte</title><rect x="171.8" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="175.6" x2="175.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>132 KB of payload per skb · model (IPv6 fit): 0.168 CPU-s per GB, of which 0.047 per-skb and 0.122 per-byte</title><rect x="179.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="183.2" x2="183.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>140 KB of payload per skb · model (IPv6 fit): 0.166 CPU-s per GB, of which 0.044 per-skb and 0.122 per-byte</title><rect x="186.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="190.7" x2="190.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>148 KB of payload per skb · model (IPv6 fit): 0.163 CPU-s per GB, of which 0.042 per-skb and 0.122 per-byte</title><rect x="194.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="198.3" x2="198.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>156 KB of payload per skb · model (IPv6 fit): 0.161 CPU-s per GB, of which 0.039 per-skb and 0.122 per-byte</title><rect x="202.1" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="205.9" x2="205.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>164 KB of payload per skb · model (IPv6 fit): 0.159 CPU-s per GB, of which 0.037 per-skb and 0.122 per-byte</title><rect x="209.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="213.5" x2="213.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>172 KB of payload per skb · model (IPv6 fit): 0.158 CPU-s per GB, of which 0.036 per-skb and 0.122 per-byte</title><rect x="217.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="221.1" x2="221.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>180 KB of payload per skb · model (IPv6 fit): 0.156 CPU-s per GB, of which 0.034 per-skb and 0.122 per-byte</title><rect x="224.9" y="30" width="5.6" height="376.0" fill="transparent"/><line x1="228.7" x2="228.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>IPv4, knobs 185000: 183,896 B per skb · CPU 0.1558 CPU-s per GB (runs 0.143-0.167) · 69.2 Gbit/s (runs 66.6-74.1)</title><rect x="230.5" y="30" width="2.0" height="376.0" fill="transparent"/><line x1="232.4" x2="232.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>IPv6, knobs 185000: 184,212 B per skb · CPU 0.1552 CPU-s per GB (runs 0.150-0.157) · 69.1 Gbit/s (runs 68.0-71.2)</title><rect x="232.5" y="30" width="1.9" height="376.0" fill="transparent"/><line x1="232.7" x2="232.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>188 KB of payload per skb · model (IPv6 fit): 0.155 CPU-s per GB, of which 0.033 per-skb and 0.122 per-byte</title><rect x="234.5" y="30" width="5.6" height="376.0" fill="transparent"/><line x1="236.3" x2="236.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>196 KB of payload per skb · model (IPv6 fit): 0.153 CPU-s per GB, of which 0.031 per-skb and 0.122 per-byte</title><rect x="240.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="243.8" x2="243.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>204 KB of payload per skb · model (IPv6 fit): 0.152 CPU-s per GB, of which 0.030 per-skb and 0.122 per-byte</title><rect x="247.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="251.4" x2="251.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>212 KB of payload per skb · model (IPv6 fit): 0.151 CPU-s per GB, of which 0.029 per-skb and 0.122 per-byte</title><rect x="255.2" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="259.0" x2="259.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>220 KB of payload per skb · model (IPv6 fit): 0.150 CPU-s per GB, of which 0.028 per-skb and 0.122 per-byte</title><rect x="262.8" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="266.6" x2="266.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>228 KB of payload per skb · model (IPv6 fit): 0.149 CPU-s per GB, of which 0.027 per-skb and 0.122 per-byte</title><rect x="270.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="274.2" x2="274.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>236 KB of payload per skb · model (IPv6 fit): 0.148 CPU-s per GB, of which 0.026 per-skb and 0.122 per-byte</title><rect x="278.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="281.8" x2="281.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>244 KB of payload per skb · model (IPv6 fit): 0.147 CPU-s per GB, of which 0.025 per-skb and 0.122 per-byte</title><rect x="285.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="289.3" x2="289.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>252 KB of payload per skb · model (IPv6 fit): 0.146 CPU-s per GB, of which 0.024 per-skb and 0.122 per-byte</title><rect x="293.1" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="296.9" x2="296.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>260 KB of payload per skb · model (IPv6 fit): 0.146 CPU-s per GB, of which 0.024 per-skb and 0.122 per-byte</title><rect x="300.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="304.5" x2="304.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>268 KB of payload per skb · model (IPv6 fit): 0.145 CPU-s per GB, of which 0.023 per-skb and 0.122 per-byte</title><rect x="308.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="312.1" x2="312.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>276 KB of payload per skb · model (IPv6 fit): 0.144 CPU-s per GB, of which 0.022 per-skb and 0.122 per-byte</title><rect x="315.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="319.7" x2="319.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>284 KB of payload per skb · model (IPv6 fit): 0.144 CPU-s per GB, of which 0.022 per-skb and 0.122 per-byte</title><rect x="323.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="327.3" x2="327.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>292 KB of payload per skb · model (IPv6 fit): 0.143 CPU-s per GB, of which 0.021 per-skb and 0.122 per-byte</title><rect x="331.1" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="334.9" x2="334.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>300 KB of payload per skb · model (IPv6 fit): 0.142 CPU-s per GB, of which 0.020 per-skb and 0.122 per-byte</title><rect x="338.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="342.4" x2="342.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>308 KB of payload per skb · model (IPv6 fit): 0.142 CPU-s per GB, of which 0.020 per-skb and 0.122 per-byte</title><rect x="346.2" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="350.0" x2="350.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>316 KB of payload per skb · model (IPv6 fit): 0.141 CPU-s per GB, of which 0.019 per-skb and 0.122 per-byte</title><rect x="353.8" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="357.6" x2="357.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>324 KB of payload per skb · model (IPv6 fit): 0.141 CPU-s per GB, of which 0.019 per-skb and 0.122 per-byte</title><rect x="361.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="365.2" x2="365.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>332 KB of payload per skb · model (IPv6 fit): 0.140 CPU-s per GB, of which 0.019 per-skb and 0.122 per-byte</title><rect x="369.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="372.8" x2="372.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>340 KB of payload per skb · model (IPv6 fit): 0.140 CPU-s per GB, of which 0.018 per-skb and 0.122 per-byte</title><rect x="376.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="380.4" x2="380.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>348 KB of payload per skb · model (IPv6 fit): 0.140 CPU-s per GB, of which 0.018 per-skb and 0.122 per-byte</title><rect x="384.2" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="388.0" x2="388.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>356 KB of payload per skb · model (IPv6 fit): 0.139 CPU-s per GB, of which 0.017 per-skb and 0.122 per-byte</title><rect x="391.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="395.5" x2="395.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>364 KB of payload per skb · model (IPv6 fit): 0.139 CPU-s per GB, of which 0.017 per-skb and 0.122 per-byte</title><rect x="399.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="403.1" x2="403.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>372 KB of payload per skb · model (IPv6 fit): 0.138 CPU-s per GB, of which 0.017 per-skb and 0.122 per-byte</title><rect x="406.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="410.7" x2="410.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>380 KB of payload per skb · model (IPv6 fit): 0.138 CPU-s per GB, of which 0.016 per-skb and 0.122 per-byte</title><rect x="414.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="418.3" x2="418.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>388 KB of payload per skb · model (IPv6 fit): 0.138 CPU-s per GB, of which 0.016 per-skb and 0.122 per-byte</title><rect x="422.1" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="425.9" x2="425.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>396 KB of payload per skb · model (IPv6 fit): 0.137 CPU-s per GB, of which 0.016 per-skb and 0.122 per-byte</title><rect x="429.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="433.5" x2="433.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>404 KB of payload per skb · model (IPv6 fit): 0.137 CPU-s per GB, of which 0.015 per-skb and 0.122 per-byte</title><rect x="437.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="441.1" x2="441.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>412 KB of payload per skb · model (IPv6 fit): 0.137 CPU-s per GB, of which 0.015 per-skb and 0.122 per-byte</title><rect x="444.8" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="448.6" x2="448.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>420 KB of payload per skb · model (IPv6 fit): 0.137 CPU-s per GB, of which 0.015 per-skb and 0.122 per-byte</title><rect x="452.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="456.2" x2="456.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>428 KB of payload per skb · model (IPv6 fit): 0.136 CPU-s per GB, of which 0.014 per-skb and 0.122 per-byte</title><rect x="460.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="463.8" x2="463.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>436 KB of payload per skb · model (IPv6 fit): 0.136 CPU-s per GB, of which 0.014 per-skb and 0.122 per-byte</title><rect x="467.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="471.4" x2="471.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>444 KB of payload per skb · model (IPv6 fit): 0.136 CPU-s per GB, of which 0.014 per-skb and 0.122 per-byte</title><rect x="475.2" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="479.0" x2="479.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>452 KB of payload per skb · model (IPv6 fit): 0.135 CPU-s per GB, of which 0.014 per-skb and 0.122 per-byte</title><rect x="482.8" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="486.6" x2="486.6" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>460 KB of payload per skb · model (IPv6 fit): 0.135 CPU-s per GB, of which 0.013 per-skb and 0.122 per-byte</title><rect x="490.4" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="494.1" x2="494.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>468 KB of payload per skb · model (IPv6 fit): 0.135 CPU-s per GB, of which 0.013 per-skb and 0.122 per-byte</title><rect x="497.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="501.7" x2="501.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>476 KB of payload per skb · model (IPv6 fit): 0.135 CPU-s per GB, of which 0.013 per-skb and 0.122 per-byte</title><rect x="505.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="509.3" x2="509.3" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>484 KB of payload per skb · model (IPv6 fit): 0.135 CPU-s per GB, of which 0.013 per-skb and 0.122 per-byte</title><rect x="513.1" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="516.9" x2="516.9" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>492 KB of payload per skb · model (IPv6 fit): 0.134 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="520.7" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="524.5" x2="524.5" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>500 KB of payload per skb · model (IPv6 fit): 0.134 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="528.3" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="532.1" x2="532.1" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>508 KB of payload per skb · model (IPv6 fit): 0.134 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="535.9" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="539.7" x2="539.7" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>516 KB of payload per skb · model (IPv6 fit): 0.134 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="543.5" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="547.2" x2="547.2" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>524 KB of payload per skb · model (IPv6 fit): 0.134 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="551.0" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="554.8" x2="554.8" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>532 KB of payload per skb · model (IPv6 fit): 0.133 CPU-s per GB, of which 0.012 per-skb and 0.122 per-byte</title><rect x="558.6" y="30" width="7.6" height="376.0" fill="transparent"/><line x1="562.4" x2="562.4" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>540 KB of payload per skb · model (IPv6 fit): 0.133 CPU-s per GB, of which 0.011 per-skb and 0.122 per-byte</title><rect x="566.2" y="30" width="3.8" height="376.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="406.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch14-cpu--></div>
+        <figcaption><b>Diagram 14.2 — CPU per GB and throughput of one bulk TCP flow over a veth pair, against skb size.</b> Notice that the runs, five per case, sit on the green curve, which flattens toward the dashed per-byte floor. This is a model, fitted through the two IPv6 medians; IPv4 lands on it too. At the 524,280-byte ceiling it gives 0.134, against 0.155 at 185,000. Rootless pair, kernel 7.2.6, 2 October 2026, on a shared machine. Data: <a href="labs/ch14-big-tcp/data/veth-matrix.jsonl">veth-matrix.jsonl</a>, <a href="labs/ch14-big-tcp/data/veth-summary.csv">veth-summary.csv</a>. Hover for values.</figcaption></figure>
+      <details class="deriv"><summary>Derivation · the two-term model</summary>
+        <p>Let one skb with \(s\) bytes of payload cost \(F + b\,s\): \(F\) for everything done once per skb, \(b\) for everything done per byte. Then CPU per byte is \(c(s) = F/s + b\), and CPU-seconds per GB is the same number as nanoseconds per byte.</p>
+        <p>The IPv6 medians give \(0.2175 \times 64{,}260 = 13{,}976\) ns and \(0.1552 \times 184{,}212 = 28{,}590\) ns per skb. Subtracting, \(b = 14{,}614 / 119{,}952 = 0.122\) ns per byte, and \(F = 13{,}976 - 0.122 \times 64{,}260 = 6{,}150\) ns. IPv4 gives \(F = 6.6\) µs and \(b = 0.120\). At the ceiling, \(\lfloor (524{,}280 - 321)/1{,}428 \rfloor \times 1{,}428 = 522{,}648\) bytes, so \(c = 6{,}150/522{,}648 + 0.122 = 0.134\). A two-point fit says nothing about skbs much smaller than 64 KB, where acks and other per-packet work change shape.</p>
+      </details>
+      <p>The model shows where the gain comes from and where it ends. The per-skb part fell from 0.096 to 0.033 CPU-seconds per GB; the per-byte part, mostly the copies into and out of the sockets, stayed at 0.12. On a real NIC the per-frame costs stay too: interrupts, DMA descriptors, and GRO itself.</p>
+
+      <h3 class="strand" id="s-length-field">Sixteen bits of length, and what replaced them</h3>
+      <p>IPv4's total length and IPv6's payload length are 16-bit fields, so no IP header can state more than 65,535 bytes (LWN §5). BIG TCP must state more, and only inside the host.</p>
+      <p>For IPv6 the 2022 code used RFC 2675: payload length 0, next header 0, and an 8-byte hop-by-hop header whose jumbo option carries the length in 32 bits (LWN §6, Isovalent §2). <code>ip6_xmit()</code> and GRO inserted it, and drivers stripped it before the wire. It sat where software expects the TCP header, so tcpdump and BPF programs misread such packets, and the feature stayed off by default (LWN §11). IPv4 has no option to borrow. From v6.3 it writes <code>tot_len</code> 0, and <code>iph_totlen()</code> returns <code>skb-&gt;len</code> minus the network offset for a TCP GSO skb (<code>include/linux/ip.h:39–58</code>; Isovalent §3). Xin Long's cover letter says why that is safe: such a packet is built and used on one host, with no padding (<code>983f507c3043</code>).</p>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  subgraph A["IPv6, v5.19 to v6.19: a jumbogram inside the host"]
+    direction LR
+    A1["IPv6 header<br/>payload length 0, next header 0"] --> A2["Hop-by-hop header, 8 bytes:<br/>jumbo option, 32-bit length"] --> A3["TCP header"]
+  end
+  subgraph B["IPv4, since v6.3"]
+    direction LR
+    B1["IPv4 header<br/>total length 0"] --> B3["TCP header"]
+  end
+  subgraph C["IPv6, since v7.0"]
+    direction LR
+    C1["IPv6 header<br/>payload length 0, next header TCP"] --> C3["TCP header"]
+  end
+  A ~~~ B ~~~ C
+  C ~~~ L["Real length: the skb's length<br/>minus the IP header's offset"]
+  B1 -.-> L
+  C1 -.-> L
+  style A2 fill:#fdeef1,stroke:#be123c,stroke-width:2px
+  style L fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div><figcaption><b>Diagram 14.3 — How a TCP packet over 64 KB carries its length, three ways, after LWN §6, Isovalent §2–§3 and the v7.0 merge.</b> Notice the red box: the 8-byte header drivers had to strip, sitting where tcpdump and BPF programs expected TCP (LWN §11). IPv4 never had it, and since v7.0 IPv6 does not either. Both write 0 and take the length from the skb, which is safe only because such packets never leave the host.</figcaption></figure>
+      <p class="since"><b>Since the articles.</b> v7.0 removed the hop-by-hop header (February 2026, merge <code>1fdad81d8803</code>). Alice Mikityanska of Isovalent did it as part one of "BIG TCP for UDP tunnels": in a tunnel, drivers would have to find and strip one or two such headers, and IPv4 had shown none was needed. IPv6 now writes 0 above 65,535 (<code>ipv6_set_payload_len()</code>, <code>include/linux/ipv6.h:146–149</code>; <code>ip6_output.c:334–335</code>, <code>ip6_offload.c:344</code>), and <code>ipv6_payload_len()</code> reads the skb (lines 130–137). The parser for real jumbograms stays (<code>exthdrs.c:993</code>). Cilium 1.20's tuning guide still describes the hop-by-hop header.</p>
+      <p>On the bench at 185,000, 19,963 of the first 20,000 data skbs at the receiver had a length field of 0, in both families, and none carried a hop-by-hop header. tcpdump 4.99.6 copes with one family and not the other (real output, 2 October 2026):</p>
+      <pre><code>IP (tos 0x0, ttl 64, id 47792, offset 0, flags [DF], proto TCP (6), length 183948 [was 0, presumed TSO])
+    10.0.14.1.49486 &gt; 10.0.14.2.5014: Flags [P.], seq 14367072:14550968, ack 1, win 63, [...], length 183896
+IP6 (flowlabel 0x5654f, hlim 64, next-header TCP (6), payload length 0) fd14::1 &gt; fd14::2: [|tcp]</code></pre>
+      <p>So LWN §11's trap moved, from a header where TCP was expected to a length field of 0. A BPF program that parses by <code>tot_len</code> or <code>payload_len</code> must use the skb's length instead, as the kernel's helpers do.</p>
+
+      <h3 class="strand" id="s-size-knobs">Four knobs, read when a socket connects</h3>
+      <p>Each device has four limits: the GSO max size for skbs the stack builds for it (<code>gso_max_size</code> for IPv6, <code>gso_ipv4_max_size</code> for IPv4) and the GRO max size for skbs GRO builds from what it receives (<code>gro_max_size</code>, <code>gro_ipv4_max_size</code>). All four default to 65,536 (<code>net/core/dev.c:12084–12089</code>); the merge message raises them with <code>ip link set dev eth0 gro_max_size 185000 gso_max_size 185000</code> (<code>7fa2e481ff2f</code>). LWN §7 ties jumbo packets to a high MTU; the merged code needs none, and the bench ran at 1,500.</p>
+      <p>Two ceilings apply: the driver's <code>tso_max_size</code> for the GSO knobs, and <code>GRO_MAX_SIZE</code>, \(8 \times 65{,}535 = 524{,}280\), for the GRO knobs (<code>rtnetlink.c:2741–2768</code>). veth, loopback, netkit and WireGuard raise <code>tso_max_size</code> to 524,280 (<code>veth.c:1770</code>); <code>wlan0</code> or a <code>dummy</code> device answers <code>Error: too big gso_max_size.</code> All four are settable without sudo in a user namespace that owns the network namespace, because rtnetlink checks <code>CAP_NET_ADMIN</code> against the namespace's owner (<code>rtnetlink.c:7003</code>). One trap: a <code>gso_max_size</code> of 65,536 or less also sets the IPv4 knob (<code>net/core/dev.h:205–212</code>), so set IPv6 first.</p>
+      <p>TCP reads the knob when the socket gets its route: <code>sk_setup_caps()</code> stores it minus <code>MAX_TCP_HEADER + 1</code>, 321 bytes on this kernel, as <code>sk_gso_max_size</code> (<code>net/core/sock.c:2618–2634, 2659</code>). That is the 64 KB cap in the small-queues chapter's autosizing formula (<code>tcp_output.c:2265–2268</code>), and on a path under 512 µs the RTT bonus fills it. Predict the bench: IPv6's MSS is 1,428, so \(\lfloor (185{,}000 - 321)/1{,}428 \rfloor = 129\) segments, 184,212 bytes of payload, and with 86 bytes of headers a 184,298-byte frame. IPv4 gives 127 segments and 183,962. The captures matched to the byte, as did 64,346 and 65,226 at the default.</p>
+      <p>A running connection keeps its old size: raising the IPv4 knobs one second into a flow left it at 65,226-byte skbs, and the next connection got 183,962. That is half of why pods must restart after BIG TCP is switched on; the other half, per Cilium's docs, is that Cilium cannot reach into a running pod.</p>
+      <p>GRO checks its own limit, per family, on every merge (<code>netif_get_gro_max_size()</code>, <code>netdevice.h:5522–5528</code>; <code>gro.c:115</code>), and above 64 KB it merges only plain TCP. Anything encapsulated stops at 64 KB (<code>gro.c:119–123</code>).</p>
+
+      <h3 class="strand" id="s-skb-frags">Where 185,000 bytes sit: page fragments</h3>
+      <p>An skb keeps its headers in a small linear area and most of its payload in page fragments, at most <code>MAX_SKB_FRAGS</code> of them. Seventeen fragments of one 4 KB page each hold \(17 \times 4{,}096 = 69{,}632\) bytes, just enough for 64 KB, so the old limit and the old packet size fit each other (LWN §7–§8).</p>
+      <p>The first posting raised the limit to 45 (§8); Alexander Duyck objected that drivers assume 17, and Dumazet proposed a build option (§9). The merged series dropped the change ("this belongs to a different series", <code>7fa2e481ff2f</code>), and the option came in v6.4: <code>CONFIG_MAX_SKB_FRAGS</code>, 17 to 45, default 17 (<code>net/Kconfig:293–303</code>, <code>include/linux/skbuff.h:350–354</code>). Arch's 7.2.6 kernel builds 17, as LWN §9 feared a distribution would. Dumazet's 185,000 fits 45: his test used a 4K MTU, one page per received packet, and \(45 \times 4{,}096 = 184{,}320\).</p>
+      <p>So how did the bench build 184 KB skbs with 17? It depends on who fills the fragments.</p>
+      <ul>
+        <li>TCP's copy path copies user data into 32 KB chunks of a per-socket page (<code>SKB_FRAG_PAGE_ORDER</code>, <code>include/net/sock.h:3091</code>; <code>tcp.c:1284–1291</code>). 185,000 bytes need six fragments.</li>
+        <li>A zero-copy send (<code>MSG_ZEROCOPY</code>) pins the user's own 4 KB pages as fragments and stops at the limit (<code>net/core/datagram.c:650</code>). With all four knobs at 185,000 the bench's largest zero-copy skbs were 69,698 bytes (IPv4) and 69,718 (IPv6): exactly 17 pages of payload, plus headers.</li>
+        <li>GRO on a 1,500-byte link adds one fragment per packet. After 17 it chains further packets on the skb's <code>frag_list</code>, a linked list of skbs (<code>gro.c:135, 167, 189–213</code>). The stack above still sees one skb, but a chain costs more to walk and split, which is what the Kconfig help means by "help GRO efficiency".</li>
+      </ul>
+      <pre><code>cd labs/ch14-big-tcp                        # from the dossier folder
+./bigpair.sh --size 185000
+ip netns exec rcv python3 bulk.py recv --once &amp;
+ip netns exec rcv tcpdump -i c0 -n -s 128 -c 5000 -w zc.pcap 'tcp dst port 5014 and greater 1000' &amp;
+sleep 1; ip netns exec snd python3 bulk.py send --dst 10.0.14.2 --seconds 2 --zerocopy
+python3 skblen.py zc.pcap                   # max 69698 B: 17 pages, whatever the knobs say</code></pre>
+      <p>Where it matters: on a stock distribution kernel, BIG TCP works for ordinary <code>send()</code> calls and stops near 68 KB for a zero-copy sender.</p>
+
+      <h3 class="strand" id="s-where-it-pays">Where BIG TCP pays, and where it changes nothing</h3>
+      <p>BIG TCP removes per-skb work only where skbs can grow: the sender must have 185,000 bytes ready, and the far side must receive packets close enough together for GRO to merge them. GRO merges only what one NAPI poll, the driver's batch-receive loop, finds waiting. It flushes when the poll completes (<code>net/core/dev.c:6817</code>) and at each segment carrying PSH, which ends every segmented skb (<code>tcp_offload.c:209, 357</code>).</p>
+      <p>It pays on fast hops. Dumazet's 100 Gbit/s NICs with a 4K MTU gave +45% TCP_RR transactions (median of ten runs, <code>7fa2e481ff2f</code>; LWN §12 says "nearly 50%"), Xin Long's IPv4 run at 25 Gbit/s with a 1.5K MTU +8% (<code>983f507c3043</code>). On the veth pair, the hop two pods on one Cilium node share, one flow went from 55 to 69 Gbit/s with 30% less CPU per byte, and with NAPI GRO on the receiver GRO handed up 184,298-byte skbs.</p>
+      <p>It changes nothing on the capstone's 10 Mbit/s path. With a 10 Mbit/s <code>tbf</code> on that GRO path, packets arrived 1.21 ms apart, each poll found one, and GRO handed up single 1,514-byte frames: 4,858 of the first 5,000 skbs. The knobs said 185,000; the arrival rate said one. A far end gets big GRO skbs only when the upload arrives at multi-gigabit rate, pod to pod on one node or on a 25–100 Gbit/s fabric. Nor does it help where the driver refuses: Wi-Fi's <code>tso_max_size</code> is 65,536.</p>
+      <p>Nor through a tunnel. GRO stops encapsulated packets at 64 KB (<code>gro.c:119–123</code>), and VXLAN copies <code>tso_max_size</code> from its lower device (<code>vxlan_core.c:3924</code>), so over a veth it accepts 185,000 that it cannot carry. Cilium therefore refuses BIG TCP in tunnel mode unless its probe finds a Geneve <code>tso_max_size</code> above 64 KB, which v7.2's Geneve never shows (<code>bigtcp.go:254–261</code>, <code>probes.go:670–681</code>).</p>
+      <p class="erratum"><b>The article's slip.</b> Isovalent §5.2 reports the IPv4 test as "between 5,000 and 6,000 packets per seconds" without BIG TCP and "between 10,000 and 11,000" with it, "a whopping 50% increase". netperf's TCP_RR throughput counts transactions per second, each an 80,000-byte request and an 80,000-byte response, and the post's own output reads 7,102.21 and 10,304.92: +45%.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system" id="sys-linux-gso" data-system="linux-gso">
+        <h4>Meet the system · GSO and GRO size knobs and BIG TCP, read through <code>ip -d link show</code></h4>
+        <p><b>What it is.</b> Four per-device limits in the kernel, two on what TCP may build for a device and two on what GRO may build from it, under a ceiling the driver sets. <code>ip -d link show DEV</code> prints them, <code>ip link set DEV gso_max_size N</code> sets them, and Cilium sets them when BIG TCP is on.</p>
+        <p><b>Why it exists.</b> IP's length field capped GSO and GRO at 64 KB. In 2022 Eric Dumazet and Coco Li of Google made the cap a per-device setting for hosts with 100 Gbit/s NICs (v5.19); in 2023 Xin Long gave IPv4 its own knobs (v6.3).</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li><code>gso_max_size</code>, <code>gso_ipv4_max_size</code>: what TCP may build for this device, copied into each socket when it gets its route (<code>sock.c:2618–2659</code>).</li>
+          <li><code>gro_max_size</code>, <code>gro_ipv4_max_size</code>: what GRO may build from this device's packets, checked on every merge (<code>gro.c:115</code>).</li>
+          <li><code>tso_max_size</code>: the driver's ceiling for the GSO knobs, 524,280 on veth and 65,536 on a driver that never raised it. GRO's ceiling is <code>GRO_MAX_SIZE</code>, also 524,280.</li>
+          <li>Cilium's <code>bigtcp</code> cell, flags <code>enable-ipv6-big-tcp</code> and <code>enable-ipv4-big-tcp</code>: it writes the knobs on the node's native devices, on both ends of every pod's veth pair, and on its tunnel devices.</li>
+        </ul>
+        <p class="here"><b>Where this chapter lives inside it.</b> The packet budget is the knob: one skb covers 45 frames at 65,536 and 129 at 185,000 with an MSS of 1,428. The length field follows from it: above 65,535, <code>tot_len</code> or <code>payload_len</code> reads 0 (<code>ip.h:55–58</code>, <code>ipv6.h:146–149</code>). The four knobs and <code>tso_max_size</code> are the line <code>ip -d</code> prints; <code>sk_gso_max_size</code> is the knob minus 321, taken at connect. Page fragments sit outside the knobs: a zero-copy sender stops at 17 pages whatever they say. Where it pays starts at <code>tso_max_size</code>: at 65,536 (<code>wlan0</code>, Geneve) BIG TCP cannot start. In Cilium (fork v1.19.6-vpc), <code>bigtcp.go:27</code> caps the value at 196,608; <code>validateConfig()</code> refuses DSR with IPIP, tunnel mode without the probe, IPsec and legacy host routing (lines 251–268); <code>startBIGTCP()</code> needs kernel 6.3 for IPv4 and 5.19 for IPv6 (305–312), takes the smallest <code>tso_max_size</code> of the native devices (337–356), sets IPv6 before IPv4 (314–318, 392–450), and with BIG TCP off lowers anything above 64 KB (407–434, 451–478). <code>connector/veth.go:123–165</code> writes all four knobs on both ends of each new pod veth, and <code>loader/netlink.go:333</code> on the tunnel devices.</p>
+        <p><b>Try it</b> (~5 min, no sudo, from the dossier folder):</p>
+        <pre><code>ip -d link show dev wlan0 | grep -o 'gso_max_size.*gro_ipv4_max_size [0-9]*'
+cd labs/ch14-big-tcp
+./bigpair.sh                                # opens a shell inside the lab
+ip -n snd -d link show s0 | grep -o 'gso_max_size.*gro_ipv4_max_size [0-9]*'
+ip -n snd link set s0 gso_max_size 185000 gro_max_size 185000
+ip -n snd link set s0 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000
+ip -n snd link set s0 gso_max_size 524281
+ip -n snd link add d0 type dummy; ip -n snd link set d0 gso_max_size 185000</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026 (kernel 7.2.6, iproute2 7.2.0); the two <code>set</code> lines with 185000 print nothing and succeed:</p>
+        <pre><code>gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536
+gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536
+Error: too big gso_max_size.
+Error: too big gso_max_size.</code></pre>
+        <p>Read it with this chapter. <code>wlan0</code>'s driver never raised <code>tso_max_size</code>, so BIG TCP cannot start on Wi-Fi. veth's 524,280 is <code>GSO_MAX_SIZE</code>, and 524,281 is one byte over; the <code>dummy</code> device stops at 64 KB. A Cilium pod's <code>eth0</code> reads <code>gso_max_size 196608</code> (Isovalent §5.1). Full transcript: <a href="labs/ch14-big-tcp/data/rootless-knobs.txt">rootless-knobs.txt</a>.</p>
+        <p><b>Clean up.</b> <code>exit</code> the lab shell; the namespaces go with it.</p>
+        <p class="drift">Stable: the four knobs, the split by family, and the copy into the socket at connect. Drifting (as of October 2026, kernel 7.2, iproute2 7.2.0, Cilium v1.19.6-vpc and the 1.20 docs): the ceilings, which drivers raise <code>tso_max_size</code>, BIG TCP through UDP tunnels (pending), Cilium's 196,608 cap.</p>
+      </div>
+
+      <div class="system back" id="sys-linux-tcp-back" data-system="linux-tcp">
+        <h4>Back to Linux TCP, read through <code>ss -ti</code></h4>
+        <p>An IPv4 flow on the pair at 185,000 (real output, 2 October 2026): <code>mss:1448 … segs_out:8563658 segs_in:71804 … minrtt:0.003</code>. <code>tcp_info</code> has no skb size, hence tcpdump. <code>segs_out</code> counts wire segments, 127 per skb; <code>segs_in</code> counts acks, about one per skb (one per 119 segments here, one per 43 at 65,536). The 3 µs <code>minrtt</code> is why the RTT bonus fills every skb. The rest is read in <a href="ch01.html#sys-linux-tcp">the full card in the congestion-avoidance chapter</a>.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing. The others use this chapter's pair, <code>labs/ch14-big-tcp/bigpair.sh</code>: two namespaces in a private user namespace, one veth pair, MTU 1500, offloads on (the common bench turns them off). Commands paste into fish or bash. The laptop was shared with other builders' runs, so CPU numbers are upper bounds.</p>
+
+      <div class="lab" id="lab-budget">
+        <h4>Hands-on · The budget at three speeds, and the pages a 185 KB skb needs</h4>
+        <p class="labmeta">~25 min · trace by hand · paper and pencil</p>
+        <p><b>Task.</b> For 10, 100 and 400 Gbit/s and units of 1,500, 9,000, 65,536 and 185,000 bytes, compute units per second and time per unit; redo 1,500 as the 1,538-byte frame it is on the wire. Then count the fragments 185,000 bytes of payload need in 4 KB pages and in TCP's 32 KB chunks, and what 17 and 45 pages hold. This is the packet-budget and page-fragments learnings on paper.</p>
+        <p><b>Done when.</b> You have a table of 15 cells with both numbers, you can say which cells leave the stack less than 1 µs, and you have the four fragment numbers.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The link counts bits; the sizes are bytes. Time per unit is size times 8 over the rate, and units per second is its inverse.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>100 Gbit/s is \(1.25 \times 10^{10}\) bytes per second. For fragments, divide and round up; a buffer that does not start on a page boundary needs one page more.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>185,000 bytes at 400 Gbit/s: \(185{,}000 \times 8 / (4 \times 10^{11}) = 3.7\) µs, so 270,270 per second. Pages: \(185{,}000 / 4{,}096 = 45.2\).</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>unit          10 Gbit/s             100 Gbit/s            400 Gbit/s
+1,500 B       833 K/s    1.20 us    8.33 M/s   120 ns     33.3 M/s   30.0 ns
+1,538 B wire  813 K/s    1.23 us    8.13 M/s   123 ns     32.5 M/s   30.8 ns
+9,000 B       139 K/s    7.20 us    1.39 M/s   720 ns     5.56 M/s   180 ns
+65,536 B      19.1 K/s   52.4 us    191 K/s    5.24 us    763 K/s    1.31 us
+185,000 B     6.76 K/s   148 us     67.6 K/s   14.8 us    270 K/s    3.70 us
+
+185,000 B in 4 KB pages: 45.2, so 46 (47 if unaligned)    in 32 KB chunks: 5.6, so 6
+17 pages: 69,632 B (about 64 KB)                         45 pages: 184,320 B (about 185,000)</code></pre>
+          <p><b>Expected output.</b> Six cells fall below 1 µs: every frame-sized unit at 100 and 400 Gbit/s. Only skb-sized units leave the stack microseconds. At 400 Gbit/s even 64 KB skbs arrive every 1.31 µs, which is why Isovalent expected the 192 KB value to rise toward 512 KB (§5.1).</p>
+          <p><b>What this shows.</b> The budget per frame shrinks with the rate and cannot be helped from software; the budget per skb is what BIG TCP widens, threefold at 185,000 (the packet-budget learning, LWN §2–§4). 46 single pages exceed 17, so any path that fills an skb page by page cannot build it on Arch's kernel, while TCP's copy path needs only 6 chunks (the page-fragments learning, LWN §7–§8).</p>
+          <p><b>Common wrong turn.</b> Treating the 185,000-byte skb as one packet on the wire. The wire still carries 128 frames of 1,538 bytes, so the NIC's budget per frame stays 123 ns at 100 Gbit/s. Only the stack above GSO and GRO gets 14.8 µs.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-knobs">
+        <h4>Hands-on · Raise the knobs rootless, and measure what the far end receives</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3 and tcpdump</p>
+        <p><b>Task.</b> Predict the frame length of a data skb at the receiver for IPv6 (MSS 1,428) and IPv4 (MSS 1,448), at 65,536 and at 185,000, with <code>MAX_TCP_HEADER</code> 320. Capture and compare, then run the five-repetition matrix and compare throughput and CPU per GB. This is the size-knobs and packet-budget learnings.</p>
+        <pre><code>cd labs/ch14-big-tcp                        # from the dossier folder
+./bigpair.sh -- ./capture.sh .              # four 2 s captures and their summaries
+./bigpair.sh -- ./matrix.sh 5 8 m.jsonl     # 20 flows of 8 s, about 3.5 min
+python3 summarise.py m.jsonl</code></pre>
+        <p><b>Done when.</b> You have four predicted frame lengths next to four measured ones, and the median Gbit/s and CPU-seconds per GB for the four cases.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The socket stores the knob minus <code>MAX_TCP_HEADER + 1</code>, and on a path this short TSO autosizing fills that whole size.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Segments \(= \lfloor (\text{knob} - 321)/\text{MSS} \rfloor\). Frame \(=\) segments \(\times\) MSS plus 14 bytes of Ethernet, 40 of IPv6 or 20 of IPv4, and 32 of TCP with timestamps.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>IPv4 at 65,536: \(\lfloor 65{,}215/1{,}448 \rfloor = 45\), and \(45 \times 1{,}448 + 66 = 65{,}226\). <code>matrix.sh</code> pins the sender to CPU 5 and the sink to CPU 6 and reads <code>/proc/stat</code>, because softirq time is not in either process's own CPU time on this kernel.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p>Predictions: IPv6 \(45 \times 1{,}428 + 86 = 64{,}346\) and \(129 \times 1{,}428 + 86 = 184{,}298\); IPv4 \(45 \times 1{,}448 + 66 = 65{,}226\) and \(127 \times 1{,}448 + 66 = 183{,}962\).</p>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026; data in <code>labs/ch14-big-tcp/data/</code>):</p>
+          <pre><code>cap-v6-65536.pcap: IPv6 20000 data skbs, max 64346 B, median 64346 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+cap-v4-65536.pcap: IPv4 20000 data skbs, max 65226 B, median 65226 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+cap-v6-185000.pcap: IPv6 20000 data skbs, max 184298 B, median 184298 B, above 65,535: 19963 (99.8%), IP length field 0: 19963, hop-by-hop first: 0
+cap-v4-185000.pcap: IPv4 20000 data skbs, max 183962 B, median 183962 B, above 65,535: 19963 (99.8%), IP length field 0: 19963, hop-by-hop first: 0
+
+idle baseline of the two pinned CPUs: 0.28, 0.14, 0.21, 0.27, 0.23 CPU-s per s
+IPv6  65536:  55.8 Gbit/s (53.8-56.6), 0.2175 CPU-s/GB (0.2122-0.2265)
+IPv6 185000:  69.1 Gbit/s (68.0-71.2), 0.1552 CPU-s/GB (0.1497-0.1574)
+IPv4  65536:  54.6 Gbit/s (52.2-57.9), 0.2212 CPU-s/GB (0.212-0.2342)
+IPv4 185000:  69.2 Gbit/s (66.6-74.1), 0.1558 CPU-s/GB (0.1426-0.1666)
+IPv6: throughput x1.24, CPU per byte x0.71
+IPv4: throughput x1.27, CPU per byte x0.70</code></pre>
+          <p>The machine was shared: 11–21% busy overall, and the two pinned CPUs were already 0.14–0.28 CPU-seconds per second busy before each repetition. The four cases were interleaved five times and every repetition agrees.</p>
+          <p><b>What this shows.</b> The knobs decide the skb exactly, through <code>sk_gso_max_size</code> (the size-knobs learning, Isovalent §5; <code>sock.c:2618</code>), and a third as many skbs cost only 30% less CPU per byte, because the copies are paid per byte whatever the skb size (the packet-budget learning, LWN §4).</p>
+          <p><b>Common wrong turn.</b> Setting only <code>gso_max_size</code> and <code>gro_max_size</code> and expecting IPv4 to change: IPv4 has its own two knobs. The reverse order also fails quietly: set the IPv4 knobs, then lower <code>gso_max_size</code> to 65,536 or less, and the IPv4 knob follows it down (<code>dev.h:205–212</code>).</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-gro">
+        <h4>Hands-on · Make GRO build the big skb, then starve it</h4>
+        <p class="labmeta">~30 min · break a real one · no sudo, needs Python 3 and tcpdump</p>
+        <p><b>Task.</b> Make the receiver's skbs come from GRO: <code>--gro-path</code> turns TSO off on <code>s0</code>, so the sender segments in software, and GRO on for <code>c0</code>. With all knobs at 185,000, predict and measure the skb size GRO hands up at full speed and behind a 10 Mbit/s <code>tbf</code>, then say what it means for the capstone's upload. This is the learning on where BIG TCP pays.</p>
+        <pre><code>cd labs/ch14-big-tcp                        # from the dossier folder
+./bigpair.sh --gro-path --size 185000 -- ./grocap.sh 3 gro-185k
+./bigpair.sh --gro-path --size 185000 --rate 10mbit -- ./grocap.sh 8 gro-185k-10mbit</code></pre>
+        <p><b>Done when.</b> Both runs are summarised, and you can name the condition GRO needs to build a 184 KB skb.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>GRO can merge only packets that one NAPI poll finds waiting.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>At 10 Mbit/s a 1,514-byte frame lasts 1.21 ms. How many frames arrive within one poll?</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p><code>tcpdump -n -r gro-185k-10mbit-v4.pcap | head</code> shows the gaps. A poll that completes flushes GRO (<code>dev.c:6817</code>), and so does each segment with PSH set (<code>tcp_offload.c:357</code>).</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026, single runs):</p>
+          <pre><code>flow: v6 "gbps": 22.967
+gro-185k-v6.pcap: IPv6 5000 data skbs, max 184298 B, median 184298 B, above 65,535: 4647 (92.9%), IP length field 0: 4647, hop-by-hop first: 0
+flow: v4 "gbps": 22.874
+gro-185k-v4.pcap: IPv4 5000 data skbs, max 183962 B, median 183962 B, above 65,535: 4390 (87.8%), IP length field 0: 4390, hop-by-hop first: 0
+flow: v6 "gbps": 0.009
+gro-185k-10mbit-v6.pcap: IPv6 5000 data skbs, max 14366 B, median 1514 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+flow: v4 "gbps": 0.01
+gro-185k-10mbit-v4.pcap: IPv4 5000 data skbs, max 14546 B, median 1514 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0</code></pre>
+          <p>In the slow IPv4 run, 4,858 of 5,000 skbs were single frames, 1.21 ms apart; the largest, 14,546 bytes, was ten frames that left together after an idle gap.</p>
+          <p><b>What this shows.</b> GRO builds the big skb only from packets that arrive back to back. At full speed it rebuilt the sender's 129-segment skbs, stopping at each PSH. At 10 Mbit/s each poll found one frame. The knobs are a ceiling; the arrival rate decides (the learning on where BIG TCP pays; Isovalent §4 on GRO's part). The capstone upload's far end therefore gets one or two frames per skb, and BIG TCP changes nothing for it.</p>
+          <p><b>Common wrong turn.</b> Blaming <code>tbf</code>. It did cut the sender's full-size skbs into frames (<code>sch_tbf.c:258–261</code>), but any 10 Mbit/s bottleneck spaces frames 1.21 ms apart, and a sender at that rate would build two-segment skbs anyway (the small-queues chapter's autosizing at 10 Mbit/s).</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: Cilium writes 196,608 on a pod's veth. For IPv6 with an MTU of 1,500 (MSS 1,428) on this kernel, how many segments does one full skb carry, and what frame length does the capture record?</p>
+        <details class="ans"><summary>Answer</summary><p>137 segments and a 195,722-byte frame. The socket stores the knob minus <code>MAX_TCP_HEADER + 1</code> (<code>sock.c:2633</code>): \(196{,}608 - 321 = 196{,}287\), and \(\lfloor 196{,}287/1{,}428 \rfloor = 137\), so 195,636 bytes of payload plus 86 of headers, with the payload length field 0. The value is <code>bigtcp.go:27</code> (Isovalent §5.1). Near miss: a 196,608-byte frame; the reserve and whole segments keep the skb below the knob.</p></details>
+        <p>2. Predict the value: with the bench's model, about 6.15 µs per skb plus 0.122 ns per byte, what CPU per GB does 196,608 give against 185,000, and what does that say about raising the knob further?</p>
+        <details class="ans"><summary>Answer</summary><p>0.153 against 0.155 CPU-seconds per GB, about 1% better: \(6{,}150/195{,}636 + 0.122 = 0.153\) and \(6{,}150/184{,}212 + 0.122 = 0.155\). The per-skb share is already a fifth of the total, and the copies cost 0.122 at any size, so even the 524,280 ceiling gives 0.134 (the packet-budget learning, LWN §4). Near miss: expecting the cost to fall with the skb count; only the per-skb part does.</p></details>
+        <p>3. Here is a symptom: after <code>ip link set dev eth0 gso_max_size 185000 gro_max_size 185000</code> on two test hosts, a new IPv6 transfer shows 184 KB skbs in tcpdump, but an IPv4 transfer started afterwards still shows 65,226-byte skbs. What was missed?</p>
+        <details class="ans"><summary>Answer</summary><p>The IPv4 knobs. <code>gso_max_size</code> and <code>gro_max_size</code> govern IPv6; IPv4 reads <code>gso_ipv4_max_size</code> and <code>gro_ipv4_max_size</code>, which follow the IPv6 values only at 65,536 or below (<code>net/core/dev.h:205–212</code>; <code>sock.c:2628–2629</code>). IPv4 opts in separately because a <code>tot_len</code> of 0 can confuse IPv4 tools (Isovalent §3), hence Cilium's two flags. Near miss: the socket's cached size, which explains old connections only.</p></details>
+        <p>4. Here is a symptom: on kernel 7.2, <code>tcpdump -v</code> on a pod's veth shows <code>IP6 (… payload length 0) … [|tcp]</code> for most data packets of a bulk flow, and normal lines for the small ones. A colleague says the capture is truncated. Is it?</p>
+        <details class="ans"><summary>Answer</summary><p>No. These are BIG TCP skbs: since v7.0 IPv6 writes payload length 0 above 65,535, with no hop-by-hop header (<code>ipv6.h:146–149</code>, merge <code>1fdad81d8803</code>). tcpdump 4.99.6 takes the 0 literally, finds no room for TCP and prints <code>[|tcp]</code>; the pcap record still holds the length, 184,298 bytes on the bench. IPv4 prints <code>[was 0, presumed TSO]</code>. Near miss: the snap length; a full capture prints the same. LWN §11's trap moved.</p></details>
+        <p>5. Here is a symptom: with <code>enable-ipv6-big-tcp: true</code> on a cluster in VXLAN tunnel mode, cilium-agent stops at start with "BIG TCP in tunneling mode requires pending kernel support". A teammate wants to set <code>gso_max_size 196608</code> on <code>cilium_vxlan</code> by hand, since <code>ip link</code> accepts it. What happens?</p>
+        <details class="ans"><summary>Answer</summary><p>Drops, most likely. <code>validateConfig()</code> (<code>bigtcp.go:254–257</code>) fired because its probe found Geneve's <code>tso_max_size</code> at 65,536: this kernel has no BIG TCP for UDP tunnels. VXLAN accepts 196,608 only because it copies <code>tso_max_size</code> from its lower device (<code>vxlan_core.c:3924</code>), and GRO will not merge encapsulated packets past 64 KB (<code>gro.c:119–123</code>). Cilium's probe comment says this "leads to packet drops instead" (<code>probes.go:670–681</code>). Near miss: reading an accepted knob as support.</p></details>
+        <p>6. Choose and defend: you own the switches of a 100 Gbit/s cluster and want fewer CPU cycles per byte. Jumbo frames (MTU 9,000) or BIG TCP?</p>
+        <details class="ans"><summary>Answer</summary><p>BIG TCP first: no fabric change, per node and per pod, and it comes off by restarting pods (Isovalent §4–§5). But it cuts only costs above GSO and GRO. Jumbo frames cut the per-frame work in the NIC, the driver and GRO, at the price of every switch, host and path agreeing on the MTU (Isovalent §4). They combine: Dumazet's 185,000 ran on a 4K MTU (<code>7fa2e481ff2f</code>). Add jumbo frames when per-frame costs show in profiles.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>A host's cost is mostly per packet, so the 123 ns a frame lasts at 100 Gbit/s is its budget, and GSO and GRO let the stack spend it once per skb. IP's 16-bit length capped skbs at 64 KB; BIG TCP writes 0 and takes the length from the skb, in IPv4 since v6.3 and in IPv6 since v7.0. Four per-device knobs set the size, read by TCP at connect and by GRO on every merge. Arch's 17 fragments cap zero-copy senders near 68 KB. The gain needs fast, back-to-back packets: 30% less CPU per byte on a veth pair, nothing at 10 Mbit/s.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> E. Dumazet, "BIG TCP", Netdev 0x15, 2021, <a href="https://netdevconf.info/0x15/session.html?BIG-TCP">netdevconf.info</a>. The talk both readings summarise, with slides and video; after the packet-budget learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> A. Mikityanska, "BIG TCP without HBH in IPv6", netdev patch series, February 2026, <a href="https://patch.msgid.link/20260205133925.526371-1-alice.kernel@fastmail.im">patch.msgid.link</a>, also <code>git log -1 1fdad81d8803</code>. Why the jumbogram went and what tunnels need next; after the length-field learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> J. Corbet, "Improving Linux networking performance", LWN, 13 January 2015, <a href="https://lwn.net/Articles/629155/">lwn.net/Articles/629155</a>. Brouer's per-packet budgets at 10, 40 and 100 Gbit/s, the source of LWN §2's 120 ns.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> Cilium documentation, "Tuning Guide", IPv6 and IPv4 BIG TCP, version 1.20.2, <a href="https://docs.cilium.io/en/stable/operations/performance/tuning/">docs.cilium.io</a>. Requirements and helm values; its hop-by-hop sentence predates v7.0. Read before you turn it on.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="packet-budget">A budget per packet, spent per skb</li>
+          <li data-strand="length-field">Sixteen bits of length, and what replaced them</li>
+          <li data-strand="size-knobs">Four knobs, read when a socket connects</li>
+          <li data-strand="skb-frags">Where 185,000 bytes sit: page fragments</li>
+          <li data-strand="where-it-pays">Where BIG TCP pays, and where it changes nothing</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 14 "BIG TCP (side path)" (J. Corbet, "Going big with TCP packets", LWN 2022; N. Vibert, "BIG Performances with BIG TCP on Cilium", Isovalent 2023; Linux v7.2 merge messages 7fa2e481ff2f, 983f507c3043, 1fdad81d8803; Cilium v1.19.6-vpc bigtcp.go), cited by paragraph §1–§13 and section §1–§5.
+I have read the chapter and the after half of ch14.html. Lock in.
+Strands: packet-budget (A budget per packet, spent per skb), length-field (Sixteen bits of length, and what replaced them), size-knobs (Four knobs, read when a socket connects), skb-frags (Where 185,000 bytes sit: page fragments), where-it-pays (Where BIG TCP pays, and where it changes nothing).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch14.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch14.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch13.html">← Maglev (side path)</a><a href="index.html">All chapters</a><a href="capstone.html">Capstone: one upload from a pod →</a></nav>
+<footer>From a full buffer to BBR · chapter 14 reads J. Corbet, "Going big with TCP packets", LWN.net, 14 February 2022; N. Vibert, "BIG Performances with BIG TCP on Cilium", Isovalent, 15 February 2023 (updated 24 August 2023); the Linux v7.2 merge messages 7fa2e481ff2f, 983f507c3043 and 1fdad81d8803; and Cilium v1.19.6-vpc (pkg/datapath/linux/bigtcp/bigtcp.go). LWN is cited by paragraph (§1–§13), the Isovalent post by heading (§1–§5), the kernel by file:line in v7.2. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

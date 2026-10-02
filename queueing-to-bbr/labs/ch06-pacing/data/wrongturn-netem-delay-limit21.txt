@@ -1,0 +1,6 @@
+# netem delay 20ms rate 10mbit limit 21 on rtr:r1 (the wrong turn), fq on s0, one Reno flow, 576-byte packets, 2 October 2026
+flow send: 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 3198497 bytes acked in 10.28 s = 2.49 Mbit/s, Jain 1.000, total_retrans=40, rows=1004
+qdisc netem 8431: root refcnt 17 limit 21 delay 20ms rate 10Mbit seed 1099488139003068240
+ Sent 3613248 bytes 6132 pkt (dropped 40, overlimits 0 requeues 0)
+ backlog 8850b 15p requeues 0
+  delayed 6147 dropped 0 corrupted 0 duplicated 0 reordered 0 ecn_marked 0

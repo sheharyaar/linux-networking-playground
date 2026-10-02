@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone · one upload from a pod · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · capstone</p>
+    <h1>One upload from a pod</h1>
+    <p class="sub">One 100 MB upload, followed through all fourteen chapters. Each chapter did one thing to it. Read this after the last chapter: every word here has been defined.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>The upload</h2>
+    <ol><li><a href="#object">The object</a></li><li><a href="#tower">The tower</a></li></ol>
+    <h2>Fourteen stops</h2>
+    <ol><li><a href="#stop-1">Congestion avoidance and control</a></li><li><a href="#stop-2">Queues in numbers</a></li>
+        <li><a href="#stop-3">Controlling queue delay</a></li><li><a href="#stop-4">Shapers and fair schedulers</a></li>
+        <li><a href="#stop-5">Small queues on the host</a></li><li><a href="#stop-6">TCP pacing</a></li>
+        <li><a href="#stop-7">Carousel</a></li><li><a href="#stop-8">Teaching NICs about time</a></li>
+        <li><a href="#stop-9">Eiffel</a></li><li><a href="#stop-10">BBR</a></li>
+        <li><a href="#stop-11">Where BBR loses</a></li><li><a href="#stop-12">Pods with a speed limit</a></li>
+        <li><a href="#stop-13">Maglev (side path)</a></li><li><a href="#stop-14">BIG TCP (side path)</a></li></ol>
+    <h2>The whole life</h2>
+    <ol><li><a href="#sequence">End to end</a></li><li><a href="#payoff">The sentence</a></li>
+        <li><a href="#live">Reading it on a live host</a></li><li><a href="#quiz-capstone">Cross-book quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="capstone" class="chapter">
+      <span class="chnum">Capstone · after the last chapter</span>
+      <h2>One upload from a pod</h2>
+      <p class="chmeta">~13 min · no new reading · every chapter's spine, joined<br>
+        <span class="spine">A pod in a Cilium cluster sends 100 MB to a service, over a path whose bottleneck is 10 Mbit/s with a 40 ms round trip and a 50-packet queue. The bench every chapter measured on is that path.</span></p>
+
+      <h3 id="object">The object</h3>
+      <p>The upload is one TCP connection carrying 100 MB. The path's numbers are the bench's numbers. A full frame is 1,514 bytes on the wire and carries 1,448 bytes of payload, so the link delivers \(10 \times 1448/1514 = 9.564\) Mbit/s of payload, and the upload cannot finish in less than \(100 \times 10^6 \times 8 / 9.564 \times 10^6 = 83.6\) s.</p>
+      <p>The <a href="index.html#g-pipe-size">pipe</a> is \(10^7 \times 0.040 / 8 = 50{,}000\) bytes: 33 frames on the wire, or 34.5 segments of payload. One frame takes 1.211 ms to send. The bottleneck's queue holds 50 frames, about 1.5 pipes, so a full queue adds \(50 \times 1.211 = 61\) ms to the round trip.</p>
+      <p>Everything below is a question about those numbers. How full does the queue get, who decides when each frame leaves, and what does the sender believe about the path?</p>
+
+      <h3 id="tower">The tower</h3>
+      <p>The upload passes the same layers on every packet. The boxes use the names the chapters' own diagrams used.</p>
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  APP["App in the pod<br/>writes 100 MB"] --> SOCK["TCP socket<br/>cwnd, or the BBR model<br/>pacing rate · departure time (ch 1, 8, 10)"]
+  LB["Cilium socket LB<br/>VIP to one backend, at connect (ch 13)"] -. "once" .-> SOCK
+  SOCK --> TSQ["TSQ<br/>about two skbs below the socket (ch 5)"]
+  TSQ --> VETH["veth into the host<br/>forwarding keeps the stamp (ch 12)"]
+  VETH --> EDT["Cilium BPF EDT limiter<br/>moves the stamp later, per pod (ch 12)"]
+  EDT --> FQ["fq on the host device<br/>one flow per socket · throttled tree<br/>each skb leaves at its time (ch 5, 8, 9)"]
+  FQ --> NIC["NIC<br/>TSO cuts skbs into frames (ch 5, 14)"]
+  NIC --> BOT["Bottleneck, 10 Mbit/s<br/>50-frame queue: pfifo, CoDel or fq_codel (ch 2, 3, 4)"]
+  BOT --> RCV["Backend pod<br/>GRO, then acks (ch 14)"]
+  RCV -. "acks: the ack clock, delivery rate and RTT samples" .-> SOCK
+        </div>
+        <figcaption><b>Diagram C.1 — The layers one upload passes, top to bottom, with the chapters that act on each.</b> Notice that only two boxes decide when a packet leaves: the socket, which computes a time, and fq, which keeps it. Every other box either adds a queue or removes one.</figcaption>
+      </figure>
+
+      <h3 id="stop-1">Stop 1 · Congestion avoidance and control</h3>
+      <p>The upload starts with a window of 10 segments and doubles it every round trip: 10, 20, 40, 80, 160. The third round already passes the 33-frame pipe, and the fifth passes pipe plus queue, so frames are dropped. On the bench, Reno's slow start overshot to 166 segments and paid 86 retransmissions. Then the sawtooth began: the window climbed by one per round trip from 42 to 83, and halved on each loss. The peak is exactly pipe plus queue, \(33 + 50 = 83\). The queue never fell below 8 frames, because half of 83 is still more than the pipe.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch01.html#s-aimd">Add slowly, cut by half</a> and <a href="ch01.html#s-window-minus-pipe-queue">The queue a window leaves behind</a>. <b>The chapter's spine</b> was the 230.4 kbit/s csam–cartan link with its 50-packet queue; our bottleneck is that link at 10 Mbit/s, with the same 50 packets.</p>
+
+      <h3 id="stop-2">Stop 2 · Queues in numbers</h3>
+      <p>Little's law turns the sawtooth's queue into time. The Reno run averaged 31.5 frames queued, and \(31.5 / 825.7 = 38.2\) ms, against 37.6 ms measured as srtt minus min RTT. Then Kleinrock's power names what went wrong. With the window held at 36 segments, about one pipe, the upload got 9.563 Mbit/s at 43.6 ms: power 0.95. Uncapped Reno got the same 9.564 Mbit/s at 79.4 ms: power 0.52. The extra 36 ms bought nothing.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch02.html#s-littles-law">Backlog is rate times delay</a> and <a href="ch02.html#s-power-and-operating-point">Where one sender should sit</a>. <b>The chapter's spine</b> was one 10 Mbit/s, 40 ms bottleneck fed by one flow; that flow is our upload.</p>
+
+      <h3 id="stop-3">Stop 3 · Controlling queue delay</h3>
+      <p>The window minus the pipe is a standing queue, and a bigger buffer only makes it longer. Behind a 1,000-packet FIFO, one upload held a median of 513 packets and a median RTT of 655 ms. CoDel at the same bottleneck kept the RTT at 42.2 ms, at the price of 8.35 Mbit/s instead of 9.54 for a single flow; four flows got 9.40 together. fq_codel gave a ping beside the upload a 40.4 ms round trip. When the link fell from 10 to 1 Mbit/s, the FIFO's RTT went to 6.5 s and CoDel's came back under 100 ms within 2 s.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch03.html#s-standing-queue-is-window-minus-pipe">Window minus pipe is a standing queue</a> and <a href="ch03.html#s-min-sojourn-over-interval">The minimum sojourn over an interval</a>. <b>The chapter's spine</b> was a 25-packet window in a 20-packet pipe; our upload's 83-segment window in a 33-frame pipe is the same picture.</p>
+
+      <h3 id="stop-4">Stop 4 · Shapers and fair schedulers</h3>
+      <p>Put the upload's pod behind an HTB class with rate 5 and ceil 10 Mbit/s. Alone, it borrows the spare and gets 9.56 Mbit/s. When a second customer's flow starts, both get 4.78. The shaper is also a queue. With HTB's default leaf, a FIFO of 1,000 packets, one flow saw a 2.46 s RTT; with fq_codel as the leaf, 44 ms. A policer at 5 Mbit/s with a 16 KB burst gave the same flow only 2.33 Mbit/s, because it drops what a shaper would delay.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch04.html#s-htb-borrowing">Rate, ceil and borrowing</a> and <a href="ch04.html#s-shaper-vs-policer">Shaping delays, policing drops</a>. <b>The chapter's spine</b> was one 10 Mbit/s uplink shared by two customers; our pod is one of them.</p>
+
+      <h3 id="stop-5">Stop 5 · Small queues on the host</h3>
+      <p>Before the upload reaches any wire, it can queue inside its own host. TSQ stops that: it counts the socket's bytes below the socket and refuses more than about two skbs. With a 10 Mbit/s limit on the sender's own device, the host queue held 4 to 7 packets, and the RTT was 48 ms on a 40 ms path. When netem sat there instead, it released each skb's charge at enqueue, so TSQ saw nothing; the host queue grew to 14.9 MB and the RTT to 8 s. TSO autosizing makes each skb about a millisecond of sending, and fq spaces skbs by the socket's pacing rate.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch05.html#s-tsq-limits-bytes-below-the-socket">A limit on bytes below the socket</a> and <a href="ch05.html#s-pacing-rate">A rate TCP computes and someone else enforces</a>. <b>The chapter's spine</b> was one netperf session with 3 MB sitting in the qdisc; that is our upload before TSQ.</p>
+
+      <h3 id="stop-6">Stop 6 · TCP pacing</h3>
+      <p>Pacing the upload under a loss-driven sender does not remove its queue; it delays the news. With eight uploads started together through a quarter-pipe buffer, unpaced, six of eight lost in the first congestion epoch. Paced, all eight lost, about 60 ms later, at a higher peak: 188 segments in flight against 157. Linux paces at 200% of cwnd over srtt in slow start and 120% after, and prints <code>pacing_rate</code> for every socket, including the ones nothing paces.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch06.html#s-late-signal">No queue, then too much</a> and <a href="ch06.html#s-linux-pacing">Which pacer runs on Linux, and how fast</a>. <b>The chapter's spine</b> was fifty flows collapsing together at a 312-packet buffer; Linux with selective acks did not collapse.</p>
+
+      <h3 id="stop-7">Stop 7 · Carousel</h3>
+      <p>A rate limit can be written as a release time. At 10 Mbit/s, each 1,514-byte frame of the upload may leave 1.211 ms after the one before it, and a timing wheel parks it in the slot for that time. Completions held until the wire keep the socket from writing more than the wheel holds. On the bench, sixteen flows shaped to 500 kbit/s each held 97 KB in total when the shaper sat on the sender, with a 137 ms RTT. The same classes on the router, out of reach of completion feedback, held a median 1.40 MB, and the RTT swung up to 2.5 s.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch07.html#s-release-times">A rate written as a release time</a> and <a href="ch07.html#s-deferred-completions">Completions held until the wire</a>. <b>The chapter's spine</b> was one packet stamped, parked in a wheel slot and released; each of our frames is that packet.</p>
+
+      <h3 id="stop-8">Stop 8 · Teaching NICs about time</h3>
+      <p>Linux took Carousel's idea without its wheel. TCP writes each skb's departure time into <code>skb->tstamp</code>, and fq holds the skb until then. The RTT clock now starts when the packet is meant to leave, so time spent waiting in the sender's own qdisc stops counting as path delay. On the bench, a 24 Mbit/s flow over a 0.03 ms path measured 2.03 ms of RTT when fq spaced it by rate, and 0.028 ms when TCP stamped departure times.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch08.html#s-tcp-stamps-departure">TCP writes the departure time</a> and <a href="ch08.html#s-fq-honours-stamp">fq honours the stamp</a>. <b>The chapter's spine</b> was that 24 Mbit/s flow, whose RTT fell from 2.195 to 0.165 ms in the cover letter.</p>
+
+      <h3 id="stop-9">Stop 9 · Eiffel</h3>
+      <p>On a host carrying thousands of uploads, fq must find the earliest stamp among them for every packet. In v7.2 it keeps throttled flows in a red-black tree, \(O(\log n)\) per operation. Eiffel files ranks into buckets and finds the first non-empty one with one find-first-set per level. In a C race over 20,000 buckets, cFFS took 14 to 20 ns per pop and push from 3 to a million queued packets; a binary heap grew from 7 to 123 ns.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch09.html#s-ffs-levels">One find-first-set per level</a> and <a href="ch09.html#s-single-shaper">Every limit becomes a time</a>. <b>The chapter's spine</b> was finding the next packet among 20,000 buckets; our upload is one of the flows in them.</p>
+
+      <h3 id="stop-10">Stop 10 · BBR</h3>
+      <p>BBR measures the two numbers that set the operating point: BtlBw 10 Mbit/s, from a max filter over delivery rates, and RTprop 40 ms, from a min filter over RTTs. Their product is one pipe, 33 frames. It paces at the bandwidth times a gain that cycles a quarter up, a quarter down, then six rounds at one, and caps inflight at two pipes. Its model on this path leaves Startup at 0.46 s and reaches ProbeBW at 0.55 s, then cruises with at most 10 frames queued and RTT between 41 and 51 ms. CUBIC on the same bench kept a median of 42 of the 50 slots full and an srtt of 91 ms. Linux's own BBR runs are written in the chapter's labs and wait for the module to be loaded.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch10.html#s-two-numbers">Two numbers and the point between them</a> and <a href="ch10.html#s-pacing-is-the-control">A rate from the model, a cap from cwnd</a>. <b>The chapter's spine</b> was one flow on a 10 Mbit/s, 40 ms path, which is this path.</p>
+
+      <h3 id="stop-11">Stop 11 · Where BBR loses</h3>
+      <p>The model breaks when the upload has company. Against one CUBIC flow, Ware's model gives BBR 97% of the link with half a pipe of buffer, 79% with two pipes and 53% with ten; our 50-frame queue is 1.5 pipes. In a deep buffer CUBIC fills the queue, BBR's inflight cap binds, and the cap sets the share. Random loss leaves BBRv1 flat until about 20%, where its policer detector, 50 lost per 256 delivered, takes over.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch11.html#s-buffer-decides">The buffer picks the winner</a> and <a href="ch11.html#s-inflight-cap">The cap sets the share</a>. <b>The chapter's spine</b> was BBR against CUBIC on a shallow and a deep buffer; our upload meets that CUBIC flow at the same bottleneck.</p>
+
+      <h3 id="stop-12">Stop 12 · Pods with a speed limit</h3>
+      <p>Annotate the pod with <code>kubernetes.io/egress-bandwidth: "10M"</code> and Cilium's Bandwidth Manager enforces it as a departure time. Its BPF program on the host device starts from the departure time TCP already wrote, \(t = \max(\text{stamp}, \text{now})\), and sends the packet at \(\max(t,\ t_\text{last} + \text{len}/\text{rate})\), with len the wire length. A packet whose time lands more than the drop horizon away, 2 s by default, is dropped (<code>bpf/lib/edt.h:88–106</code>). fq on that device honours the stamp. Since Linux 5.18 one bit marks the stamp as a monotonic departure time, so forwarding keeps the stamp TCP wrote inside the pod as it crosses the veth into the host. BBR for pods needs that kernel and BPF host routing; none of it runs in kind.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch12.html#s-edt-limiter">A pod's limit written as a time</a> and <a href="ch12.html#s-stamp-crosses">The stamp crosses the veth</a>. <b>The chapter's spine</b> was a pod's departure timestamp crossing a veth; that pod is ours.</p>
+
+      <h3 id="stop-13">Stop 13 · Maglev (side path)</h3>
+      <p>The upload goes to a service VIP, so something must pick a backend. From a pod, Cilium's socket LB picks it once, at <code>connect()</code>, with a random slot (<code>bpf/bpf_sock.c:124–128, 408</code>), and the packets carry the backend's address from the start. Had the upload entered the cluster at a LoadBalancer VIP, Maglev would hash its 5-tuple into a 16,381-slot table, and conntrack would keep it on that backend. With 100 backends, removing one moves 1.31% of the table's slots in Cilium's own code; mod-N hashing would move about 98%.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch13.html#s-ct-then-hash">Tracking first, the table second</a> and <a href="ch13.html#s-disruption">What moves when a backend leaves</a>. <b>The chapter's spine</b> was the paper's seven-slot table with one backend removed; our upload owns one slot in a bigger copy of it.</p>
+
+      <h3 id="stop-14">Stop 14 · BIG TCP (side path)</h3>
+      <p>At the far end, GRO merges arriving frames into large skbs, and BIG TCP lets them grow past 64 KB to 185,000 bytes. For this upload it changes nothing. Behind a 10 Mbit/s bottleneck, frames arrive 1.2 ms apart, and GRO received one frame per poll: 4,858 of 5,000 skbs were single 1,514-byte frames. Between two pods on a fast veth, raising the limit took one flow from 55.8 to 69.1 Gbit/s and cut CPU per gigabyte by 30%.</p>
+      <p class="note"><b>Acts here:</b> <a href="ch14.html#s-where-it-pays">Where BIG TCP pays, and where it changes nothing</a> and <a href="ch14.html#s-packet-budget">A budget per packet, spent per skb</a>. <b>The chapter's spine</b> was one 185,000-byte packet against a 120 ns budget; our upload never builds one.</p>
+
+      <h3 id="sequence">End to end</h3>
+      <p>The same upload, in time order, with BBR as the sender and the pod limited to the path's rate.</p>
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant A as App in the pod
+  participant B as Cilium BPF
+  participant T as TCP socket
+  participant F as fq on the host
+  participant R as Bottleneck queue
+  participant D as Backend pod
+  A->>B: connect to the service VIP
+  B->>T: one backend, chosen once at connect
+  A->>T: write 100 MB
+  Note over T: Startup: pacing gain 2.89 doubles the rate each round trip
+  T->>F: skbs stamped with departure times, about two below the socket
+  B->>F: EDT limiter moves a stamp later when the pod limit binds
+  F->>R: each frame at its time
+  Note over R: Startup overfills the queue, Drain empties it
+  R->>D: one frame per 1.21 ms
+  D-->>T: acks carry delivery rate and RTT samples
+  Note over T: BtlBw 10 Mbit/s from the max filter, RTprop 40 ms from the min filter
+  loop every eight round trips
+    T->>F: pacing gain 1.25, then 0.75, then 1 for six rounds
+  end
+  Note over T,R: every 10 s ProbeRTT holds 4 packets in flight for 200 ms
+  D-->>T: the last ack, after about 84 s
+        </div>
+        <figcaption><b>Diagram C.2 — The upload's whole life, from <code>connect()</code> to the last ack.</b> Notice where each decision is made: the backend at connect, the rate in the socket, the departure time in the socket and in BPF, and the actual departure in fq. The bottleneck queue only fills during Startup and the brief 1.25 phases.</figcaption>
+      </figure>
+
+      <h3 id="payoff">The sentence</h3>
+      <p>Fourteen chapters lead to one sentence.</p>
+      <p><b>The upload's speed comes from a model of the path that BBR keeps; a departure time that TCP or Cilium's BPF writes into each skb, and that fq honours, enforces it; so the bottleneck queue stays near empty while the pipe stays full, which is the operating point the queueing maths calls optimal.</b></p>
+      <p>The sentence has limits, and each one is a chapter. It fails beside a CUBIC flow in a deep buffer, where the cap sets the share (stop 11). It fails when something between the socket and the wire drops the stamp or orphans the skb (stops 5 and 12). And it says nothing about which backend the bytes reach, which is the side path's job (stop 13).</p>
+
+      <h3 id="live">Reading it on a live host</h3>
+      <p>Each stop leaves a trace in <code>ss -ti</code> or <code>tc -s qdisc</code>. When the upload misbehaves, the symptom names the chapter.</p>
+      <table>
+        <tr><th>Symptom</th><th>Mechanism</th><th>Stop</th></tr>
+        <tr><td><code>rtt</code> far above <code>minrtt</code>; the bottleneck's <code>backlog</code> near its limit</td><td>A standing queue: the window exceeds the pipe</td><td><a href="#stop-1">1</a>, <a href="#stop-3">3</a></td></tr>
+        <tr><td>Megabytes in a qdisc on the sender, with the socket's <code>unacked</code> far above two skbs</td><td>Something orphans skbs below the socket, so TSQ is blind</td><td><a href="#stop-5">5</a></td></tr>
+        <tr><td><code>pacing_rate</code> printed, qdisc is fq_codel, congestion control is cubic</td><td>Nothing paces; the number is advice</td><td><a href="#stop-6">6</a></td></tr>
+        <tr><td>fq shows <code>horizon_drops</code> or a growing <code>throttled</code> count on the host device</td><td>Departure stamps too far ahead, from TCP or the EDT limiter</td><td><a href="#stop-8">8</a>, <a href="#stop-12">12</a></td></tr>
+        <tr><td><code>bbr:(bw:…)</code> well below the link, with steady retransmissions</td><td>A policer or random loss near BBRv1's detector</td><td><a href="#stop-11">11</a></td></tr>
+        <tr><td>BBR's share falls when a CUBIC transfer starts on the same path</td><td>Deep buffer: CUBIC fills it, BBR's inflight cap binds</td><td><a href="#stop-11">11</a></td></tr>
+      </table>
+
+      <div class="quiz" data-when="after" id="quiz-capstone">
+        <h4>Quiz · across the book</h4>
+        <p>Strands from several chapters, asked only as symptoms:</p>
+        <ul class="strands">
+          <li data-strand="ch01:window-minus-pipe-queue">The queue a window leaves behind</li>
+          <li data-strand="ch02:power-and-operating-point">Where one sender should sit</li>
+          <li data-strand="ch03:min-sojourn-over-interval">The minimum sojourn over an interval</li>
+          <li data-strand="ch05:tsq-limits-bytes-below-the-socket">A limit on bytes below the socket</li>
+          <li data-strand="ch06:linux-pacing">Which pacer runs on Linux, and how fast</li>
+          <li data-strand="ch08:tcp-stamps-departure">TCP writes the departure time</li>
+          <li data-strand="ch10:two-numbers">Two numbers and the point between them</li>
+          <li data-strand="ch11:buffer-decides">The buffer picks the winner</li>
+          <li data-strand="ch12:stamp-crosses">The stamp crosses the veth</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", capstone "One upload from a pod" (capstone.html): a 100 MB upload from a Cilium pod over a 10 Mbit/s, 40 ms path with a 50-packet bottleneck queue.
+I have read every chapter and the capstone. Lock in across the book.
+Strands: ch01:window-minus-pipe-queue, ch02:power-and-operating-point, ch03:min-sojourn-over-interval, ch05:tsq-limits-bytes-below-the-socket, ch06:linux-pacing, ch08:tcp-stamps-departure, ch10:two-numbers, ch11:buffer-decides, ch12:stamp-crosses.
+Ask only diagnostic questions: "here is a symptom in production (an ss -ti line, a tc -s qdisc excerpt, a graph); which chapter's mechanism failed, and what would you change?"
+Each question should need strands from at least two chapters to answer.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-capstone.md, and mark each strand in its chapter's map (.alvar/maps/qbbr-chNN.md) when the answer shows it is loose.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch14.html">← BIG TCP (side path)</a><a href="index.html">All chapters</a><span></span></nav>
+<footer>From a full buffer to BBR · capstone. The upload's numbers are the dossier's rootless bench (kernel 7.2.6, 2 October 2026); each stop's figures come from the chapter it names, where the data files are linked. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

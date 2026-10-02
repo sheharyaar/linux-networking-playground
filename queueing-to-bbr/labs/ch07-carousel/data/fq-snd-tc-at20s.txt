@@ -1,0 +1,5 @@
+qdisc fq 8741: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b maxrate 500Kbit low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 19330572 bytes 12806 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 96896b 32p requeues 0
+  flows 21 (inactive 5 throttled 16) band0_pkts 0 band1_pkts 32 band2_pkts 0 next_packet_delay 1.67ms
+  gc 0 highprio 0 throttled 6383 latency 23.3us

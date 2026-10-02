@@ -1,0 +1,853 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCP pacing · chapter 6 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 6 of 14</p>
+    <h1>TCP pacing</h1>
+    <p class="sub">After this chapter you can explain why spreading each window over the round trip, which queueing theory says should help, made the paper's TCP slower; predict when paced flows lose together; and say which pacer, if any, runs on a Linux socket.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The paper</h2>
+    <ol><li><a href="#book">PDF pp. 1–9</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-half-window-queue">Half a window in the queue</a></li>
+        <li><a href="#s-late-signal">No queue, then too much</a></li>
+        <li><a href="#s-synchronized-drops">Mixed packets, shared losses</a></li>
+        <li><a href="#s-paced-among-bursty">A paced flow among bursty ones</a></li>
+        <li><a href="#s-linux-pacing">Which pacer runs on Linux, and how fast</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 6 · before you read</span>
+      <h2>TCP pacing</h2>
+      <p class="chmeta">~6 min before · PDF pp. 1–9 (~1 h) · ~22 min after · <span class="tag CC">CC</span><br>
+        <span class="spine">Fifty paced Reno flows start together across a 57 Mbit/s, 100 ms bottleneck with a 312-packet drop-tail buffer, overflow it in the same round trip, and collapse together (Fig. 8, PDF p. 6).</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>The congestion-avoidance chapter left the <a href="index.html#g-ack-clock">ack clock</a> with two weak points: it cannot start itself, and it trusts the spacing of the acks. In <a href="index.html#g-slow-start">slow start</a> each ack releases two packets, so every round leaves the sender at twice the <a href="index.html#g-bottleneck">bottleneck</a>'s rate and parks half a window in its queue. The obvious repair is a timer that spreads each window evenly over the round trip. Queueing theory backs it, because evenly spaced arrivals wait less than bunched ones (the queueing-maths chapter), and the small-queues chapter showed Linux computing a <a href="index.html#g-pacing-rate">pacing rate</a> for every socket.</p>
+      <p>In 2000 Amit Aggarwal, Stefan Savage and Thomas Anderson put that timer into the ns simulator's TCP Reno and measured it. In most of the realistic cases they tried, <a href="index.html#g-pacing">pacing</a> gave lower throughput and higher latency (PDF p. 1). The spine of this chapter is their sharpest case. Fifty flows start together across a 57 Mbit/s, 100 ms bottleneck whose drop-tail buffer holds 312 packets, a quarter of the 1,250-packet <a href="index.html#g-pipe-size">pipe</a>. The paced flows' windows add up to about 3,300 packets, then fall to about 200 within five round trips. The unpaced flows peak near 2,400 and fall less far (Fig. 8, PDF p. 6).</p>
+      <p>So the question is how removing bursts can make a loss-driven sender slower. The answer lies in when, and to whom, the network reports congestion. The chapter then asks how much of it applies to Linux, which paces today, at different rates, and only when something enforces it.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-slow-start-burst">slow-start burst</dt><dd>In slow start each ack releases two packets, so a round leaves the sender at twice the bottleneck's rate, and a round that ends with window \(W\) leaves \(W/2\) packets queued (PDF p. 2).</dd>
+        <dt id="w-ack-compression">ack compression</dt><dd>Acks that queue behind data on the return path lose their spacing and arrive in a clump, so the ack clock releases a burst (PDF p. 3).</dd>
+        <dt id="w-paced-reno">paced Reno</dt><dd>The paper's sender: Reno plus a timer that sends the next packet every \(\text{RTT}/\text{window}\), for the whole life of the connection. The window decides how much to send and the timer decides when (PDF p. 3).</dd>
+        <dt id="w-late-congestion-signal">late congestion signal</dt><dd>Paced traffic builds no queue until the link is full, so a loss-driven sender hears of congestion only after it has overloaded the link (PDF pp. 5–6).</dd>
+        <dt id="w-mixing-of-flows">mixing of flows</dt><dd>Paced flows spread their packets over the whole round trip, so in a shared FIFO each flow's packets sit between everyone else's (PDF p. 6).</dd>
+        <dt id="w-congestion-epoch">congestion epoch</dt><dd>One overflow of the bottleneck buffer, plus the round trip in which the senders find out. Flows that lose a packet in it lose in the same epoch.</dd>
+        <dt id="w-synchronized-drops">synchronized drops</dt><dd>Most flows lose packets in the same congestion epoch and cut their windows together, so the link swings from overloaded to underused (PDF p. 1).</dd>
+        <dt id="w-desynchronization">desynchronization</dt><dd>Flows lose in different epochs, so their sawtooths are out of step and the sum of their windows swings less. The paper writes de-synchronization (PDF p. 6).</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  subgraph U["Unpaced Reno"]
+    direction TB
+    U1["Each ack releases two packets:<br/>a slow-start burst"] --> U2["Bursts from a few flows<br/>overlap and fill the buffer early"]
+    U2 --> U3["Those flows lose and back off;<br/>the others keep growing"]
+    U3 --> U4["Losses spread over<br/>many congestion epochs"]
+  end
+  subgraph P["Paced Reno"]
+    direction TB
+    P1["A timer spreads each window<br/>over the round trip"] --> P2["No queue until the link is full:<br/>a late congestion signal"]
+    P2 --> P3["Every flow has packets in the overflow:<br/>mixing of flows"]
+    P3 --> P4["All lose in one congestion epoch:<br/>synchronized drops"]
+  end
+  U ~~~ P
+  style U4 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style P4 fill:#fdeef1,stroke:#be123c,stroke-width:2px
+</div><figcaption><b>Diagram 6.1 — Two ways for many slow-starting flows to meet one small buffer, after the paper's argument (PDF pp. 5–6).</b> Notice that the unpaced column loses early and unevenly, and that this unevenness keeps the link busy: while some flows back off, others still send. The paced column loses late and evenly, so every flow backs off in the same round trip. The paper's two reasons are the middle boxes of the right column.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Paper section</th><th>Pages</th><th>How</th><th>Look for</th></tr>
+        <tr><td>I Introduction</td><td>PDF p. 1</td><td><span class="how close">close</span></td><td>The two findings: paced flows drop together, and a paced flow loses to unpaced ones. Both say pacing is "too good" at spreading traffic.</td></tr>
+        <tr><td>II Related work; III.A TCP mechanisms</td><td>PDF pp. 1–2</td><td><span class="how skim">skim</span></td><td>Where pacing had been proposed before (start-up, after loss, after idle). III.A is Reno as you know it; keep only the delayed-ack factors at the end.</td></tr>
+        <tr><td>III.B Burstiness in TCP</td><td>PDF pp. 2–3</td><td><span class="how close">close</span></td><td>Four sources of bursts, and the \(W/2\) argument in B.1. The paper's "time unit" is the congestion-avoidance chapter's \(P_b\).</td></tr>
+        <tr><td>IV Pacing, with A Implementation and B Why pacing (should) help</td><td>PDF pp. 3–4</td><td><span class="how close">close</span></td><td>"How much" from the window and "when" from a rate; a timer every \(\text{RTT}/\text{window}\); Fig. 1, and the sentence after it about feedback.</td></tr>
+        <tr><td>V Simulation setup and methodology</td><td>PDF p. 4</td><td><span class="how skim">skim</span></td><td>Fig. 2's topology, 576-byte packets, an ack for every packet, Jain's index.</td></tr>
+        <tr><td>VI.A Single flow, with footnote 1</td><td>PDF pp. 4–5</td><td><span class="how close">close</span></td><td>Where each sender takes its first loss. Then hold footnote 1's formula against Fig. 4's sawtooth.</td></tr>
+        <tr><td>VI.B Multiple flows</td><td>PDF pp. 5–6</td><td><span class="how close">close</span></td><td>Fig. 8, the two reasons for synchronization, and the opposite effect in steady state.</td></tr>
+        <tr><td>VI.C Variable RTT; VI.D Variable-length flows</td><td>PDF pp. 6–7</td><td><span class="how skim">skim</span></td><td>Read the figures: fairness and drop rate when RTTs differ (Figs 9–11), and the four phases of Fig. 12.</td></tr>
+        <tr><td>VI.E Paced and non-paced flows</td><td>PDF pp. 7–8</td><td><span class="how close">close</span></td><td>Why one paced flow among bursty ones is "very likely" to hit a drop.</td></tr>
+        <tr><td>VI.F Queueing discipline; VII Conclusions</td><td>PDF p. 8</td><td><span class="how close">close</span></td><td>The remedy and its reason: with pacing "even a small queue size should be interpreted as congestion". The RED settings are in Fig. 16's legend.</td></tr>
+      </table>
+      <p class="note">The preprint has no printed page numbers, so this page cites PDF pages. Figures sit at the top of each page, away from the text that discusses them.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the paper</h4><ol>
+        <li>Pacing builds no queue until the link is full. Why is that a problem for a sender that learns about congestion only from loss?</li>
+        <li>Why do paced flows lose packets in the same round trip, while unpaced Reno flows lose at different times?</li>
+        <li>One paced flow shares a bottleneck with bursty Reno flows. Why does it finish later, when its packets are the better behaved?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="half-window-queue">Half a window in the queue</li>
+          <li data-strand="late-signal">No queue, then too much</li>
+          <li data-strand="synchronized-drops">Mixed packets, shared losses</li>
+          <li data-strand="paced-among-bursty">A paced flow among bursty ones</li>
+          <li data-strand="linux-pacing">Which pacer runs on Linux, and how fast</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 6 "TCP pacing" (A. Aggarwal, S. Savage, T. Anderson, "Understanding the Performance of TCP Pacing", INFOCOM 2000, authors' preprint), PDF pp. 1–9 (no printed page numbers).
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: half-window-queue (Half a window in the queue), late-signal (No queue, then too much), synchronized-drops (Mixed packets, shared losses), paced-among-bursty (A paced flow among bursty ones), linux-pacing (Which pacer runs on Linux, and how fast).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch06.md.
+End with a reading plan: for each row of the reading guide in ch06.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read the paper</h2>
+      <p>All nine pages of <code>05-tcp-pacing.pdf</code>, about an hour. It has no printed page numbers, so cite it by PDF page as this page does. Keep the three questions in mind and note the page where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 6 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. Pacing builds no queue until the link is full. Why is that a problem for a sender that learns about congestion only from loss? <span class="pageref">PDF pp. 3–6</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because the only signal is a drop, and a drop-tail FIFO drops only when it is full. Evenly spaced arrivals keep the queue near empty until the windows exceed the pipe (Fig. 1, PDF p. 3), so the first drop comes after overload, and slow start doubles once more while the loss travels back: Fig. 8's paced sum reached about 3,300, twice pipe plus buffer (PDF p. 6). Near miss: pacing does not slow the signal down. It removes the early losses that bursts gave some flows.</p></details>
+        <p>2. Why do paced flows lose packets in the same round trip, while unpaced Reno flows lose at different times? <span class="pageref">PDF pp. 5–6</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because the signal is late and the flows are mixed (PDF pp. 5–6). When the buffer finally overflows, every paced flow is still in slow start and has packets spread over the whole round trip, so the overflow catches all of them. Unpaced clusters overflow it early, for the few flows whose clusters overlapped, and those back off while the rest grow. On the bench: eight of eight paced flows in the first congestion epoch, six of eight unpaced. Near miss: both kinds started together; only the paced ones stayed in step.</p></details>
+        <p>3. One paced flow shares a bottleneck with bursty Reno flows. Why does it finish later, when its packets are the better behaved? <span class="pageref">PDF pp. 1, 7–8</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because a loss-driven sender halves once per loss event, and spread packets collect events: any Reno burst that fills the queue is "very likely" to catch one of the paced flow's packets, while a Reno cluster either misses the full queue or loses several packets for one halving (PDF pp. 1, 7). In Fig. 14, with half the flows paced, they took 3.75 s against 2.7 s. On the bench every paced 300-packet flow lost in the first epoch, two thirds of the unpaced ones. Near miss: it is not more lost packets. The paced flows retransmitted a third as many.</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p>The paper starts from queueing theory, which says bursty arrivals bring more delay and loss, and from TCP's four sources of bursts: slow start, the ack of a retransmission, ack compression, and windows that travel as clusters (PDF pp. 1–3). Pacing sends each window over the round trip on a timer, one packet every \(\text{RTT}/\text{window}\) (PDF p. 3). Fig. 1 states the hope, no queue until the link is full, and the next paragraph the problem: feedback is delayed until the network is saturated (PDF pp. 3–4).</p>
+      <p>In ns, with 576-byte packets and drop-tail FIFOs (PDF p. 4), one flow with a quarter-BDP buffer gains from pacing at start-up, because Reno's slow start overflows the buffer at twice its size. The gain grows with the BDP and goes away once the buffer is half of it (Figs 3–5, PDF pp. 4–5).</p>
+      <p>With fifty flows the result turns over (PDF pp. 5–6). Paced flows lose late and together, through late congestion signals and mixing, and their aggregate window collapses, while Reno's clusters lose early and unevenly. In steady state pacing desynchronizes, and with mixed RTTs it is fairer (PDF pp. 6–7). With flows arriving over time, every new slow start brings synchronized drops (Figs 12–13). A paced flow among Reno flows finishes later (Figs 14–15, PDF pp. 7–8). The remedy is a queue manager that reads even a small queue as congestion: RED with a low threshold, or BLUE (Fig. 16, PDF p. 8).</p>
+
+      <h3 class="strand" id="s-half-window-queue">Half a window in the queue</h3>
+      <p>In slow start, a round that ends with window \(W\) sends \(W\) packets in the time the bottleneck needs for \(W/2\), so it leaves \(W/2\) of them queued (PDF p. 2). With a buffer of \(B\) packets, unpaced Reno overflows it once \(W/2 > B\), near \(W = 2B\). Paced Reno builds no queue until the pipe is full, so it overflows near pipe plus \(B\) (PDF p. 5).</p>
+      <p>This is the <a href="ch01.html#s-slowstart-cost">slow-start cost from the congestion-avoidance chapter</a>, meeting a buffer smaller than the pipe. The paper adds three sources (PDF pp. 2–3): the ack of a retransmission that fills a hole, <b>ack compression</b> on two-way traffic, and windows that travel as clusters, which make bigger bursts where they overlap.</p>
+      <p>The paper's single flow (Fig. 4, PDF p. 4) has a pipe of \(5 \times 10^6 \times 0.1/(576 \times 8) = 108.5\) packets and a 25-packet buffer. Reno should overflow near 50: its line tops out near 62, times out, and climbs one packet per round trip until about 150 round trips. Paced Reno should overflow near \(108 + 25 = 133\): it spikes to about 213 and is on its sawtooth by about 90 (PDF p. 5).</p>
+      <p>On the bench, with 576-byte packets, the 10 Mbit/s, 40 ms path holds 85 packets, and the router's buffer was 21. One unpaced Reno flow overflowed it in the round from 32 to 64, and the router dropped 34 packets. Paced by fq, the queue stayed at 0–3 packets until the round from 64 to 128, past \(85 + 21 = 106\), and 74 were dropped.</p>
+      <p>Fig. 5 gives the condition: the gain grows with the BDP and goes away once the buffer is half the BDP, the \(W/2\) queue of a window that has just filled the pipe. There pacing does slightly worse, because it "lags behind by a round trip time" (PDF p. 5).</p>
+      <p class="erratum"><b>The paper's slip.</b> Footnote 1 (PDF p. 5) sets Fig. 5's flows to one sawtooth, \(T_{cycle} = RTT^2 \cdot BW/\text{packet size}\), "proposed in [21]". For Fig. 4's flow that is \(0.1^2 \times 5 \times 10^6/4608 = 10.85\) s, 108 round trips, but Fig. 4 repeats every 75, with Reno peaks near 150, 225, 300, 376 and 451. The footnote is Mathis et al.'s simpler bound with \(C = 1\), given for receivers that delay acks (p. 69). With an ack for every packet, as here (PDF p. 4), their derivation (p. 68) gives \(\tfrac23\, RTT^2 \cdot BW/MSS = 72\) round trips, which fits the figure. So each Fig. 5 flow ran about one and a half sawtooths.</p>
+      <details class="deriv"><summary>Derivation · the cycle from Mathis et al.'s sawtooth</summary>
+        <p>A sawtooth from \(W/2\) to \(W\) grows one packet per round trip, so it lasts \(W/2\) round trips and carries \(\tfrac38 W^2\) packets (Mathis et al. p. 68). Its average rate is \(\tfrac38 W^2 / (\tfrac{W}{2} \cdot RTT) = \tfrac34 W/RTT\) packets per second. Set that equal to the link, \(BW/MSS\), so \(W = \tfrac43\, BW \cdot RTT / MSS\), and the cycle is \(\tfrac{W}{2}\, RTT = \tfrac23\, RTT^2 BW / MSS\). With \(BW \cdot RTT/MSS = 108.5\) packets, that is 72.3 round trips. The footnote's version drops the \(\tfrac23\); it equals the simpler bound \(BW = MSS/(RTT\sqrt p)\) with one loss per cycle of \(1/p\) packets.</p>
+      </details>
+
+      <h3 class="strand" id="s-late-signal">No queue, then too much</h3>
+      <p>Paced traffic keeps the bottleneck queue near empty until the windows add up to more than the pipe, so a loss-driven sender's first signal comes when it is already overloading the link, and in slow start it keeps doubling while the loss travels back (PDF pp. 3–6). That is the <b>late congestion signal</b>.</p>
+      <p>In Fig. 1 (PDF p. 3), perfectly spaced arrivals see no queueing until the load reaches capacity: the queueing-maths chapter's <a href="index.html#g-operating-point">operating point</a>, pipe full and nothing queued, where <a href="index.html#g-kleinrock-power">Kleinrock's power</a> peaks. Pacing puts traffic right there, where a loss-driven sender hears nothing: feedback "is delayed until the network is saturated" (PDF p. 4).</p>
+      <p>On the spine, pipe 1,250 plus buffer 312 is 1,562 packets. Paced, nobody loses before the sum of windows passes 1,562, and one more doubling gives \(2 \times 1{,}562 = 3{,}124\); Fig. 8 shows about 3,300 (PDF p. 6). Reno's sum peaks near 2,400, because some flows hit each other's bursts early and backed off.</p>
+      <p>On the bench, eight flows started together (pipe plus buffer 106), and the late signal shows as a clock time: the first flow entered recovery 0.183 s after the start unpaced and 0.244 s paced by fq, in all five runs of each. By then the paced sum of windows was 188, against 157.</p>
+      <p>The remedy follows from the cause (PDF p. 8): with pacing, "even a small queue size should be interpreted as congestion". <a href="index.html#g-red">RED</a> worked best with a low minimum threshold (5 packets), a high maximum and a low top drop probability (Fig. 16). <a href="index.html#g-codel">CoDel</a>'s 5 ms <a href="index.html#g-target">target</a> is a rule of the same shape.</p>
+      <p class="since"><b>Since the paper.</b> BLUE, the paper's other suggestion, is in Linux as its per-flow variant <code>sch_sfb</code>, whose header cites the paper's [9] (<code>net/sched/sch_sfb.c:8–12</code>). The chapter where the sender models the path (chapter 10) takes the other way out: a sender that measures the pipe can stop where Fig. 1 is still flat.</p>
+
+      <h3 class="strand" id="s-synchronized-drops">Mixed packets, shared losses</h3>
+      <p>Through one drop-tail FIFO, paced flows lose together. Their packets are mixed, so an overflow catches a packet from every flow and every flow halves; Reno's clusters lose a few flows at a time (PDF pp. 5–6). In steady state the paper finds the opposite, <b>desynchronization</b>: pacing randomizes who loses, so the flows drift out of step (PDF p. 6).</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch06-sync-->
+<svg viewBox="0 0 720 538" role="img" aria-label="Eight Reno flows started together through a 10 Mbit/s bottleneck with a 21-packet buffer: the sum of their windows, and when each flow entered recovery, unpaced and paced by fq" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="224.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="172.5" y2="172.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="176.5" text-anchor="end" fill="#898781">50</text>
+<line x1="58" x2="570" y1="125.0" y2="125.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="129.0" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="77.5" y2="77.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="81.5" text-anchor="end" fill="#898781">150</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">200</text>
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="125.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 125.0)">sum of 8 windows (pkts)</text>
+<line x1="58" x2="570" y1="139.2" y2="139.2" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="143.2" fill="#898781">pipe 85</text>
+<line x1="58" x2="570" y1="119.3" y2="119.3" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="123.3" fill="#898781">pipe + buffer 106</text>
+<polyline points="58.0,212.4 58.9,212.4 59.8,212.4 60.6,212.4 61.5,211.4 62.4,204.8 63.2,204.8 64.1,204.8 65.0,203.8 65.9,189.6 66.7,189.6 67.6,189.6 68.4,188.7 69.3,167.8 70.1,159.2 71.1,159.2 71.9,157.3 72.8,137.3 73.6,123.1 74.5,127.9 75.4,126.0 76.3,105.0 77.1,94.6 78.0,116.4 78.8,114.5 79.7,93.6 80.6,82.2 81.5,99.3 82.3,97.5 83.2,78.4 84.0,69.9 84.9,85.1 85.7,87.0 86.7,89.8 87.5,114.5 88.4,114.5 89.2,114.5 90.1,118.3 90.9,116.4 91.9,116.4 92.7,123.1 93.6,129.8 94.4,137.3 95.3,146.8 96.2,158.2 97.1,156.3 97.9,153.5 98.8,152.6 99.6,152.6 100.5,149.7 101.4,147.8 102.3,147.8 103.1,147.8 104.0,145.9 104.8,143.1 105.7,141.2 106.6,141.2 107.5,140.2 108.3,137.3 109.2,133.6 110.1,133.6 110.9,132.6 111.8,129.8 112.7,126.9 113.6,126.0 114.4,125.0 115.3,123.1 116.2,121.2 117.1,118.3 117.9,118.3 118.8,117.4 119.6,115.5 120.5,113.6 121.4,110.8 122.3,110.8 123.1,109.8 124.0,113.6 124.8,114.5 125.8,126.9 126.6,135.4 127.5,141.2 128.3,150.7 129.2,155.4 130.0,155.4 131.0,154.4 131.8,152.6 132.7,150.7 133.5,149.7 134.4,147.8 135.2,146.8 136.1,144.0 137.0,143.1 137.9,141.2 138.7,139.2 139.6,137.3 140.4,136.4 141.3,134.5 142.2,132.6 143.1,129.8 143.9,128.8 144.8,127.9 145.6,125.0 146.5,122.1 147.3,121.2 148.3,120.2 149.1,119.3 150.0,117.4 150.8,114.5 151.7,113.6 152.5,112.7 153.5,110.8 154.3,111.7 155.2,115.5 156.0,125.0 156.9,124.0 157.8,123.1 158.6,136.4 159.5,139.2 160.4,148.8 161.3,161.1 162.1,164.9 163.0,163.9 163.8,162.1 164.8,161.1 165.6,157.3 166.5,156.3 167.3,155.4 168.2,154.4 169.0,152.6 169.9,151.6 170.7,149.7 171.7,148.8 172.5,146.8 173.4,144.0 174.2,142.1 175.1,141.2 175.9,139.2 176.8,136.4 177.6,134.5 178.6,134.5 179.4,131.6 180.3,129.8 181.1,127.9 182.0,126.9 182.8,125.0 183.7,123.1 184.5,121.2 185.5,119.3 186.3,118.3 187.2,116.4 188.0,114.5 188.9,113.6 189.8,116.4 190.6,117.4 191.5,115.5 192.4,113.6 193.3,111.7 194.1,117.4 195.0,116.4 195.8,117.4 196.7,122.1 197.5,134.5 198.4,132.6 199.3,133.6 200.2,145.9 201.0,145.9 201.9,144.0 202.7,144.0 203.6,142.1 204.4,139.2 205.4,136.4 206.2,136.4 207.1,135.4 207.9,134.5 208.8,130.7 209.6,130.7 210.6,127.9 211.4,127.9 212.3,126.9 213.1,126.0 214.0,124.0 214.8,121.2 215.7,120.2 216.5,118.3 217.4,118.3 218.3,115.5 219.2,112.7 220.0,112.7 220.9,110.8 221.8,110.8 222.6,110.8 223.5,114.5 224.3,117.4 225.2,115.5 226.1,126.9 227.0,133.6 227.8,135.4 228.7,144.0 229.5,144.9 230.4,144.0 231.2,141.2 232.1,140.2 233.0,139.2 233.9,137.3 234.7,136.4 235.6,135.4 236.4,134.5 237.3,132.6 238.1,129.8 239.0,127.9 239.8,126.9 240.8,126.0 241.6,122.1 242.5,121.2 243.3,120.2 244.2,118.3 245.1,117.4 245.9,115.5 246.8,113.6 247.6,112.7 248.5,110.8 249.4,109.8 250.3,107.9 251.1,112.7 252.0,123.1 252.8,128.8 253.7,133.6 254.6,141.2 255.5,146.8 256.3,151.6 257.2,158.2 258.0,157.3 258.9,156.3 259.7,155.4 260.7,153.5 261.5,151.6 262.4,148.8 263.2,147.8 264.1,145.9 264.9,144.0 265.9,141.2 266.7,141.2 267.6,138.3 268.4,137.3 269.3,135.4 270.1,134.5 271.1,131.6 271.9,129.8 272.8,128.8 273.6,126.9 274.5,125.0 275.4,123.1 276.3,122.1 277.1,119.3 278.0,118.3 278.8,116.4 279.7,115.5 280.5,113.6 281.4,111.7 282.3,110.8 283.2,109.8 284.0,110.8 284.9,109.8 285.8,118.3 286.6,126.0 287.5,131.6 288.4,130.7 289.3,130.7 290.1,131.6 291.0,132.6 291.8,141.2 292.7,147.8 293.6,146.8 294.5,144.9 295.3,144.0 296.2,141.2 297.0,140.2 297.9,139.2 298.7,137.3 299.7,136.4 300.5,135.4 301.4,134.5 302.2,130.7 303.1,128.8 303.9,127.9 304.8,126.9 305.7,124.0 306.6,121.2 307.4,121.2 308.3,119.3 309.1,117.4 310.0,115.5 310.9,113.6 311.8,112.7 312.6,111.7 313.5,110.8 314.3,111.7 315.2,116.4 316.1,125.0 317.0,129.8 317.8,129.8 318.7,138.3 319.5,137.3 320.4,136.4 321.3,136.4 322.2,135.4 323.0,132.6 323.9,129.8 324.8,129.8 325.6,127.9 326.5,126.0 327.4,124.0 328.3,122.1 329.1,121.2 330.0,120.2 330.8,119.3 331.7,117.4 332.6,116.4 333.5,113.6 334.3,112.7 335.2,111.7 336.0,109.8 336.9,115.5 337.8,113.6 338.7,115.5 339.5,121.2 340.4,127.9 341.2,130.7 342.1,134.5 342.9,140.2 343.8,149.7 344.6,147.8 345.6,145.9 346.4,145.9 347.3,145.9 348.1,144.0 349.0,143.1 349.8,141.2 350.7,139.2 351.5,137.3 352.5,136.4 353.3,133.6 354.2,131.6 355.0,129.8 355.9,128.8 356.8,126.0 357.6,125.0 358.5,123.1 359.4,121.2 360.3,120.2 361.1,118.3 362.0,116.4 362.8,114.5 363.7,113.6 364.6,112.7 365.5,110.8 366.3,110.8 367.2,112.7 368.0,111.7 369.0,113.6 369.8,118.3 370.7,130.7 371.5,142.1 372.5,154.4 373.3,163.0 374.2,162.1 375.0,162.1 375.9,162.1 376.7,160.2 377.6,158.2 378.5,156.3 379.4,156.3 380.2,155.4 381.1,152.6 381.9,150.7 382.9,150.7 383.7,147.8 384.6,145.9 385.4,143.1 386.3,143.1 387.1,140.2 388.1,138.3 388.9,137.3 389.8,136.4 390.6,133.6 391.6,132.6 392.4,129.8 393.3,128.8 394.1,126.0 395.0,126.0 395.8,123.1 396.7,121.2 397.6,120.2 398.5,118.3 399.3,116.4 400.2,114.5 401.0,113.6 401.9,112.7 402.8,110.8 403.7,108.9 404.5,114.5 405.4,125.0 406.2,123.1 407.1,123.1 408.0,132.6 408.9,134.5 409.7,142.1 410.6,145.9 411.5,145.9 412.3,143.1 413.2,142.1 414.1,140.2 414.9,139.2 415.8,137.3 416.7,136.4 417.5,134.5 418.4,132.6 419.2,131.6 420.2,129.8 421.0,127.9 421.9,126.9 422.7,124.0 423.6,122.1 424.4,121.2 425.4,119.3 426.2,118.3 427.1,116.4 427.9,114.5 428.8,113.6 429.6,111.7 430.5,114.5 431.4,116.4 432.3,115.5 433.1,117.4 434.0,123.1 434.8,132.6 435.7,135.4 436.5,144.0 437.4,149.7 438.3,150.7 439.2,148.8 440.0,146.8 440.9,145.9 441.7,143.1 442.7,142.1 443.5,142.1 444.4,141.2 445.2,138.3 446.1,137.3 446.9,135.4 447.8,134.5 448.7,132.6 449.6,129.8 450.4,127.9 451.3,127.9 452.2,126.0 453.0,123.1 453.9,121.2 454.7,120.2 455.6,119.3 456.5,116.4 457.4,114.5 458.2,113.6 459.1,112.7 459.9,111.7 460.8,113.6 461.6,113.6 462.6,115.5 463.4,117.4 464.3,119.3 465.1,123.1 466.0,126.0 466.8,128.8 467.8,128.8 468.6,128.8 469.5,127.9 470.3,126.9 471.2,130.7 472.0,133.6 472.9,131.6 473.8,130.7 474.7,127.9 475.5,126.0 476.4,125.0 477.2,123.1 478.1,122.1 478.9,120.2 479.8,119.3 480.7,117.4 481.6,116.4 482.4,115.5 483.3,113.6 484.2,112.7 485.0,110.8 485.9,109.8 486.8,110.8 487.7,113.6 488.5,119.3 489.4,127.9 490.2,135.4 491.1,149.7 492.0,152.6 492.9,157.3 493.7,157.3 494.6,156.3 495.4,155.4 496.3,153.5 497.1,151.6 498.1,150.7 498.9,148.8 499.8,147.8 500.6,145.9 501.5,145.9 502.3,144.0 503.3,143.1 504.1,140.2 505.0,139.2 505.8,138.3 506.7,135.4 507.6,133.6 508.5,131.6 509.3,130.7 510.2,128.8 511.0,126.9 511.9,124.0 512.7,124.0 513.7,121.2 514.5,120.2 515.4,118.3 516.2,116.4 517.1,115.5 517.9,113.6 518.9,112.7 519.7,113.6 520.6,116.4 521.4,115.5 522.3,116.4 523.2,123.1 524.0,125.0 524.9,133.6 525.7,135.4 526.7,138.3 527.5,145.9 528.4,145.9 529.2,144.9 530.1,143.1 530.9,141.2 531.8,138.3 532.6,137.3 533.5,136.4 534.4,134.5 535.3,132.6 536.1,130.7 537.0,129.8 537.8,128.8 538.7,126.0 539.6,125.0 540.5,124.0 541.3,122.1 542.2,120.2 543.0,118.3 544.0,116.4 544.8,115.5 545.7,113.6 546.5,111.7 547.4,109.8 548.2,109.8 549.2,120.2 550.0,118.3 550.9,117.4 551.7,122.1 552.6,129.8 553.5,138.3 554.4,143.1 555.2,152.6 556.1,157.3 556.9,155.4 557.8,154.4 558.7,153.5 559.5,150.7 560.4,149.7 561.3,148.8 562.1,147.8 563.0,146.8 563.9,143.1 564.7,141.2 565.6,140.2 566.4,140.2 567.4,137.3 568.2,135.4 569.1,133.6 569.9,132.6" fill="none" stroke="#eb6834" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="161.1" y2="161.1" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="165.1" fill="#1b1f24">unpaced (pfifo)</text>
+<polyline points="58.0,212.4 58.9,212.4 59.7,212.4 60.6,212.4 61.5,211.4 62.4,204.8 63.2,204.8 64.1,204.8 65.0,203.8 65.9,189.6 66.7,189.6 67.6,189.6 68.4,188.7 69.3,167.8 70.2,159.2 71.1,159.2 71.9,158.2 72.8,137.3 73.6,117.4 74.5,98.4 75.4,97.5 76.3,79.4 77.1,58.5 78.0,43.3 78.8,48.0 79.7,71.8 80.6,91.8 81.5,119.3 82.3,126.9 83.2,128.8 84.0,128.8 84.9,126.9 85.7,126.9 86.7,126.9 87.5,126.9 88.4,129.8 89.2,136.4 90.1,144.0 90.9,148.8 91.9,155.4 92.7,156.3 93.6,155.4 94.4,154.4 95.3,151.6 96.1,149.7 97.0,148.8 97.9,146.8 98.8,146.8 99.6,144.9 100.5,142.1 101.3,139.2 102.2,139.2 103.1,139.2 103.9,135.4 104.8,133.6 105.7,131.6 106.6,131.6 107.4,128.8 108.3,126.9 109.1,124.0 110.0,124.0 110.8,124.0 111.8,121.2 112.6,119.3 113.5,116.4 114.3,116.4 115.2,116.4 116.0,112.7 117.0,111.7 117.8,111.7 118.7,115.5 119.5,119.3 120.4,121.2 121.2,123.1 122.1,127.9 123.0,132.6 123.9,135.4 124.7,134.5 125.6,136.4 126.4,134.5 127.3,134.5 128.1,133.6 129.1,129.8 129.9,128.8 130.8,126.9 131.6,126.9 132.5,125.0 133.3,124.0 134.3,121.2 135.1,119.3 136.0,118.3 136.8,117.4 137.7,114.5 138.6,113.6 139.4,111.7 140.3,111.7 141.2,112.7 142.1,116.4 142.9,118.3 143.8,126.0 144.6,135.4 145.5,143.1 146.3,144.9 147.3,144.9 148.1,144.0 149.0,144.0 149.8,143.1 150.7,142.1 151.5,138.3 152.5,138.3 153.3,137.3 154.2,135.4 155.0,132.6 155.9,130.7 156.7,129.8 157.7,127.9 158.5,126.9 159.4,124.0 160.2,123.1 161.1,122.1 161.9,121.2 162.9,119.3 163.7,115.5 164.6,114.5 165.4,114.5 166.3,113.6 167.1,111.7 168.1,108.9 168.9,111.7 169.8,114.5 170.6,121.2 171.5,126.9 172.3,128.8 173.3,140.2 174.1,143.1 175.0,143.1 175.8,140.2 176.7,139.2 177.6,138.3 178.5,138.3 179.3,136.4 180.2,134.5 181.1,132.6 181.9,130.7 182.8,129.8 183.7,128.8 184.5,126.0 185.4,124.0 186.3,123.1 187.1,122.1 188.0,120.2 188.9,118.3 189.8,115.5 190.6,114.5 191.5,114.5 192.3,112.7 193.3,110.8 194.1,108.9 195.0,113.6 195.8,119.3 196.7,129.8 197.6,141.2 198.5,143.1 199.3,145.9 200.2,149.7 201.0,149.7 202.0,150.7 202.8,149.7 203.7,147.8 204.5,146.8 205.4,145.9 206.2,143.1 207.1,141.2 208.0,140.2 208.9,139.2 209.7,136.4 210.6,135.4 211.4,132.6 212.4,132.6 213.2,130.7 214.1,129.8 214.9,126.9 215.8,125.0 216.6,124.0 217.5,122.1 218.4,120.2 219.3,118.3 220.1,117.4 221.0,116.4 221.8,114.5 222.7,113.6 223.5,110.8 224.5,109.8 225.3,109.8 226.2,115.5 227.0,121.2 227.9,122.1 228.8,124.0 229.7,130.7 230.5,131.6 231.4,136.4 232.3,137.3 233.1,136.4 234.0,134.5 234.8,134.5 235.7,131.6 236.6,130.7 237.5,127.9 238.3,126.9 239.2,126.0 240.0,124.0 241.0,122.1 241.8,120.2 242.7,119.3 243.5,118.3 244.4,117.4 245.2,114.5 246.1,112.7 247.0,111.7 247.9,110.8 248.7,109.8 249.6,109.8 250.4,112.7 251.4,122.1 252.2,128.8 253.1,135.4 253.9,138.3 254.8,138.3 255.6,142.1 256.6,141.2 257.4,140.2 258.3,137.3 259.1,135.4 260.0,134.5 260.8,134.5 261.7,131.6 262.6,129.8 263.5,128.8 264.3,127.9 265.2,125.0 266.0,123.1 266.9,123.1 267.7,121.2 268.7,118.3 269.5,117.4 270.4,115.5 271.2,115.5 272.1,113.6 273.0,111.7 273.9,109.8 274.7,112.7 275.6,116.4 276.5,125.0 277.3,128.8 278.2,133.6 279.1,134.5 280.0,136.4 280.8,134.5 281.7,134.5 282.5,131.6 283.4,130.7 284.3,128.8 285.2,126.9 286.0,126.9 286.9,125.0 287.8,124.0 288.7,122.1 289.5,119.3 290.4,118.3 291.2,117.4 292.1,116.4 292.9,113.6 293.8,112.7 294.6,111.7 295.6,110.8 296.4,112.7 297.3,116.4 298.1,122.1 299.0,126.0 299.8,128.8 300.8,133.6 301.6,134.5 302.5,133.6 303.3,132.6 304.2,132.6 305.0,129.8 305.9,127.9 306.8,126.0 307.7,125.0 308.5,125.0 309.4,124.0 310.2,121.2 311.1,119.3 312.0,118.3 312.9,117.4 313.7,115.5 314.6,113.6 315.5,111.7 316.3,109.8 317.2,109.8 318.1,111.7 318.9,110.8 319.8,119.3 320.7,127.9 321.5,138.3 322.4,142.1 323.3,147.8 324.2,146.8 325.0,145.9 325.9,145.9 326.7,144.9 327.7,142.1 328.5,139.2 329.4,138.3 330.2,137.3 331.1,136.4 331.9,135.4 332.8,131.6 333.7,130.7 334.6,129.8 335.4,127.9 336.3,125.0 337.1,123.1 338.1,122.1 338.9,121.2 339.8,119.3 340.6,118.3 341.5,116.4 342.3,114.5 343.2,113.6 344.1,112.7 345.0,111.7 345.8,110.8 346.7,112.7 347.5,117.4 348.4,122.1 349.3,126.9 350.2,133.6 351.0,143.1 351.9,146.8 352.7,151.6 353.6,155.4 354.5,153.5 355.4,153.5 356.2,151.6 357.1,149.7 357.9,147.8 358.9,146.8 359.7,145.9 360.6,144.0 361.4,143.1 362.3,140.2 363.2,139.2 364.0,136.4 364.9,135.4 365.8,133.6 366.7,132.6 367.5,130.7 368.4,128.8 369.2,126.9 370.1,125.0 371.0,124.0 371.9,122.1 372.7,121.2 373.6,118.3 374.4,117.4 375.3,116.4 376.1,114.5 377.1,113.6 377.9,112.7 378.8,109.8 379.6,113.6 380.5,114.5 381.3,119.3 382.2,121.2 383.0,126.0 383.9,131.6 384.8,134.5 385.7,137.3 386.5,136.4 387.4,140.2 388.2,139.2 389.1,138.3 389.9,136.4 390.8,135.4 391.7,131.6 392.6,130.7 393.4,129.8 394.3,127.9 395.2,126.0 396.0,125.0 396.9,123.1 397.7,123.1 398.6,121.2 399.5,118.3 400.4,117.4 401.2,115.5 402.1,114.5 402.9,113.6 403.8,110.8 404.6,110.8 405.6,109.8 406.4,111.7 407.3,112.7 408.1,117.4 409.0,124.0 409.8,127.9 410.7,128.8 411.6,129.8 412.5,131.6 413.3,133.6 414.2,134.5 415.0,131.6 415.9,131.6 416.7,129.8 417.7,129.8 418.5,125.0 419.4,124.0 420.2,123.1 421.1,122.1 421.9,121.2 422.8,119.3 423.7,117.4 424.6,115.5 425.4,114.5 426.3,113.6 427.2,112.7 428.0,110.8 428.9,113.6 429.7,113.6 430.7,115.5 431.5,120.2 432.4,122.1 433.2,127.9 434.1,129.8 434.9,129.8 435.8,129.8 436.7,127.9 437.6,127.9 438.4,126.0 439.3,125.0 440.1,123.1 441.0,122.1 441.8,120.2 442.8,118.3 443.6,118.3 444.5,116.4 445.3,113.6 446.2,112.7 447.0,110.8 447.9,110.8 448.7,108.9 449.6,107.0 450.5,116.4 451.4,121.2 452.2,127.9 453.1,130.7 453.9,132.6 454.8,140.2 455.7,144.0 456.5,142.1 457.4,141.2 458.3,139.2 459.2,138.3 460.0,138.3 460.9,136.4 461.7,133.6 462.6,130.7 463.4,130.7 464.3,129.8 465.2,126.0 466.1,124.0 466.9,124.0 467.8,123.1 468.6,121.2 469.5,119.3 470.4,117.4 471.3,116.4 472.1,115.5 473.0,114.5 473.8,110.8 474.7,110.8 475.5,112.7 476.5,115.5 477.3,118.3 478.2,128.8 479.0,138.3 479.9,145.9 480.7,149.7 481.6,150.7 482.5,149.7 483.4,149.7 484.2,149.7 485.1,147.8 485.9,145.9 486.8,144.0 487.7,142.1 488.6,142.1 489.4,139.2 490.3,136.4 491.2,135.4 492.0,134.5 492.9,131.6 493.8,130.7 494.7,128.8 495.5,127.9 496.4,126.0 497.2,124.0 498.1,122.1 499.0,120.2 499.9,119.3 500.7,118.3 501.6,116.4 502.4,115.5 503.3,113.6 504.1,111.7 505.1,110.8 505.9,108.9 506.8,114.5 507.6,116.4 508.5,120.2 509.3,123.1 510.2,130.7 511.1,133.6 512.0,138.3 512.8,144.9 513.7,145.9 514.5,144.0 515.4,143.1 516.3,143.1 517.2,141.2 518.0,138.3 518.9,138.3 519.7,135.4 520.6,134.5 521.5,133.6 522.4,131.6 523.2,127.9 524.1,127.9 524.9,126.9 525.8,126.0 526.7,122.1 527.6,120.2 528.4,119.3 529.3,119.3 530.1,118.3 531.0,114.5 531.9,112.7 532.8,111.7 533.6,111.7 534.5,110.8 535.4,113.6 536.2,115.5 537.1,118.3 538.0,122.1 538.9,123.1 539.7,126.0 540.6,127.9 541.5,128.8 542.4,130.7 543.2,129.8 544.1,126.9 544.9,126.0 545.8,124.0 546.6,123.1 547.6,121.2 548.4,120.2 549.3,118.3 550.1,117.4 551.0,115.5 551.8,114.5 552.7,113.6 553.5,110.8 554.4,109.8 555.3,111.7 556.2,114.5 557.0,122.1 557.9,129.8 558.7,137.3 559.6,144.0 560.4,146.8 561.3,146.8 562.1,146.8 563.0,145.9 563.9,143.1 564.8,141.2 565.6,140.2 566.5,139.2 567.4,137.3 568.2,134.5 569.1,133.6 570.0,133.6" fill="none" stroke="#2a78d6" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="98.4" y2="98.4" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="102.4" fill="#1b1f24">paced by fq</text>
+<text x="83.6" y="39.5" fill="#4a5560" text-anchor="start">fq-paced peak 188</text>
+<text x="93.8" y="77.5" fill="#4a5560" text-anchor="start">unpaced peak 157</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">unpaced: pfifo on s0, nothing paces</text>
+<line x1="337" x2="351" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="356" y="22" fill="#1b1f24">paced: fq on s0</text>
+<line x1="58" x2="570" y1="349.4" y2="349.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="353.4" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="274.6" y2="274.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="278.6" text-anchor="end" fill="#898781">7</text>
+<line x1="58" x2="570" y1="358.0" y2="358.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="312.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 312.0)">unpaced: flow</text>
+<circle cx="80.6" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="92.7" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="160.4" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="189.8" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="228.7" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.1" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="339.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="366.3" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="430.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="464.3" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="549.2" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="124.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="161.3" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="223.5" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.8" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="286.6" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="317.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="340.4" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="370.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.5" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="489.4" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="519.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="551.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.0" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="125.8" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="154.3" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="199.3" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.0" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="253.7" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="336.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="367.2" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.5" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="431.4" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.6" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="485.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="524.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="74.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="94.4" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="129.2" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="158.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="194.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="223.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="253.7" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="286.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="371.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="405.4" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="491.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="520.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="552.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.0" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="125.8" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="155.2" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="197.5" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="254.6" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="291.8" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="315.2" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="373.3" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="434.0" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="487.7" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="522.3" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="552.6" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="73.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="124.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="158.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="200.2" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="222.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="254.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="284.0" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="316.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="337.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="372.5" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="407.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="463.4" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="486.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="520.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="551.7" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="74.5" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="94.4" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="155.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="194.1" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="225.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="291.0" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="314.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="338.7" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="366.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="408.0" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="471.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="548.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="77.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="90.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="127.5" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="157.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.0" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="285.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="316.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="343.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="370.7" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="408.0" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="432.3" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="460.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="490.2" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="523.2" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="553.5" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="254" r="4" fill="#eb6834"/>
+<text x="85" y="258" fill="#1b1f24">a flow enters recovery (unpaced)</text>
+<line x1="58" x2="570" y1="487.4" y2="487.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="491.4" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="412.6" y2="412.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="416.6" text-anchor="end" fill="#898781">7</text>
+<line x1="58" x2="570" y1="496.0" y2="496.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="450.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 450.0)">fq-paced: flow</text>
+<circle cx="78.8" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="88.4" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.7" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="143.8" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="173.3" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="276.5" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="297.3" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.2" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="430.7" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="450.5" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="557.0" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="141.2" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.8" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="225.3" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="298.1" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="321.5" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="347.5" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="406.4" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="428.9" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="479.0" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="506.8" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.1" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.0" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="226.2" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="298.1" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="383.0" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="411.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="451.4" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="476.5" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="507.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="540.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="559.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="142.1" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="171.5" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="249.6" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.8" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="452.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="478.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="510.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="555.3" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.8" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.1" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="168.9" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="229.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="346.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="379.6" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="409.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="478.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="512.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="538.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="558.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="117.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="145.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="196.7" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="274.7" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="318.1" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="345.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="381.3" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="450.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="475.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="510.2" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="80.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="119.5" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="170.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.8" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.9" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="296.4" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="318.1" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="351.0" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="379.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="406.4" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.2" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="506.8" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="537.1" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="555.3" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="142.9" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="168.9" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="200.2" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.0" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="274.7" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.8" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="347.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="384.8" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="407.3" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="431.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="475.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="535.4" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="557.0" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="392" r="4" fill="#2a78d6"/>
+<text x="85" y="396" fill="#1b1f24">a flow enters recovery (fq-paced)</text>
+<text x="58.0" y="512.0" text-anchor="middle" fill="#898781">0</text>
+<text x="143.3" y="512.0" text-anchor="middle" fill="#898781">1</text>
+<text x="228.7" y="512.0" text-anchor="middle" fill="#898781">2</text>
+<text x="314.0" y="512.0" text-anchor="middle" fill="#898781">3</text>
+<text x="399.3" y="512.0" text-anchor="middle" fill="#898781">4</text>
+<text x="484.7" y="512.0" text-anchor="middle" fill="#898781">5</text>
+<text x="570.0" y="512.0" text-anchor="middle" fill="#898781">6</text>
+<text x="314.0" y="530.0" text-anchor="middle" fill="#4a5560">seconds since the eight flows started together</text>
+<g class="hit"><title>t = 0.00 s · sum of windows: unpaced 8, fq-paced 8 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="58.0" y="30" width="2.1" height="466.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.05 s · sum of windows: unpaced 16, fq-paced 16 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="60.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="62.3" x2="62.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.10 s · sum of windows: unpaced 32, fq-paced 32 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="64.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="66.5" x2="66.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.15 s · sum of windows: unpaced 64, fq-paced 64 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="68.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="70.8" x2="70.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.20 s · sum of windows: unpaced 99, fq-paced 129 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="72.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="75.1" x2="75.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.25 s · sum of windows: unpaced 133, fq-paced 156 packets · flows entering recovery: unpaced 3, fq-paced 8</title><rect x="77.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="79.3" x2="79.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.30 s · sum of windows: unpaced 158, fq-paced 96 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="81.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="83.6" x2="83.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.35 s · sum of windows: unpaced 111, fq-paced 98 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="85.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="87.9" x2="87.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.40 s · sum of windows: unpaced 109, fq-paced 68 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="90.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="92.1" x2="92.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.45 s · sum of windows: unpaced 65, fq-paced 74 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="94.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="96.4" x2="96.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.50 s · sum of windows: unpaced 74, fq-paced 82 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="98.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="100.7" x2="100.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.55 s · sum of windows: unpaced 81, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="102.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="104.9" x2="104.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.60 s · sum of windows: unpaced 91, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="107.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="109.2" x2="109.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.65 s · sum of windows: unpaced 99, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="111.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="113.5" x2="113.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.70 s · sum of windows: unpaced 107, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="115.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="117.7" x2="117.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.75 s · sum of windows: unpaced 115, fq-paced 97 packets · flows entering recovery: unpaced 2, fq-paced 2</title><rect x="119.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="122.0" x2="122.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.80 s · sum of windows: unpaced 89, fq-paced 90 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="124.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="126.3" x2="126.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.85 s · sum of windows: unpaced 69, fq-paced 98 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="128.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="130.5" x2="130.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.90 s · sum of windows: unpaced 76, fq-paced 106 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="132.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="134.8" x2="134.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.95 s · sum of windows: unpaced 85, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="136.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="139.1" x2="139.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.00 s · sum of windows: unpaced 95, fq-paced 99 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="141.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="143.3" x2="143.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.05 s · sum of windows: unpaced 104, fq-paced 79 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="145.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="147.6" x2="147.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.10 s · sum of windows: unpaced 112, fq-paced 86 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="149.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="151.9" x2="151.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.15 s · sum of windows: unpaced 100, fq-paced 94 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="154.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="156.1" x2="156.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.20 s · sum of windows: unpaced 75, fq-paced 102 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="158.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="160.4" x2="160.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.25 s · sum of windows: unpaced 62, fq-paced 111 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="162.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="164.7" x2="164.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.30 s · sum of windows: unpaced 71, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="166.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="168.9" x2="168.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.35 s · sum of windows: unpaced 80, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="171.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="173.2" x2="173.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.40 s · sum of windows: unpaced 90, fq-paced 86 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="175.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="177.5" x2="177.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.45 s · sum of windows: unpaced 98, fq-paced 94 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="179.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="181.7" x2="181.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.50 s · sum of windows: unpaced 107, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="183.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="186.0" x2="186.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.55 s · sum of windows: unpaced 108, fq-paced 111 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="188.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="190.3" x2="190.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.60 s · sum of windows: unpaced 109, fq-paced 112 packets · flows entering recovery: unpaced 2, fq-paced 4</title><rect x="192.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="194.5" x2="194.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.65 s · sum of windows: unpaced 92, fq-paced 81 packets · flows entering recovery: unpaced 3, fq-paced 1</title><rect x="196.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="198.8" x2="198.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.70 s · sum of windows: unpaced 80, fq-paced 74 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="200.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="203.1" x2="203.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.75 s · sum of windows: unpaced 89, fq-paced 83 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="205.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="207.3" x2="207.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.80 s · sum of windows: unpaced 97, fq-paced 92 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="209.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="211.6" x2="211.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.85 s · sum of windows: unpaced 105, fq-paced 100 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="213.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="215.9" x2="215.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.90 s · sum of windows: unpaced 113, fq-paced 108 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="218.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="220.1" x2="220.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.95 s · sum of windows: unpaced 108, fq-paced 116 packets · flows entering recovery: unpaced 4, fq-paced 2</title><rect x="222.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="224.4" x2="224.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.00 s · sum of windows: unpaced 80, fq-paced 101 packets · flows entering recovery: unpaced 2, fq-paced 3</title><rect x="226.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="228.7" x2="228.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.05 s · sum of windows: unpaced 85, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="230.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="232.9" x2="232.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.10 s · sum of windows: unpaced 92, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="235.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="237.2" x2="237.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.15 s · sum of windows: unpaced 103, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="239.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="241.5" x2="241.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.20 s · sum of windows: unpaced 110, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="243.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="245.7" x2="245.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.25 s · sum of windows: unpaced 118, fq-paced 116 packets · flows entering recovery: unpaced 2, fq-paced 4</title><rect x="247.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="250.0" x2="250.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.30 s · sum of windows: unpaced 83, fq-paced 86 packets · flows entering recovery: unpaced 5, fq-paced 1</title><rect x="252.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="254.3" x2="254.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.35 s · sum of windows: unpaced 67, fq-paced 87 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="256.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="258.5" x2="258.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.40 s · sum of windows: unpaced 76, fq-paced 95 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="260.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="262.8" x2="262.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.45 s · sum of windows: unpaced 83, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="264.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="267.1" x2="267.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.50 s · sum of windows: unpaced 93, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="269.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="271.3" x2="271.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.55 s · sum of windows: unpaced 102, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="273.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="275.6" x2="275.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.60 s · sum of windows: unpaced 110, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="277.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="279.9" x2="279.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.65 s · sum of windows: unpaced 115, fq-paced 96 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="282.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="284.1" x2="284.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.70 s · sum of windows: unpaced 94, fq-paced 103 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="286.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="288.4" x2="288.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.75 s · sum of windows: unpaced 76, fq-paced 112 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="290.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="292.7" x2="292.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.80 s · sum of windows: unpaced 84, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="294.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="296.9" x2="296.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.85 s · sum of windows: unpaced 90, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="299.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="301.2" x2="301.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.90 s · sum of windows: unpaced 101, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="303.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="305.5" x2="305.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.95 s · sum of windows: unpaced 110, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="307.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="309.7" x2="309.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.00 s · sum of windows: unpaced 114, fq-paced 110 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="311.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="314.0" x2="314.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.05 s · sum of windows: unpaced 86, fq-paced 114 packets · flows entering recovery: unpaced 1, fq-paced 4</title><rect x="316.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="318.3" x2="318.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.10 s · sum of windows: unpaced 89, fq-paced 82 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="320.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="322.5" x2="322.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.15 s · sum of windows: unpaced 99, fq-paced 79 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="324.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="326.8" x2="326.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.20 s · sum of windows: unpaced 106, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="328.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="331.1" x2="331.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.25 s · sum of windows: unpaced 114, fq-paced 97 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="333.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="335.3" x2="335.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.30 s · sum of windows: unpaced 104, fq-paced 106 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="337.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="339.6" x2="339.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.35 s · sum of windows: unpaced 74, fq-paced 113 packets · flows entering recovery: unpaced 1, fq-paced 1</title><rect x="341.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="343.9" x2="343.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.40 s · sum of windows: unpaced 80, fq-paced 103 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="346.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="348.1" x2="348.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.45 s · sum of windows: unpaced 88, fq-paced 72 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="350.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="352.4" x2="352.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.50 s · sum of windows: unpaced 99, fq-paced 72 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="354.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="356.7" x2="356.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.55 s · sum of windows: unpaced 107, fq-paced 80 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="358.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="360.9" x2="360.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.60 s · sum of windows: unpaced 115, fq-paced 89 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="363.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="365.2" x2="365.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.65 s · sum of windows: unpaced 107, fq-paced 98 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="367.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="369.5" x2="369.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.70 s · sum of windows: unpaced 61, fq-paced 107 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="371.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="373.7" x2="373.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.75 s · sum of windows: unpaced 65, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="375.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="378.0" x2="378.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.80 s · sum of windows: unpaced 73, fq-paced 104 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="380.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="382.3" x2="382.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.85 s · sum of windows: unpaced 81, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="384.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="386.5" x2="386.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.90 s · sum of windows: unpaced 91, fq-paced 89 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="388.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="390.8" x2="390.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.95 s · sum of windows: unpaced 99, fq-paced 99 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="392.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="395.1" x2="395.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.00 s · sum of windows: unpaced 109, fq-paced 107 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="397.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="399.3" x2="399.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.05 s · sum of windows: unpaced 117, fq-paced 115 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="401.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="403.6" x2="403.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.10 s · sum of windows: unpaced 92, fq-paced 108 packets · flows entering recovery: unpaced 3, fq-paced 4</title><rect x="405.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="407.9" x2="407.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.15 s · sum of windows: unpaced 81, fq-paced 93 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="410.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="412.1" x2="412.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.20 s · sum of windows: unpaced 88, fq-paced 95 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="414.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="416.4" x2="416.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.25 s · sum of windows: unpaced 97, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="418.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="420.7" x2="420.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.30 s · sum of windows: unpaced 106, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="422.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="424.9" x2="424.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.35 s · sum of windows: unpaced 114, fq-paced 112 packets · flows entering recovery: unpaced 1, fq-paced 2</title><rect x="427.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="429.2" x2="429.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.40 s · sum of windows: unpaced 108, fq-paced 97 packets · flows entering recovery: unpaced 5, fq-paced 2</title><rect x="431.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="433.5" x2="433.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.45 s · sum of windows: unpaced 74, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="435.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="437.7" x2="437.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.50 s · sum of windows: unpaced 81, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="439.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="442.0" x2="442.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.55 s · sum of windows: unpaced 87, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="444.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="446.3" x2="446.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.60 s · sum of windows: unpaced 97, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="448.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="450.5" x2="450.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.65 s · sum of windows: unpaced 105, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="452.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="454.8" x2="454.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.70 s · sum of windows: unpaced 113, fq-paced 86 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="456.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="459.1" x2="459.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.75 s · sum of windows: unpaced 108, fq-paced 94 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="461.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="463.3" x2="463.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.80 s · sum of windows: unpaced 96, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="465.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="467.6" x2="467.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.85 s · sum of windows: unpaced 91, fq-paced 110 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="469.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="471.9" x2="471.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.90 s · sum of windows: unpaced 100, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="474.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="476.1" x2="476.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.95 s · sum of windows: unpaced 108, fq-paced 74 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="478.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="480.4" x2="480.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.00 s · sum of windows: unpaced 115, fq-paced 74 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="482.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="484.7" x2="484.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.05 s · sum of windows: unpaced 97, fq-paced 82 packets · flows entering recovery: unpaced 6, fq-paced 0</title><rect x="486.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="488.9" x2="488.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.10 s · sum of windows: unpaced 66, fq-paced 93 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="491.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="493.2" x2="493.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.15 s · sum of windows: unpaced 72, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="495.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="497.5" x2="497.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.20 s · sum of windows: unpaced 78, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="499.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="501.7" x2="501.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.25 s · sum of windows: unpaced 86, fq-paced 117 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="503.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="506.0" x2="506.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.30 s · sum of windows: unpaced 96, fq-paced 94 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="508.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="510.3" x2="510.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.35 s · sum of windows: unpaced 105, fq-paced 80 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="512.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="514.5" x2="514.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.40 s · sum of windows: unpaced 113, fq-paced 86 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="516.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="518.8" x2="518.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.45 s · sum of windows: unpaced 102, fq-paced 97 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="520.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="523.1" x2="523.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.50 s · sum of windows: unpaced 78, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="525.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="527.3" x2="527.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.55 s · sum of windows: unpaced 86, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="529.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="531.6" x2="531.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.60 s · sum of windows: unpaced 94, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="533.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="535.9" x2="535.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.65 s · sum of windows: unpaced 101, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="538.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="540.1" x2="540.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.70 s · sum of windows: unpaced 109, fq-paced 98 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="542.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="544.4" x2="544.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.75 s · sum of windows: unpaced 116, fq-paced 105 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="546.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="548.7" x2="548.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.80 s · sum of windows: unpaced 95, fq-paced 112 packets · flows entering recovery: unpaced 5, fq-paced 0</title><rect x="550.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="552.9" x2="552.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.85 s · sum of windows: unpaced 68, fq-paced 103 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="555.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="557.2" x2="557.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.90 s · sum of windows: unpaced 75, fq-paced 77 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="559.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="561.5" x2="561.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.95 s · sum of windows: unpaced 84, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="563.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="565.7" x2="565.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.00 s · sum of windows: unpaced 92, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="567.9" y="30" width="2.1" height="466.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch06-sync--></div>
+        <figcaption><b>Diagram 6.2 — Eight Reno flows started together through a 10 Mbit/s bottleneck with a 21-packet buffer, unpaced and paced by fq, measured: the bench's Fig. 8.</b> Notice the first column of dots: paced (blue), all eight flows enter recovery within 40 ms; unpaced (orange), six do. The paced sum climbs higher first, 188 against 157, and neither sum collapses, because Linux halves each flow once. Rootless bench, 576-byte packets, initial window one, kernel 7.2.6, 2 October 2026. Data: <a href="labs/ch06-pacing/data/none-1-agg.csv">unpaced</a>, <a href="labs/ch06-pacing/data/fq-1-agg.csv">fq</a> (sums), <a href="labs/ch06-pacing/data/none-1-f.csv">unpaced</a> and <a href="labs/ch06-pacing/data/fq-1-f.csv">fq</a> per flow. Hover for values.</figcaption></figure>
+      <p>In five runs of each, all eight paced flows lost in the first <b>congestion epoch</b> every time, six of eight unpaced; TCP's own timer gave the same eight. With a buffer of one pipe the unpaced flows lost together too, as the paper says of Reno once "the bottleneck queue absorbs its burstiness" (PDF p. 6).</p>
+      <p>The collapse did not follow. Fig. 8's paced sum fell to about 200, four packets per flow, which is what timeouts leave; many TCPs without selective acks (SACK) "suffer from timeouts when they experience multiple packet losses within one round trip time" (Mathis et al. p. 69). Linux repairs several losses in one round trip and halves once, and half of 188 is still above the 85-packet pipe: no paced run timed out, and the first two seconds carried 7.77 Mbit/s paced against 7.66 unpaced. With SACK off (<code>net.ipv4.tcp_sack=0</code>) only the unpaced flows timed out.</p>
+      <p>Steady state is where flows in step cost most: the <a href="index.html#g-buffer-sizing-rule">buffer-sizing rule</a>, \(\text{BDP}/\sqrt n\), assumes \(n\) sawtooths out of step, and flows in step need a full BDP (Appenzeller et al. p. 284). After three seconds the paced sum of windows was a little larger and steadier, 97 against 95 packets, swinging 13% against 16%, with 8.41 against 8.24 Mbit/s: the paper's outcome. Counted by epoch, though, half or more of the paced flows still lost together in 73% of epochs, against 60%.</p>
+      <p class="since"><b>Since the paper.</b> The paper cites SACK (its [22]) but simulates Reno without it. Linux adds proportional rate reduction (RFC 6937, <code>net/ipv4/tcp_input.c:2962–2985</code>) and RACK, which finds lost packets by their send times (RFC 8985, default at <code>tcp_ipv4.c:3475</code>): a synchronized loss becomes one halving per flow.</p>
+
+      <h3 class="strand" id="s-paced-among-bursty">A paced flow among bursty ones</h3>
+      <p>A paced flow sharing a drop-tail bottleneck with Reno flows is "very likely" to lose a packet whenever a Reno burst fills the queue, because its packets are everywhere in the round trip; a Reno cluster either misses the full queue or loses several packets at once, for one halving (PDF pp. 1, 7). A loss-driven sender halves once per loss event, so the paced flow finishes later.</p>
+      <p>In Fig. 14 (PDF p. 8), twenty 300-packet flows start together behind a quarter-BDP buffer; with half of them paced, the paced flows take about 3.75 s and the Reno flows about 2.7 s. Fig. 15 puts Reno over paced latency at 0.65–0.76 for most mixes, and as low as 0.26 when flows arrive over time (line C). The early adopter loses (PDF p. 1).</p>
+      <details class="deriv"><summary>Derivation · why spread packets draw more loss events</summary>
+        <p>Say Reno bursts keep the queue full for a fraction \(q\) of each round trip, and a flow sends \(k\) packets per round trip. Spread at random times, at least one of them meets a full queue with probability \(1 - (1-q)^k\). A cluster arrives at once, so it is hit with probability about \(q\), and then loses several packets. For \(k = 10\) and \(q = 0.1\): \(1 - 0.9^{10} = 0.65\) against 0.1. Each hit is one halving, and the <a href="index.html#g-mathis-formula">Mathis formula</a>'s \(p\) counts these events, not packets. The formalization is mine; the paper argues it in words (PDF pp. 1, 7).</p>
+      </details>
+      <p>The bench ran the same mixes with eight 300-packet flows over pfifo, the paced ones paced by TCP's own timer, 24 runs per mix (Diagram 6.3). In the first congestion epoch every paced flow lost, against 66–71% of the unpaced flows in the same runs: the paper's mechanism, measured. The paced flows then trailed, 72 packets acked by 0.5 s against 105 with four of eight paced, and finished 9–14% later while they were the minority: Reno over paced completion was 0.88–0.92, against Fig. 15's 0.65–0.76.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch06-mixed-->
+<svg viewBox="0 0 720 458" role="img" aria-label="Paced and unpaced flows in the same run: completion time of 300-packet flows, and goodput of 15-second flows, against the number of paced flows" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="610" y1="200.0" y2="200.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="204.0" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="610" y1="166.0" y2="166.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="170.0" text-anchor="end" fill="#898781">1.1</text>
+<line x1="58" x2="610" y1="132.0" y2="132.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="136.0" text-anchor="end" fill="#898781">1.2</text>
+<line x1="58" x2="610" y1="98.0" y2="98.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="102.0" text-anchor="end" fill="#898781">1.3</text>
+<line x1="58" x2="610" y1="64.0" y2="64.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="68.0" text-anchor="end" fill="#898781">1.4</text>
+<line x1="58" x2="610" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">1.5</text>
+<line x1="58" x2="610" y1="200.0" y2="200.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="115.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 115.0)">300 pkts: completion (s)</text>
+<polyline points="141.4,90.2 205.6,84.1 334.0,104.5 462.4,102.8 526.6,108.9 590.7,105.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="614" x2="626" y1="105.5" y2="105.5" stroke="#2a78d6" stroke-width="2"/>
+<text x="630" y="109.5" fill="#1b1f24">paced flows</text>
+<polyline points="77.3,122.5 141.4,128.3 205.6,140.5 334.0,142.5 462.4,118.1 526.6,67.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="614" x2="626" y1="67.1" y2="67.1" stroke="#eb6834" stroke-width="2"/>
+<text x="630" y="71.1" fill="#1b1f24">unpaced flows</text>
+<circle cx="141.4" cy="90.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="205.6" cy="84.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="334.0" cy="104.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.4" cy="102.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="526.6" cy="108.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="590.7" cy="105.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="77.3" cy="122.5" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="141.4" cy="128.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="205.6" cy="140.5" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="334.0" cy="142.5" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.4" cy="118.1" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="526.6" cy="67.1" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="18" r="4" fill="#2a78d6"/>
+<text x="85" y="22" fill="#1b1f24">flows paced by TCP&#x27;s own timer</text>
+<circle cx="308" cy="18" r="4" fill="#eb6834"/>
+<text x="321" y="22" fill="#1b1f24">unpaced flows (pfifo)</text>
+<line x1="58" x2="610" y1="416.0" y2="416.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="420.0" text-anchor="end" fill="#898781">0.8</text>
+<line x1="58" x2="610" y1="382.0" y2="382.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="386.0" text-anchor="end" fill="#898781">0.9</text>
+<line x1="58" x2="610" y1="348.0" y2="348.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="352.0" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="610" y1="314.0" y2="314.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="318.0" text-anchor="end" fill="#898781">1.1</text>
+<line x1="58" x2="610" y1="280.0" y2="280.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="284.0" text-anchor="end" fill="#898781">1.2</text>
+<line x1="58" x2="610" y1="246.0" y2="246.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="250.0" text-anchor="end" fill="#898781">1.3</text>
+<line x1="58" x2="610" y1="416.0" y2="416.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="331.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 331.0)">15 s flows: Mbit/s each</text>
+<line x1="58" x2="610" y1="310.6" y2="310.6" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="616" y="314.6" fill="#898781">fair share 1.11</text>
+<polyline points="141.4,293.9 205.6,295.0 334.0,287.5 462.4,307.9 526.6,320.1 590.7,332.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="614" x2="626" y1="332.0" y2="332.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="630" y="336.0" fill="#1b1f24">paced flows</text>
+<polyline points="77.3,337.6 141.4,339.2 205.6,347.3 334.0,368.7 462.4,405.5 526.6,414.0" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="614" x2="626" y1="414.0" y2="414.0" stroke="#eb6834" stroke-width="2"/>
+<text x="630" y="418.0" fill="#1b1f24">unpaced flows</text>
+<circle cx="141.4" cy="293.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="205.6" cy="295.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="334.0" cy="287.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.4" cy="307.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="526.6" cy="320.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="590.7" cy="332.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="77.3" cy="337.6" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="141.4" cy="339.2" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="205.6" cy="347.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="334.0" cy="368.7" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.4" cy="405.5" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="526.6" cy="414.0" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="234" r="4" fill="#2a78d6"/>
+<text x="85" y="238" fill="#1b1f24">paced flows</text>
+<circle cx="175" cy="234" r="4" fill="#eb6834"/>
+<text x="188" y="238" fill="#1b1f24">unpaced flows</text>
+<text x="77.3" y="432.0" text-anchor="middle" fill="#898781">0</text>
+<text x="141.4" y="432.0" text-anchor="middle" fill="#898781">1</text>
+<text x="205.6" y="432.0" text-anchor="middle" fill="#898781">2</text>
+<text x="334.0" y="432.0" text-anchor="middle" fill="#898781">4</text>
+<text x="462.4" y="432.0" text-anchor="middle" fill="#898781">6</text>
+<text x="526.6" y="432.0" text-anchor="middle" fill="#898781">7</text>
+<text x="590.7" y="432.0" text-anchor="middle" fill="#898781">8</text>
+<text x="334.0" y="450.0" text-anchor="middle" fill="#4a5560">how many of the eight flows are paced</text>
+<g class="hit"><title>0 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced -, unpaced 1.228 s (24 runs)</title><rect x="58.0" y="30" width="51.3" height="386.0" fill="transparent"/><line x1="77.3" x2="77.3" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>1 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.323 s, unpaced 1.211 s (24 runs) · 15 s flows, Mbit/s per flow: paced 1.16, unpaced 1.03 (4 runs)</title><rect x="109.3" y="30" width="64.2" height="386.0" fill="transparent"/><line x1="141.4" x2="141.4" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>2 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.341 s, unpaced 1.175 s (24 runs) · 15 s flows, Mbit/s per flow: paced 1.16, unpaced 1.00 (4 runs)</title><rect x="173.5" y="30" width="96.3" height="386.0" fill="transparent"/><line x1="205.6" x2="205.6" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>4 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.281 s, unpaced 1.169 s (24 runs) · 15 s flows, Mbit/s per flow: paced 1.18, unpaced 0.94 (4 runs)</title><rect x="269.8" y="30" width="128.4" height="386.0" fill="transparent"/><line x1="334.0" x2="334.0" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>6 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.286 s, unpaced 1.241 s (24 runs) · 15 s flows, Mbit/s per flow: paced 1.12, unpaced 0.83 (4 runs)</title><rect x="398.2" y="30" width="96.3" height="386.0" fill="transparent"/><line x1="462.4" x2="462.4" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>7 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.268 s, unpaced 1.391 s (24 runs) · 15 s flows, Mbit/s per flow: paced 1.08, unpaced 0.81 (4 runs)</title><rect x="494.5" y="30" width="64.2" height="386.0" fill="transparent"/><line x1="526.6" x2="526.6" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>8 of 8 flows paced by TCP&#x27;s timer · 300-packet flows, mean completion: paced 1.278 s, unpaced - (24 runs)</title><rect x="558.7" y="30" width="51.3" height="386.0" fill="transparent"/><line x1="590.7" x2="590.7" y1="30" y2="416.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch06-mixed--></div>
+        <figcaption><b>Diagram 6.3 — Paced and unpaced flows in the same run, measured: the bench's Figs 14–15.</b> Notice the top panel: while the paced flows are the minority they finish later, and the gap closes, then reverses, as more flows are paced. In the bottom panel, with 15 s flows, the paced flows get more than their share. Paced flows set <code>SO_MAX_PACING_RATE</code>, so TCP's timer paces them; the qdisc is pfifo, so nothing paces the others. Top: 24 runs per point; bottom: 4 runs per point, end points from the eight-flow runs. 2 October 2026. Data: <a href="labs/ch06-pacing/data/mixed-300-runs.csv">300-packet flows</a>, <a href="labs/ch06-pacing/data/mixed-bulk-runs.csv">15 s flows</a>. Hover for values.</figcaption></figure>
+      <p>Long flows turned it around. Over 15 s with four of eight paced, the paced flows averaged 1.18 Mbit/s each and the unpaced 0.94, with fewer loss events (31 against 38) and retransmissions, as at every mix in Diagram 6.3. After slow start, Linux's pacing is a ceiling over the ack clock, so the paced flows are no longer spread over the whole round trip, while unpaced bursts keep overflowing the queue themselves, the "unlucky" clusters that "suffer multiple losses in a burst" (PDF p. 1). On Linux the early adopter pays at start-up and gains later.</p>
+
+      <h3 class="strand" id="s-linux-pacing">Which pacer runs on Linux, and how fast</h3>
+      <p>Linux computes a <a href="index.html#g-pacing-rate">pacing rate</a> for every TCP socket on every ack, and enforces it in three cases only: fq is the qdisc, the socket set <code>SO_MAX_PACING_RATE</code>, or its congestion control asked. The rate is 200% of \(\text{cwnd} \times \text{MSS}/\text{srtt}\) while \(\text{cwnd} &lt; \text{ssthresh}/2\) and 120% after, where the paper paced at exactly 100% (<code>net/ipv4/tcp_input.c:1154–1159</code>; defaults at <code>tcp_ipv4.c:3501–3502</code>).</p>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  A["A TCP socket sends an skb"] --> Q{"Is fq the qdisc<br/>on the way out?"}
+  Q -->|"yes"| FQ["fq marks the socket SK_PACING_FQ.<br/>TCP gives each packet a send time<br/>from the pacing rate; fq holds it"]
+  Q -->|"no"| N{"Did the socket set SO_MAX_PACING_RATE,<br/>or did its congestion control ask?"}
+  N -->|"yes"| T["SK_PACING_NEEDED.<br/>TCP's own hrtimer holds the next skb:<br/>tcp_pacing_check()"]
+  N -->|"no"| X["SK_PACING_NONE.<br/>Nothing paces. The ack clock<br/>and the application set the timing"]
+  X -.-> S["ss -ti still prints pacing_rate:<br/>TCP computes it for every socket"]
+  style X fill:#fdeef1,stroke:#be123c,stroke-width:2px
+  style FQ fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style T fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div><figcaption><b>Diagram 6.4 — Which pacer runs for one Linux TCP socket, from the v7.2 source.</b> Notice that the rate is computed on every path and only the green boxes act on it. When both apply, fq wins: it overwrites the NEEDED mark (<code>sch_fq.c:398–401</code>). Most CUBIC and Reno sockets on fq_codel or pfifo sit in the red box.</figcaption></figure>
+      <p>The mark is <code>sk_pacing_status</code>: NONE, NEEDED or FQ (<code>include/net/sock.h:612–616</code>). <code>SO_MAX_PACING_RATE</code> sets NEEDED (<code>net/core/sock.c:1263–1266</code>), as one in-tree congestion-control module does when it starts, the one the path-model chapter reads. NEEDED turns on TCP's own hrtimer (<code>tcp.h:1614</code>; <code>tcp_pacing_check()</code>, <code>tcp_output.c:2815</code>); fq sets FQ when it meets the socket (<code>sch_fq.c:451–453</code>). With NONE, TCP does not even advance the next send time (<code>tcp_output.c:1451</code>).</p>
+      <p>That is the trap. <code>ss -ti</code> prints <code>pacing_rate</code> for every socket, because <code>tcp_get_info()</code> copies it whatever the mark (<code>net/ipv4/tcp.c:4229–4231</code>). A CUBIC or Reno socket over pfifo or fq_codel shows a rate and is not paced. fq's <code>throttled</code> counter, or a capture, is the proof.</p>
+      <p>The ratios change what pacing is. The paper's timer is the clock, so a paced flow "lags behind by a round trip time" (PDF p. 5). Linux's 200% lets slow start double each round while spreading it; after that, 120% sits above the flow's average rate, so the <a href="index.html#g-ack-clock">ack clock</a> sets the pace and fq holds an skb only when acks bring it early (7,713 times for about 16,000 skbs in an eight-flow run). And Linux paces skbs of at least two segments (<a href="index.html#g-tso-autosizing">TSO autosizing</a>), where the paper paced packets.</p>
+      <p>Both ratios at 100, the paper's rate, made the eight fq-paced flows worse on every count. The first loss came at 0.287 s instead of 0.244 s, with windows up to 30 packets ahead of what had been sent; they peaked at 279 against 188; retransmissions rose from 548 to 639; goodput fell from 8.41 to 8.21 Mbit/s.</p>
+      <p>So the paper's two mechanisms still apply to any loss-driven sender behind a shared drop-tail FIFO; Linux changed the rates and the recovery that made Fig. 8 collapse. Pacing pays off once the sender stops waiting for loss, in the chapter where the sender models the path (chapter 10). The rate's history is in <a href="ch05.html#s-pacing-rate">the small-queues chapter</a>.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system back" id="sys-sch-fq-back" data-system="sch-fq">
+        <h4>Back to <code>sch_fq</code>, the fair-queue and pacing qdisc</h4>
+        <p>fq was the pacer in every fq run here, and its counters prove pacing where <code>ss</code> cannot. After one 15 s run of eight flows (real output, 2 October 2026): <code>fastpath 11102 throttled 7713 latency 11.4us</code>, 7,713 waits in the throttled tree. With <code>nopacing</code>, fq leaves the socket's mark alone (<code>sch_fq.c:398, 451</code>). Full card: <a href="ch05.html#sys-sch-fq">the small-queues chapter</a>.</p>
+      </div>
+      <div class="system back" id="sys-linux-tcp-back" data-system="linux-tcp">
+        <h4>Back to Linux TCP, read through <code>ss -ti</code></h4>
+        <p>During an eight-flow run over pfifo, where nothing paces, every line still carries a rate (real output, 2 October 2026, cut): <code>reno … mss:524 … cwnd:11 ssthresh:7 … send 1010143bps … pacing_rate 1212144bps</code>. That is 120% of <code>send</code>, since cwnd is above half of ssthresh, and nobody on this host enforces it (<a href="labs/ch06-pacing/data/ss-tin-pfifo-8flows.txt">all eight lines</a>). Full card: <a href="ch01.html#sys-linux-tcp">the congestion-avoidance chapter</a>.</p>
+      </div>
+      <div class="system back" id="sys-netem-back" data-system="netem">
+        <h4>Back to netem, the kernel's network emulator</h4>
+        <p>netem's <code>limit</code> counts every packet it holds, those still serving their delay included (<code>sch_netem.c:552</code>). So this chapter's 21-packet buffer is <code>netem rate 10mbit limit 21</code> with no delay on <code>rtr:r1</code>, and both 20 ms delays sit on the ack path. With <code>delay 20ms</code> on the same netem, one flow got 2.49 Mbit/s (<a href="labs/ch06-pacing/data/wrongturn-netem-delay-limit21.txt">transcript</a>). Full card: <a href="ch02.html#sys-netem">the queueing-maths chapter</a>.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing. The others use <code>labs/ch06-pacing/run.sh</code>, which builds a fresh rootless bench per run: a 21-packet buffer on <code>rtr:r1</code>, delays on the ack path, 576-byte packets, and flows that start at one packet (<code>initcwnd 1</code>, as in the paper, PDF p. 2). <code>epochs.py</code> finds congestion epochs; <code>mixed.py</code> compares paced and unpaced flows. Commands paste into fish.</p>
+
+      <div class="lab" id="lab-overflow-by-hand">
+        <h4>Hands-on · Where each sender first overflows, by hand</h4>
+        <p class="labmeta">~30 min · trace by hand · paper and pencil</p>
+        <p><b>Task.</b> For the paper's single flow (5 Mbit/s, 100 ms, 576-byte packets, 25-packet buffer) and for the bench (10 Mbit/s, 40 ms, 590-byte frames on the wire, 21-packet buffer), compute the pipe, the slow-start round in which unpaced Reno first overflows the buffer and the window at that first drop, and the same for a paced sender. Then compute the paper's sawtooth period three ways: footnote 1, Mathis et al.'s derivation with an ack for every packet, and Fig. 4. Last, predict Fig. 8's paced peak.</p>
+        <p><b>Done when.</b> You have a two-row table of pipe and both drop windows, three periods and one peak, and can say why the bench's measured ssthresh, 51 unpaced and 86 paced, fits your drop windows.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The half-window learning gives both drop points. Slow start works in rounds of doubling windows: 1, 2, 4, …, 32, 64. Ask in which round the queue first passes \(B\).</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>In the round from \(w\) to \(2w\), each ack releases two packets and the bottleneck drains one, so after \(k\) acks the window is \(w + k\) and the queue is \(k\). The first drop is at \(k = B\). A paced sender queues nothing until its window passes the pipe, so its first drop is at pipe plus \(B\). Reno halves the window it holds when the loss is noticed, about one round trip after the drop.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Paper pipe: \(5 \times 10^6 \times 0.1/4608 = 108.5\). Bench pipe: \(10^7 \times 0.04 / (590 \times 8) = 84.7\). The round from 16 to 32 ends with a queue of 16, under both buffers, so both unpaced drops fall in the round from 32 to 64.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>          pipe    unpaced: round, window at drop    paced: window at drop
+paper     108.5   32 to 64, 32 + 25 = 57            108 + 25 = 133
+bench      84.7   32 to 64, 32 + 21 = 53             85 + 21 = 106
+
+period of the paper's sawtooth:
+  footnote 1      0.1^2 x 5e6 / 4608 = 10.85 s = 108.5 RTTs
+  Mathis, p. 68   (2/3) x 108.5       = 72.3 RTTs
+  Fig. 4          peaks near 150, 225, 300, 376, 451 = 75 RTTs
+Fig. 8 paced peak: 2 x (1250 + 312) = 3,124; the figure shows about 3,300</code></pre>
+          <p><b>Expected output.</b> The paper's figures agree within the reading error: Fig. 4's unpaced line tops out near 62, a little past 57 because the loss takes a round trip to come back, and its paced line goes far past 133, to about 213. On the bench, unpaced ssthresh was 51: in slow start the window roughly doubles during the round trip the loss needs to come back, and halving gives back about the window at the drop, 53. Paced ssthresh was 86, below 106: once the link is full, acks arrive only at the link's rate, so the window can no longer double in a round trip.</p>
+          <p><b>What this shows.</b> The paper's "first loss at twice the buffer" (PDF p. 5) is the end of a round; the drop itself comes \(B\) acks into the first round whose half-window passes \(B\). Paced or not, the drop is followed by a round trip of growth, which is the late-signal learning in a single flow. The footnote's 108 against the figure's 75 is the paper's slip in the half-window learning.</p>
+          <p><b>Common wrong turn.</b> Using 576 bytes on the wire for the bench. On the veth every frame also carries a 14-byte Ethernet header, and netem's rate counts it, so a packet takes \(590 \times 8 / 10^7 = 0.472\) ms, and the pipe is 85 packets. With 576 you get 87, close enough here, but at full-size packets the same slip is 1,500 against 1,514 bytes.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-eight-flows">
+        <h4>Hands-on · Start eight flows together, unpaced and paced</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3</p>
+        <p><b>Task.</b> Run eight Reno flows started together through the 21-packet buffer, first with pfifo on <code>s0</code>, where nothing paces, then with fq, which paces every flow. Predict before each run: how many flows lose in the first congestion epoch, how high the sum of windows peaks, and which run carries more data in its first two seconds. Then repeat fq with selective acks off, and pfifo with the buffer at one pipe.</p>
+        <pre><code>cd labs/ch06-pacing                         # from the dossier folder
+../common/qnet.sh -- ./run.sh --s0 pfifo --out none
+../common/qnet.sh -- ./run.sh --s0 fq --out fq
+../common/qnet.sh -- ./run.sh --s0 fq --sack 0 --out fq-nosack
+../common/qnet.sh -- ./run.sh --s0 pfifo --buffer 85 --out none-b85
+python3 epochs.py --table none-f.csv fq-f.csv fq-nosack-f.csv</code></pre>
+        <p><b>Done when.</b> You have the first-epoch losses, peak sum of windows, first-two-seconds goodput and RTO count of all four runs next to your predictions, and can say which of the paper's predictions held.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The late-signal learning predicts the peak and the timing; the mixed-packets learning predicts the first epoch. For the collapse, ask what a flow does after losing several packets in one round trip.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p><code>run.sh</code> prints <code>epochs.py</code>'s summary at the end of each run. A congestion epoch there is every recovery start within one full-queue round trip, 60 ms, of the epoch's first one. For the one-pipe run, epochs are 90 ms: pass <code>--window 0.09</code>.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Compare the peak with pipe plus buffer, 106, and with half the peak: if half the peak is still above the 85-packet pipe, a single halving per flow keeps the link busy.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026, means of five runs each, range in brackets; all CSVs and the per-run table are in <code>labs/ch06-pacing/data/</code>):</p>
+          <pre><code>condition        first epoch  first loss  peak sum   RTOs  Mbit/s 0-2 s  Mbit/s all
+pfifo (none)     6 of 8       0.183 s     157 (155-160)  0    7.66          8.24
+fq               8 of 8       0.244 s     188 (186-190)  0    7.77          8.41
+TCP timer        8 of 8       0.244 s     188 (187-191)  0    7.86          8.38
+fq, ratios 100   8 of 8       0.287 s     279 (272-284)  0    7.71          8.21
+pfifo, no SACK   6 of 8       0.183 s     176 (175-178)  4.8  6.76          8.18
+fq, no SACK      8 of 8       0.244 s     189 (186-193)  0    7.19          8.28
+pfifo, buffer 85 8 of 8                   335 (333-336)  0    8.20          8.80
+fq, buffer 85    8 of 8                   344 (342-346)  0    8.17          8.79</code></pre>
+          <p><b>What this shows.</b> The paper's mechanism holds on Linux: the paced flows' first loss comes about 60 ms later, at a higher peak, and takes every flow at once (the late-signal and mixed-packets learnings, PDF pp. 5–6). Its price does not: the most data one payload stream can carry here is \(10 \times 524/590 = 8.88\) Mbit/s, and the paced runs lose nothing at start-up, because half of 188 is still more than the pipe and no flow timed out. With one pipe of buffer both lose together, as the paper says of Reno (PDF p. 6).</p>
+          <p><b>Common wrong turn.</b> Building the buffer from the small-queues chapter's lab sequence, <code>netem delay 20ms rate 10mbit limit 21</code> on <code>r1</code>. netem counts its delay line against the limit, so the 21 packets must cover both the queue and 20 ms of delay, which is 42 packets at full rate. One flow then ran at 2.49 Mbit/s instead of about 7.5. Read <code>tc -n rtr -s qdisc show dev r1</code> after a run: drops with low goodput mean the limit was too small for the delay.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-paced-among-bursty">
+        <h4>Hands-on · Two paced flows among six bursty ones</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3</p>
+        <p><b>Task.</b> Start eight 300-packet flows together over pfifo, two of them paced by TCP's own timer, ten times. Predict which group loses first, which finishes first, and which retransmits more. Repeat the mix with 15 s flows, and during that run read every flow's <code>pacing_rate</code> in <code>ss -tin</code>.</p>
+        <pre><code>cd labs/ch06-pacing                         # from the dossier folder
+for i in 1 2 3 4 5 6 7 8 9 10; ../common/qnet.sh -- ./run.sh --s0 pfifo --paced 2 --bytes 157200 --out mix-$i; end
+python3 mixed.py mix-*-f.csv
+../common/qnet.sh                           # a shell inside the lab, for the bulk run
+./run.sh --s0 pfifo --paced 2 --seconds 15 --out bulk-1 &
+sleep 6; ip netns exec snd ss -tin dst 10.0.2.1 | grep -o 'pacing_rate [^ ]*'
+wait; python3 mixed.py --bulk bulk-1-f.csv</code></pre>
+        <p><b>Done when.</b> For each group you have the first-epoch loss share, mean completion time with its standard error, retransmissions per flow and 15 s goodput per flow, plus eight <code>pacing_rate</code> values, six from unpaced flows.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The mixed-flows learning has the paper's argument. Ask whose packets can meet another flow's burst, and at which moment of the run the flows are most alike.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Flows 0 and 1 are the paced ones (<code>--paced 2</code> marks the first two). <code>mixed.py</code> prints completion, loss events, retransmissions and the first-epoch share per group; <code>python3 epochs.py mix-1-f.csv</code> lists which flows lost in the first epoch.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Expect a gap of a few round trips at most. Ten runs give a standard error near 0.05 s, about the size of the effect, so read the first-epoch share before the completion times.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026, 24 runs of 300-packet flows and 4 of 15 s flows; <code>labs/ch06-pacing/data/mixed-*-summary.txt</code>):</p>
+          <pre><code>300-packet flows, 2 of 8 paced, 24 runs (mixed-300-summary.txt)
+                                   paced            unpaced
+lost in the first epoch            100%             68%
+mean completion                    1.341 ± 0.024 s  1.175 ± 0.029 s
+loss events per flow               1.96             1.88
+retransmits per flow               5.9              18.6
+15 s flows, 2 of 8 paced, 4 runs (mixed-bulk-summary.txt)
+goodput per flow                   1.156 Mbit/s     1.002 Mbit/s
+loss events per flow               30.9             35.9
+ss -tin, 6 s into one 15 s run (ss-pacing-rate-paced2.txt)
+pacing_rate 1345672bps/1000000000bps
+pacing_rate 2022744bps/1000000000bps
+pacing_rate 3057376bps
+pacing_rate 1207216bps
+pacing_rate 958424bps
+pacing_rate 1247688bps
+pacing_rate 1162392bps
+pacing_rate 945600bps</code></pre>
+          <p><b>What this shows.</b> Every paced flow lost in the first congestion epoch, two thirds of the unpaced ones did: the paced packets were spread over the round trip and met the unpaced bursts (PDF p. 7). That cost the paced flows a few round trips on 300 packets. On 15 s flows they came out ahead, because after slow start the bursts that overflow the queue are the unpaced flows' own (the mixed-flows learning). <code>ss</code> printed a rate for all eight, paced or not (the Linux learning); only the two paced sockets show a second number after a slash, the <code>SO_MAX_PACING_RATE</code> cap. That slash is the one hint in <code>ss</code> that TCP's own timer may be on; under fq it means nothing extra.</p>
+          <p><b>Common wrong turn.</b> Running the mix with <code>--s0 fq</code>. fq paces every flow it sees, so <code>--paced 2</code> changes nothing and the two groups are the same (Diagram 6.4). The mix needs a qdisc that does not pace.</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: a 20 Mbit/s, 50 ms path carries full-size packets (1,514 bytes on the wire) through a 30-packet drop-tail buffer. One Reno flow starts at one packet. At what window does it drop its first packet unpaced, and paced?</p>
+        <details class="ans"><summary>Answer</summary><p>About 62 unpaced and 113 paced. The pipe is \(20 \times 10^6 \times 0.05 / (1514 \times 8) = 82.6\) packets. The queue grows one packet per ack in each round (PDF p. 2); the round from 16 to 32 ends with 16 queued, so the drop comes 30 acks into the round from 32 to 64: \(32 + 30 = 62\). Paced, nothing queues before the pipe is full: \(83 + 30 = 113\) (PDF p. 5). Near miss: the paper's \(2B = 60\) is the end-of-round view.</p></details>
+        <p>2. Predict the value: the spine's fifty flows, with the buffer raised from 312 packets to one pipe, 1,250. What sum of windows should the paced flows reach before the loss comes back, and do the unpaced flows differ?</p>
+        <details class="ans"><summary>Answer</summary><p>About \(2 \times (1{,}250 + 1{,}250) = 5{,}000\), and the unpaced flows about the same. Nothing drops before the windows add up to pipe plus buffer, and slow start doubles once more while the loss travels back (PDF p. 6). With one pipe of buffer the unpaced bursts no longer overflow early either, so both lose together (PDF p. 6). The bench at one pipe peaked at 344 paced and 335 unpaced, against \(2 \times 170 = 340\). Near miss: expecting a bigger buffer to desynchronize them.</p></details>
+        <p>3. Here is a symptom: <code>ss -ti</code> on a CUBIC upload over fq_codel shows <code>pacing_rate 23.4Mbps</code>, and a capture shows bursts of ten or more packets at line rate after every idle period. A colleague says pacing is broken. What is going on?</p>
+        <details class="ans"><summary>Answer</summary><p>Nothing paces this socket, so nothing is broken. TCP computes <code>sk_pacing_rate</code> for every socket on every ack, and <code>tcp_get_info()</code> copies it into <code>ss</code> whatever the socket's <code>sk_pacing_status</code> (<code>tcp.c:4229–4231</code>). Over fq_codel with no <code>SO_MAX_PACING_RATE</code> the status is NONE, so TCP's timer stays off (<code>tcp.h:1614</code>) and TCP does not even advance the next send time (<code>tcp_output.c:1451</code>). Put fq on the egress or set the option (Diagram 6.4). Near miss: blaming fq_codel, which nobody asked to pace.</p></details>
+        <p>4. Here is a symptom: a nightly job opens 40 uploads in the same second, from hosts that just moved from fq_codel to fq, through a switch with a small drop-tail buffer. Before the move, the first retransmissions were spread over a second; now all 40 connections retransmit within one round trip. Name the mechanism and one fix at the switch.</p>
+        <details class="ans"><summary>Answer</summary><p>Synchronized drops of paced slow starts (PDF pp. 5–6). fq spreads all 40 windows, so the buffer stays empty until they overload the link (a late congestion signal), and the overflow then catches every flow (mixing). Unpaced, bursts overflowed it early for a few flows only; on the bench, 8 of 8 paced flows lost in the first epoch against 6 of 8. Fix at the switch: an early, random signal such as RED with a low threshold (Fig. 16, PDF p. 8) or CoDel. Near miss: fq's <code>flow_limit</code>; fq dropped nothing.</p></details>
+        <p>5. Choose and defend: a drop-tail bottleneck you run sits in front of a fleet moving to fq one rack at a time. Raise its buffer from a quarter BDP to one BDP, or keep the buffer and add RED with a low minimum threshold?</p>
+        <details class="ans"><summary>Answer</summary><p>RED. The trouble is a signal that comes only after overload, from a FIFO that drops every flow at once. A bigger buffer delays the signal and keeps flows in step: at one BDP both kinds lost together (PDF p. 6), paced flows still did whenever new flows started (Figs 12–13), and every packet waits up to a round trip longer. Fig. 16's best RED (min_th 5, max_th 0.9 of the buffer, max_p 0.02) brought paced flows near Reno (PDF p. 8). The cost: RED is sensitive; Fig. 16's high-threshold setting did worse than drop-tail.</p></details>
+        <p>6. Here is a symptom: setting <code>net.ipv4.tcp_pacing_ss_ratio</code> and <code>tcp_pacing_ca_ratio</code> to 100 makes the bench's eight fq-paced flows retransmit 16% more. A colleague expected the paper's exact rate to pace better. Explain.</p>
+        <details class="ans"><summary>Answer</summary><p>At exactly cwnd per srtt the pacer becomes the clock and the flow lags: a slow-start round cannot leave faster than one srtt, the windows run ahead of the packets sent (up to 30), the first loss is noticed later (0.287 s against 0.244 s) and the overshoot is bigger (279 against 188). That is the paper's "lags behind by a round trip time" (PDF p. 5). Linux's 200% and 120% keep the pacer above the ack clock (<code>tcp_input.c:1154–1159</code>). Near miss: blaming fq, which only enforces the rate TCP computes.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>Slow start parks half a window in the bottleneck queue, so unpaced Reno overflows a small buffer early and unevenly. Paced traffic builds no queue until the link is full, so the loss signal comes late, and because paced packets are mixed, every flow loses in the same congestion epoch. In ns Reno that meant timeouts and a collapse; on Linux each flow halves once and the link stays busy, but the late, shared signal remains. Linux paces at 200% or 120% of cwnd over srtt, only through fq or TCP's timer, and <code>ss</code> shows the rate either way.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> L. Zhang, S. Shenker, D. D. Clark, "Observations on the Dynamics of a Congestion Control Algorithm: The Effects of Two-Way Traffic", SIGCOMM '91, pp. 133–147, <a href="https://doi.org/10.1145/115992.116006">doi:10.1145/115992.116006</a>. The paper's [32], where ack compression and loss synchronization among TCP connections were described. Read after the half-window learning.</li>
+        <li class="ref" data-layer="AQM"><span class="tag AQM">AQM</span> S. Floyd, V. Jacobson, "Random Early Detection Gateways for Congestion Avoidance", <i>IEEE/ACM Transactions on Networking</i> 1(4), 1993, pp. 397–413, <a href="https://doi.org/10.1109/90.251892">doi:10.1109/90.251892</a>, authors' copy at <a href="https://www.icir.org/floyd/papers/early.twocolumn.pdf">icir.org</a>. The paper's [12]; RED avoids "the global synchronization of many connections decreasing their window at the same time" (abstract). Read with Fig. 16.</li>
+        <li class="ref" data-layer="AQM"><span class="tag AQM">AQM</span> W. Feng, K. G. Shin, D. D. Kandlur, D. Saha, "The BLUE Active Queue Management Algorithms", <i>IEEE/ACM Transactions on Networking</i> 10(4), 2002, pp. 513–528, <a href="https://doi.org/10.1109/TNET.2002.801399">doi:10.1109/TNET.2002.801399</a>. The journal version of the paper's [9]; Linux runs its per-flow variant as <code>sch_sfb</code>. Read if RED's settings put you off.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="half-window-queue">Half a window in the queue</li>
+          <li data-strand="late-signal">No queue, then too much</li>
+          <li data-strand="synchronized-drops">Mixed packets, shared losses</li>
+          <li data-strand="paced-among-bursty">A paced flow among bursty ones</li>
+          <li data-strand="linux-pacing">Which pacer runs on Linux, and how fast</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 6 "TCP pacing" (A. Aggarwal, S. Savage, T. Anderson, "Understanding the Performance of TCP Pacing", INFOCOM 2000, authors' preprint), PDF pp. 1–9 (no printed page numbers).
+I have read the chapter and the after half of ch06.html. Lock in.
+Strands: half-window-queue (Half a window in the queue), late-signal (No queue, then too much), synchronized-drops (Mixed packets, shared losses), paced-among-bursty (A paced flow among bursty ones), linux-pacing (Which pacer runs on Linux, and how fast).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch06.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch06.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch05.html">← Small queues on the host</a><a href="index.html">All chapters</a><a href="ch07.html">Carousel →</a></nav>
+<footer>From a full buffer to BBR · chapter 6 reads A. Aggarwal, S. Savage, T. Anderson, "Understanding the Performance of TCP Pacing", Proc. IEEE INFOCOM 2000, vol. 3, pp. 1157–1165, in the authors' 9-page preprint, which prints no page numbers. Page references are to PDF pages 1–9. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

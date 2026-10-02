@@ -1,0 +1,84 @@
+    <section id="ch20" class="chapter">
+      <span class="chnum">Chapter 20</span>
+      <h2>Epilogue: traps, limits, what comes next</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag EBPF">EBPF</span> <span class="tag LLM">LLM</span> — The matvec has made the whole trip: one line of CUDA, PTX and SASS, the SMs, a probe inside it, and every token a server produces. This last chapter collects what can still go wrong at each stage, what the tools cannot do, the tests this document has not been able to run, and two directions the field has taken since the hardware in it was new.</p>
+
+      <h3>The trip, and the trap at each stage</h3>
+      <p>Every chapter ended with a trap or two in its tables. Diagram 20.1 lines them up along the trip the matvec took, so that a symptom can be placed at its stage. Most of them have the same shape: a layer that looks transparent turns out to decide something. The build decides whether there is PTX. The runtime's linking decides whether registration can be seen. The launch call decides whether a hook runs. The capture time of a graph decides which kernels it holds.</p>
+
+      <figure class="dia">
+        @@SVG:spinetraps@@
+        <figcaption><b>Diagram 20.1 — The matvec's trip, and the trap at each stage.</b> Notice the three stages between the source and the GPU: building, launching and capturing graphs. They hold five of the traps, and they are the part of the stack a GPU probe depends on and an application author never looks at.</figcaption>
+      </figure>
+
+      <h3>Honest limits</h3>
+      <p>bpftime's GPU probes, at commit a900f85, have five limits that no amount of care in the probe removes. A probe gets no arguments. It can read the block and thread indices, the block and grid sizes, the SM, warp and lane it runs on, and the global timer (helpers 502 to 511, <code>attach/nv_attach_impl/pass/ptxpass_core/src/core.cpp:213–224</code>), and its maps. The kernel's own parameters and registers are out of its reach. Helpers that call the host are served one at a time by a thread that sleeps a millisecond per loop, about a thousand calls per second for the whole GPU, as the probe-cost chapter (chapter 14) worked out from the source. The verifier is compiled out by default (<code>cmake/StandardSettings.cmake:95</code>), so a GPU probe is trusted code. Only kernels that arrive through a hooked registration, with PTX, are patched. And only the three replaced launch functions redirect to the patched copy.</p>
+      <p>This document has limits of its own. Its numbers are floors, computed from bytes and bandwidth, and every "Try it" asks you to measure where the floor is not the answer. Its Pascal and Hopper paths were checked against sources and documentation, but never run, because neither card was on the bench. And it is longer than planned, because each layer needed its mechanism explained before its probe could make sense; the reading times in the contents are measured from the text.</p>
+
+      <h3>What has not been run yet</h3>
+      <table class="gen">
+        <caption>Bench tests left open, with the prediction to check, as of October 2026</caption>
+        <tr><th>Test</th><th>Bench</th><th>Prediction</th><th>Where</th></tr>
+        <tr><td>A CUDA 13.4 program's launches reach bpftime's hooks</td><td>laptop</td><td>yes, with <code>nvcc -cudart shared</code>, through <code>cudaLaunchKernel</code> in <code>libcudart.so.13</code></td><td>the host-side chapter (chapter 8)</td></tr>
+        <tr><td>bpftime builds and attaches with CUDA 13.4</td><td>laptop</td><td>upstream tests 12.6; unknown</td><td>Before you start</td></tr>
+        <tr><td>The matvec's occupancy printout</td><td>laptop</td><td>warp: 6 blocks, 48 warps, 4.27 waves; warp4: 4, 32, 6.40</td><td>the scheduling chapter (chapter 9)</td></tr>
+        <tr><td>Driver ioctls stay flat as launches grow; Nsight Compute's stall mix</td><td>laptop</td><td>flat; mostly <code>long_scoreboard</code></td><td>the tooling chapter (chapter 10)</td></tr>
+        <tr><td>The tail probe, <code>lab/gpu/probe</code></td><td>laptop</td><td>a tail of late rows on a few SMs</td><td>the probe-cost chapter (chapter 14)</td></tr>
+        <tr><td>vLLM's KV cache line</td><td>laptop</td><td>about 285,000 tokens, about 70× at 4,096</td><td>the vLLM chapter (chapter 17)</td></tr>
+        <tr><td><code>llama-bench</code> generation, Q8_0 and Q4_K_M</td><td>laptop</td><td>below 411 and 551 tokens per second</td><td>the llama.cpp chapter (chapter 18)</td></tr>
+        <tr><td>Listings 19.1 and 19.2</td><td>laptop</td><td>a decode cluster near 2.5 ms</td><td>the observing chapter (chapter 19)</td></tr>
+        <tr><td>bpftime with a CUDA 12.x toolkit</td><td>P5000</td><td>use 12.9: a trampoline regenerated with clang 22 declares PTX 8.8, which arrived with CUDA 12.9 and still targets <code>sm_61</code></td><td>the probe-cost chapter (chapter 14)</td></tr>
+        <tr><td>llama.cpp probes, and <code>sm_90a</code> kernels</td><td>H100</td><td>probes fire only with <code>GGML_CUDA_PDL=0</code>; <code>sm_90a</code> kernels never</td><td>the llama.cpp chapter (chapter 18)</td></tr>
+      </table>
+
+      <h3>What came next: Blackwell's families</h3>
+      <p>CUDA 12.9 added a third kind of target. Besides portable code and the architecture-specific <code>a</code> targets of the generations chapter (chapter 11), there are family-specific <code>f</code> targets: code built for <code>compute_100f</code> runs on any GPU of compute capability 10.x, today 10.0 and 10.3, and on future ones in the same family (NVIDIA's blog on family-specific features). Blackwell's fifth-generation tensor cores bring their own on-chip <b>Tensor Memory</b>, 512 columns by 128 lanes of 32-bit cells per block on <code>sm_100a</code> and <code>sm_100f</code>, used by the <code>tcgen05</code> instructions (PTX ISA, section 9.7.18.1). ggml already lists NVIDIA's FP4 format among the types its quantized matrix kernel takes (<code>ggml/src/ggml-cuda/mmq.cu:318–352</code>).</p>
+      <p>For probing, this extends a rule the document already met with <code>sm_90a</code>. bpftime rewrites a kernel's PTX target to the detected architecture, without a suffix (<code>nv_attach_utils.cpp:94–160</code>), so any kernel whose PTX needs an <code>a</code> or <code>f</code> target is out of its reach, and those are the tensor-core kernels where the time goes. A bpftime that kept the suffix it found would close part of the gap. That is a small, concrete change of the kind this document's finish line asked you to be able to make.</p>
+
+      <h3>What came next: the cache on the network</h3>
+      <p>vLLM can run prefill and decode in different instances and move the KV cache between them, which it calls disaggregated prefilling. Its documentation gives two reasons: to tune TTFT and ITL separately, and to control the tail of ITL, which mixed steps like diagram 17.2's lengthen. It adds that the feature does not improve throughput (<code>docs/features/disagg_prefill.md</code>). The cache travels through a connector; NIXL, one of them, can use UCX, which runs over RDMA, and GPUDirect Storage.</p>
+      <p>For observation, this adds a sixth row to diagram 19.1, under the GPU and across machines: a request's keys and values crossing the network between its prefill and its first decode step. A TTFT now includes a transfer, and the tools for that row are the network's. The RDMA side is in <a href="sr-iov-dossier.html#ch5">the ConnectX and mlx5 chapter (chapter 5)</a> of the SR-IOV dossier, which is where this document hands over.</p>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>The traps cluster between source and GPU: whether a build carries PTX, whether registration and launch pass through bpftime's hooks, and when a graph was captured. bpftime's probes get no arguments, call the host about a thousand times a second at most, run unverified by default, and reach only kernels with PTX and a hooked path. The document's Pascal and Hopper paths, its two step probes and its bench predictions wait to be run. Blackwell's family-specific and architecture-specific targets widen the set of kernels a target-rewriting tool cannot touch, and disaggregated serving puts part of TTFT on the network.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>family-specific target</dt><dd>A CUDA target such as <code>compute_100f</code> whose code runs on every GPU of one compute-capability major version.</dd>
+          <dt>Tensor Memory</dt><dd>Blackwell's on-chip store dedicated to tensor-core operands, used by the <code>tcgen05</code> instructions.</dd>
+          <dt>disaggregated prefilling</dt><dd>Running prefill and decode in separate vLLM instances and moving the KV cache between them.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Trace the path: a probe on a llama.cpp kernel prints on the laptop, but on an H100, with the same source tree, the same bpftime and a build for <code>90</code>, it prints nothing. Go from the build to the launch, and name the most likely cause and its fix.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The build embeds PTX for compute capability 9.0, so the fat binary is registered and bpftime patches the kernel as before. At launch, ggml checks the kernel's PTX version, finds 90, and launches it with <code>cudaLaunchKernelEx</code> to use programmatic dependent launch. bpftime does not replace that call, so the original kernel runs and the patched copy never does.</p>
+          <p>Setting <code>GGML_CUDA_PDL=0</code> sends launches through the ordinary path. The near-miss is <code>sm_90a</code>: ggml has no <code>wgmma</code> or TMA code at this commit, so its kernels build for plain <code>sm_90</code>, and bpftime can compile them.</p>
+        </details>
+        <p>2. A probe must record which row of W each warp of the matvec computes, and when it finishes. What can the probe read, what can it not, and how does the probe-cost chapter's probe get the row?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It can read the block and thread indices, the block and grid sizes, the SM, warp and lane ids, and the global timer, all through helpers, plus its own maps. It cannot read the kernel's arguments, such as the pointers to W and x, or its registers. So the probe computes the row.</p>
+          <p>The probe-cost chapter's probe lets only lane 0 of each warp continue, computes the row as block index × block size plus thread index, divided by 32, and writes the global timer and SM id into a GPU array map at that row. The near-miss is to reach for the kernel's own <code>row</code> variable, which lives in a register the probe never sees.</p>
+        </details>
+        <p>3. Of the traps in diagram 20.1, which ones would a pure CPU eBPF user, who has never written a GPU probe, also meet, and why?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The launch-path and measurement traps. A uprobe on <code>cudaLaunchKernel</code> misses graph replays and <code>cudaLaunchKernelEx</code> launches just as bpftime's hooks do, because it watches the same functions. NVML's utilization misleads anyone who reads it as SM activity, and a <code>llama_process</code> return is not the end of a step for any tool.</p>
+          <p>The PTX traps, the static-cudart registration trap, <code>sm_90a</code>, and the probe's missing arguments belong to code that runs inside the kernel. The near-miss is to think host-side eBPF escapes the GPU's asynchrony. Every host-side timestamp is a submission or a wait, never the work itself.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/nvidia-blackwell-and-nvidia-cuda-12-9-introduce-family-specific-architecture-features/">NVIDIA Blackwell and NVIDIA CUDA 12.9 Introduce Family-Specific Architecture Features</a> (NVIDIA blog). The three kinds of target, with the <code>nvcc</code> lines for each.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tensor-memory">PTX ISA: Tensor Memory</a>, and the <code>tcgen05</code> instructions around it. Read after the generations chapter's Hopper section.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://docs.vllm.ai/en/latest/features/disagg_prefill/">vLLM: Disaggregated Prefilling</a>. The connectors, and the trade-off against chunked prefill.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://www.usenix.org/conference/osdi25/presentation/zheng-yusheng">Zheng et al., Extending Applications Safely and Efficiently</a> (OSDI 2025). The bpftime paper, for the design behind the runtime this document took apart.</li>
+        </ul>
+      </div>
+    </section>

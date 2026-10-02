@@ -1,0 +1,134 @@
+    <section id="ch10" class="chapter">
+      <span class="chnum">Chapter 10</span>
+      <h2>Measuring: the tools and what each one sees</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag TOOLS">TOOLS</span> — Every number so far has been a prediction: 311 µs at best, 4.27 waves, mostly <code>long_scoreboard</code> stalls. This chapter is about the tools that turn predictions into measurements. Each one sees some layers of the system and is blind to others, and the most common measuring mistake is asking a question of a tool that cannot see the layer it is about.</p>
+
+      <h3>Seven layers, six kinds of tool</h3>
+      <p>Diagram 10.1 is the map for this chapter. The rows are the layers you might want to measure, from your program's own code down to single instructions inside a kernel, plus the device as a whole. The columns are the tools. Read it by row: first decide which layer your question is about, then pick a tool with a dot in that row. The last column, bpftime, is what the eBPF part (Part IV) builds; it is here to show which gap it fills.</p>
+
+      <figure class="dia">
+        @@SVG:tower@@
+        <figcaption><b>Diagram 10.1 — Which tool sees which layer.</b> Notice the row "inside a kernel": only instrumentation tools have a full dot there, and none of them is cheap enough to leave running. Notice also that host eBPF stops at the driver. The blue column is bpftime's GPU probes, which reach into the kernel at its entry and exit without a profiler attached.</figcaption>
+      </figure>
+
+      <h3>The whole device: nvidia-smi, NVML, DCGM</h3>
+      <p><code>nvidia-smi</code> is a command-line front end to <b>NVML</b>, the NVIDIA Management Library. NVML reports device-wide numbers that the driver samples: memory used, clocks, power, temperature, PCIe traffic, and utilization. <code>nvidia-smi dmon</code> prints them once a second, and <code>nvidia-smi pmon</code> does the same per process.</p>
+      <p>The utilization number is the trap. NVML defines GPU utilization as the "percent of time over the past sample period during which one or more kernels was executing on the GPU" (<code>/opt/cuda/targets/x86_64-linux/include/nvml.h:245</code>). That is time with a kernel running, whatever the kernel uses. Our naive matvec, which leaves 4 of 20 SMs empty and the rest at 17% occupancy, shows 100% while its loop runs.</p>
+      <p><b>DCGM</b>, NVIDIA's Data Center GPU Manager, adds profiling fields that answer the question people meant to ask. Field 1002 is the share of cycles in which an SM has at least one warp resident, field 1003 is occupancy, and field 1005 is the share of cycles in which the memory interface is busy. They are still device-wide and sampled, so they cannot tell one kernel from another, but they are cheap enough to export to Prometheus from every server, with NVIDIA's <code>dcgm-exporter</code>.</p>
+
+      <h3>The timeline: Nsight Systems, NVTX and CUPTI</h3>
+      <p><b>Nsight Systems</b>, <code>nsys</code>, records a timeline of everything the program does with the GPU: each CUDA API call on each host thread, each kernel and copy on the GPU with its start and end time, and, if you ask, calls into OS libraries. It costs little per event, so you can trace a whole program run. Its default treats a CUDA graph as one item; <code>--cuda-graph-trace=node</code> shows each kernel in it, at higher cost. <b>NVTX</b> is a small annotation library: code that calls <code>nvtxRangePush("load_weights")</code> and <code>nvtxRangePop()</code> gets a named bar on the timeline. PyTorch exposes it as <code>torch.cuda.nvtx</code>.</p>
+      <p>Underneath Nsight Systems and Nsight Compute sits <b>CUPTI</b>, the CUDA Profiling Tools Interface. It is a library with several parts. The Activity API delivers buffered records of kernels and copies with GPU timestamps. The Callback API calls your function on entry to and exit from every CUDA API call. PC sampling and PM sampling read the hardware's samplers, and the range profiler collects counters. The tools load a small injection library into your process, and that library uses CUPTI. If you want an always-on timeline of every kernel in your own service, CUPTI's Activity API is the conventional answer. It works without changing kernels, and it sees start and end only.</p>
+
+      <h3>One kernel, all its counters: Nsight Compute</h3>
+      <p><b>Nsight Compute</b>, <code>ncu</code>, answers "why is this kernel as fast as it is". It reads hundreds of hardware counters, but the hardware can count only a limited set at once, so <code>ncu</code> runs the kernel several times, one <b>replay pass</b> per group of counters. Before the first pass it saves all the GPU memory the kernel can reach; before each later pass it restores the part the kernel wrote, so every pass sees the same inputs.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant App as program
+  participant Ncu as ncu injection library
+  participant Gpu as GPU
+  App->>Ncu: launch matvec_warp
+  Ncu->>Gpu: save the memory the kernel can reach
+  Ncu->>Gpu: lock clocks, flush caches
+  Ncu->>Gpu: pass 1, counter group A
+  Ncu->>Gpu: restore written memory, flush caches
+  Ncu->>Gpu: pass 2, counter group B
+  Note over Ncu,Gpu: … one pass per group
+  Ncu-->>App: launch returns, one result
+  Note over App,Gpu: other kernels waited the whole time
+        </div>
+        <figcaption><b>Diagram 10.2 — One kernel under Nsight Compute.</b> Notice that the program sees one launch, while the GPU ran the kernel once per counter group, with clocks locked and caches flushed each time. Nothing else runs while this happens, so <code>ncu</code> is for explaining a kernel, never for timing a service.</figcaption>
+      </figure>
+
+      <p>Three defaults make <code>ncu</code> durations differ from real ones. It locks the GPU clocks, to boost by default in current versions. It flushes the caches before every pass. And it runs each profiled kernel alone, with kernels serialised. Its sections map onto this document's chapters. <code>SpeedOfLight</code> gives achieved compute and memory throughput as a share of peak, the two axes of the roofline in the memory chapter. <code>LaunchStats</code> and <code>Occupancy</code> give the limits of the scheduling chapter, and <code>WarpStateStats</code> its stall reasons. <code>MemoryWorkloadAnalysis</code> shows traffic through each cache level, and <code>SourceCounters</code> puts stall samples on individual SASS lines. Nsight Compute supports Turing and newer. For the P5000 it dropped Pascal in 2020.1, and the profiler for Pascal is the older <code>nvprof</code> from a CUDA 12.x toolkit, which CUDA 13.0 removed.</p>
+
+      <h3>Correctness and instrumentation: compute-sanitizer, cuda-gdb, NVBit</h3>
+      <p><b>compute-sanitizer</b> runs a program under one of four checkers. <code>memcheck</code> finds out-of-bounds and misaligned accesses, <code>racecheck</code> finds races on shared memory, <code>initcheck</code> finds reads of device memory nobody wrote, and <code>synccheck</code> finds invalid uses of barriers. Run it on every new kernel once; it is slow, and it is right. <b>cuda-gdb</b> is gdb extended to stop inside kernels, switch between blocks and threads, and step through code. The 13.x release needs compute capability 7.5 or newer, so the P5000 needs a 12.x toolkit's version.</p>
+      <p><b>NVBit</b>, from NVIDIA Research, is a library for writing your own instrumentation tools. An NVBit tool is loaded into the application. When each kernel's machine code is loaded onto the GPU for the first time, NVBit lets the tool inspect its SASS and insert calls to the tool's own device functions before or after chosen instructions. It needs no source and no PTX, so it works on any compiled application, and it supports compute capability 3.5 to 12.1, Pascal included. NVBit is bpftime's nearest relative, and the difference between them is where in the pipeline each one edits.</p>
+
+      <figure class="dia">
+        @@SVG:taps@@
+        <figcaption><b>Diagram 10.3 — Where each tool gets in.</b> Notice the middle lane, which is the compiler chapter's pipeline running at load time. bpftime edits before <code>ptxas</code>, so it needs PTX in the fatbin; NVBit edits after, so it needs only SASS but must work in each generation's instruction set. That one difference explains most of what each tool can and cannot do.</figcaption>
+      </figure>
+
+      <h3>Host eBPF: what the kernel can see</h3>
+      <p>From the host kernel, eBPF sees two layers. Uprobes on <code>libcudart.so</code> and <code>libcuda.so</code> see every API call with its arguments, as the host-side chapter showed. Each hit traps into the kernel, so a uprobe on a call made a hundred thousand times a second is a cost you can measure. Kprobes on the NVIDIA driver see its system calls. The open kernel module's ioctl handler is <code>nvidia_unlocked_ioctl</code>, so a kprobe there sees context creation, memory allocation, pinning, and the waits that sleep in the kernel. It does not see launches, which never enter the kernel. And nothing on the host sees what happens inside a kernel after it starts. That gap, the empty bottom-right of diagram 10.1, is what the eBPF part fills.</p>
+
+      <table class="gen">
+        <caption>Tool support across the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td><code>nvidia-smi</code>, NVML</td><td>yes</td><td>yes</td><td>yes</td></tr>
+        <tr><td>DCGM profiling fields</td><td>check <code>dcgmi profile -l</code></td><td>check <code>dcgmi profile -l</code></td><td>yes, its main target</td></tr>
+        <tr><td>Nsight Systems</td><td>2025.3 or older; 2025.4 dropped Pascal</td><td>current</td><td>current</td></tr>
+        <tr><td>Nsight Compute</td><td>no; use <code>nvprof</code> from CUDA 12.x</td><td>current</td><td>current</td></tr>
+        <tr><td><code>cuda-gdb</code>, <code>compute-sanitizer</code></td><td>the CUDA 12.x versions</td><td>current</td><td>current</td></tr>
+        <tr><td>NVBit</td><td>yes, 3.5 to 12.1</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Kernel module, for kprobes</td><td>proprietary module</td><td>open module, <code>nvidia_unlocked_ioctl</code></td><td>open module</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p><code>nvidia-smi</code> comes with the driver, and <code>compute-sanitizer</code> and <code>cuda-gdb</code> with Arch's <code>cuda</code> package. Nsight Systems and Nsight Compute are separate installs (see Before you start). With the dGPU in Hybrid mode, run the lab program under each tool and keep the numbers next to the predictions:</p>
+<pre><code># terminal 2, while terminal 1 runs ./out/matvec 4096 4096 2000
+nvidia-smi dmon -s u
+
+nsys profile -t cuda,nvtx -o /tmp/mv ./out/matvec
+nsys stats /tmp/mv.nsys-rep
+ncu -k matvec_warp -c 1 --section SpeedOfLight ./out/matvec 4096 4096 5
+sudo bpftrace -e 'kprobe:nvidia_unlocked_ioctl { @ = count(); }' \
+              -c './out/matvec 4096 4096 2000'</code></pre>
+        <p>The last line puts the host-side chapter's claim (chapter 8) to the test. The program makes more than 8,000 launches. If the ioctl count stays far below that and does not grow when you change 2000 to 4000, launches bypass the host kernel.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Pick the layer first, then the tool. NVML and <code>nvidia-smi</code> see the whole device, and their "utilization" means only that some kernel was running; DCGM's profiling fields say how much of the SMs and memory were busy. Nsight Systems draws the timeline of API calls, kernels and copies, NVTX names ranges on it, and CUPTI is the library underneath. Nsight Compute replays one kernel per counter group, with clocks locked and caches flushed, to explain it. compute-sanitizer and cuda-gdb check and debug, NVBit rewrites SASS at load time, and host eBPF sees API calls and the driver's ioctls but nothing inside a kernel.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>NVML</dt><dd>The NVIDIA Management Library: device-wide, sampled state and counters; <code>nvidia-smi</code> uses it.</dd>
+          <dt>DCGM</dt><dd>Data Center GPU Manager: NVML plus device-wide profiling fields, for fleets.</dd>
+          <dt>Nsight Systems</dt><dd>The timeline tracer: API calls, kernels, copies and NVTX ranges.</dd>
+          <dt>NVTX</dt><dd>An annotation library that puts named ranges from your code on the timeline.</dd>
+          <dt>CUPTI</dt><dd>The CUDA Profiling Tools Interface, the library under NVIDIA's tools.</dd>
+          <dt>Nsight Compute</dt><dd>The per-kernel profiler that reads hardware counters.</dd>
+          <dt>replay pass</dt><dd>One run of a kernel by Nsight Compute to collect one group of counters.</dd>
+          <dt>compute-sanitizer</dt><dd>A checker for memory errors, races, uninitialised reads and bad synchronisation.</dd>
+          <dt>NVBit</dt><dd>NVIDIA Research's library for tools that rewrite SASS at load time.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: while the lab program loops on <code>matvec_naive</code> (16 blocks of 256 threads on 20 SMs), what does <code>nvidia-smi</code> show as GPU utilization, and roughly what would DCGM's fields 1002 (SMs with a warp) and 1003 (occupancy) show?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Utilization near 100%, field 1002 at most 80%, and field 1003 at most about 13%. A kernel is running almost all the time, which is all NVML's utilization measures. At most 16 of 20 SMs ever hold a block, so at most 16 / 20 = 80% of SM-cycles have a warp. Each busy SM holds 8 of 48 warps, and averaged over all 20 SMs that is 16 × 8 / (20 × 48) ≈ 13%.</p>
+          <p>The near-miss is to read 100% as "the GPU is full". It means "the GPU is never idle". The matvec chapter's fix, more and better-shaped blocks, would leave utilization at 100% and move the two DCGM fields up.</p>
+        </details>
+        <p>2. Nsight Compute reports a duration for <code>matvec_warp</code> that differs clearly from what the lab program's events report. Give two reasons from this chapter, and say which number you would quote as the kernel's speed.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>First, <code>ncu</code> locks the clocks, to boost by default, while the laptop in the lab loop runs at whatever clock its power and temperature allow. Second, it flushes the caches before each pass, so the small vectors x and y that stay in L2 across the lab's 200 back-to-back launches start cold every time. A third, smaller one is that the lab averages 200 launches queued back to back, while <code>ncu</code> runs one kernel alone.</p>
+          <p>Quote the event timing as the speed, because it is the kernel running the way the program runs it. Use <code>ncu</code> for the reasons, such as achieved bandwidth and stall mix, which are ratios that hold up when the clocks are locked. The near-miss is to treat <code>ncu</code>'s duration as the more accurate one because the tool is more detailed.</p>
+        </details>
+        <p>3. You want the GPU duration of every kernel, all the time, in a production vLLM server that replays CUDA graphs. Which tools from this chapter are out, and what are you left with?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Nsight Compute is out, because it replays and serialises kernels. compute-sanitizer and NVBit are out, because they cost far too much to leave running. NVML and DCGM have no per-kernel view. Uprobes on the launch functions see the moment of each launch and no GPU time at all, and with graphs they do not even see the launches (the host-side chapter's second question).</p>
+          <p>That leaves Nsight Systems for bounded windows of minutes, the CUPTI Activity API inside the process for an always-on timeline of kernel start and end times, and bpftime's GPU probes, which also see what happens inside the kernel at a cost that the probe-cost chapter (chapter 14) measures. The near-miss is to treat "always on" as a property of the tool. It is a property of its cost per event at your event rate.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#kernel-replay">Nsight Compute Profiling Guide: Kernel replay</a>, and the <a href="https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html">CLI reference</a> for <code>--clock-control</code> and <code>--cache-control</code>. Read the replay section before you trust a duration from <code>ncu</code>.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://docs.nvidia.com/nsight-systems/UserGuide/index.html">Nsight Systems User Guide</a>, and its <a href="https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html">release notes</a> for the Pascal cut-off.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://docs.nvidia.com/cupti/index.html">CUPTI documentation</a>, the <a href="https://docs.nvidia.com/deploy/nvml-api/index.html">NVML API reference</a> and the <a href="https://docs.nvidia.com/datacenter/dcgm/latest/dcgm-api/dcgm-api-field-ids.html">DCGM field IDs</a>. The interfaces behind every GPU dashboard and profiler; in CUPTI, the Activity and Callback APIs are what an observability tool needs first.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://github.com/NVlabs/NVBit">NVBit</a>, with the paper by Villa, Stephenson, Nellans and Keckler, <a href="https://doi.org/10.1145/3352460.3358307">NVBit: A Dynamic Binary Instrumentation Framework for NVIDIA GPUs</a> (MICRO 2019), the SASS-level counterpart to bpftime; and <a href="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html">Compute Sanitizer</a> and <a href="https://docs.nvidia.com/cuda/cuda-gdb/index.html">CUDA-GDB</a>, for checking correctness.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://eunomia.dev/tutorials/xpu/flamegraph/">eBPF tutorial: GPU flamegraphs with CUPTI and eBPF</a>. CUPTI's timeline joined to host stacks from eBPF, a pattern that works today on any of the three benches.</li>
+        </ul>
+      </div>
+    </section>

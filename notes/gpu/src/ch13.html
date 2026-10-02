@@ -1,0 +1,147 @@
+    <section id="ch13" class="chapter">
+      <span class="chnum">Chapter 13</span>
+      <h2>Getting inside someone else's kernel</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag EBPF">EBPF</span> <span class="tag ISA">ISA</span> — The last chapter ended with a handler in shared memory: a kprobe on <code>_Z11matvec_warpPKfS0_Pfii</code>, and the eBPF bytecode to run there. This chapter follows that handler until the probe is running inside every thread of our kernel. Nine steps, all in the target process, most of them before <code>main</code>. Every one of them uses something from the language part (Part II).</p>
+
+      <h3>The plan: edit the PTX, compile it again, swap the function</h3>
+      <p>bpftime cannot change a kernel that is already loaded on the GPU, and it does not try to edit SASS. Instead it makes a second copy of the kernel with the probe built in, and arranges for launches to use the copy. The copy is made from the kernel's PTX, which the compiler chapter showed is stored in the fatbin next to the SASS. PTX is a documented text language, so a probe can be inserted with string edits, and <code>ptxas</code> then does the hard parts: register allocation and instruction scheduling for the kernel and the probe together.</p>
+
+      <figure class="dia">
+        @@SVG:pipeline@@
+        <figcaption><b>Diagram 13.1 — bpftime's attach pipeline.</b> Notice which steps reuse the language part (Part II). Step 1 is the registration of the compiler chapter's diagram 5.3, step 2 reads the fatbin of diagram 5.2, step 5 is <code>ptxas</code>, step 6 is the driver API, and step 7 hooks the launch path of the host-side chapter. The blue boxes are bpftime's own work.</figcaption>
+      </figure>
+
+      <h3>Steps 1 and 2: catching the fatbin</h3>
+      <p>The agent's GPU attach implementation installs Frida listeners on the runtime's registration functions: <code>__cudaRegisterFatBinary</code>, <code>__cudaRegisterFunction</code>, <code>__cudaRegisterVar</code> and <code>__cudaRegisterFatBinaryEnd</code> (<code>bpftime/attach/nv_attach_impl/nv_attach_impl.cpp:369–390</code>). It finds the first one with <code>dlsym(RTLD_NEXT, …)</code>, which works only when the program uses the shared CUDA runtime. That is why every bpftime GPU example builds with <code>nvcc -cudart shared</code>. A statically linked runtime keeps these functions as local symbols, as the compiler chapter found with <code>nm</code>.</p>
+      <p>When a registration arrives, the listener walks the fatbin's entries, each starting with the magic number <code>0xBA55ED50</code>, copies the bytes, and extracts every PTX entry (<code>bpftime/attach/nv_attach_impl/nv_attach_impl_frida_setup.cpp:254–290</code>). The SASS entries are ignored. If the fatbin has no PTX, there is nothing to patch, and the kernel runs unprobed.</p>
+      <p>There is a second way in, for programs that were already running or registered their fatbins before the probe was attached. When a probe is attached, bpftime starts a background scan of every ELF module loaded in the process, looking for <code>.nv_fatbin</code> and <code>.nvFatBinSegment</code> sections (<code>nv_attach_impl.cpp:1800</code>, started at line 227). Until that scan finishes, launches use the original kernels (<code>nv_attach_impl_frida_setup.cpp:509–512</code>). So the first launches after a late attach are not probed.</p>
+
+      <h3>Step 3: the passes</h3>
+      <p>The editing is done by <b>passes</b>, small shared libraries that bpftime loads with <code>dlopen</code>. Each exports two functions, <code>print_config</code> and <code>process_input</code>, and its configuration says which handlers it serves: the <code>kprobe_entry</code> pass takes section names matching <code>^kprobe/.*$</code> and attach type 8, the <code>kretprobe</code> pass takes <code>^kretprobe/.*$</code> and type 9 (<code>bpftime/attach/nv_attach_impl/configs/ptxpass/kprobe_entry.json</code>). For each probe and each kernel it names, bpftime sends the pass a JSON request: the whole PTX file, the kernel's name, the eBPF instructions, and the names of two symbols that the probe will need. The pass answers with new PTX. Answers are cached by the SHA-256 of the request (<code>nv_attach_impl.cpp:889–1046</code>).</p>
+      <p>The entry pass does two things (<code>bpftime/attach/nv_attach_impl/pass/ptxpass_kprobe_entry/main.cpp:45–97</code>). First it compiles the eBPF program with llvmbpf into a PTX function called <code>__probe_func__</code> followed by the kernel's name, for target <code>sm_61</code>. Then it finds the kernel's body and inserts a call to that function just after the opening brace. The exit pass compiles its program the same way and inserts a call before every <code>ret</code> or <code>exit</code> in the body, keeping any predicate and any label on that line, so that branches to the epilogue still pass through the probe (<code>pass/ptxpass_kretprobe/main.cpp:37–64</code>). Here is what the two rules do to the real PTX of <code>matvec_warp</code>:</p>
+<pre><code>.visible .entry _Z11matvec_warpPKfS0_Pfii(
+	.param .u64 _Z11matvec_warpPKfS0_Pfii_param_0,
+	…
+	.param .u32 _Z11matvec_warpPKfS0_Pfii_param_4
+)
+{
+    <b>call __probe_func___Z11matvec_warpPKfS0_Pfii;</b>
+	.reg .pred 	%p&lt;13&gt;;
+	…
+	setp.ge.s32 	%p1, %r2, %r14;
+	@%p1 bra 	$L__BB1_10;      // rows past the end
+	…
+	setp.ne.s32 	%p12, %r3, 0;
+	@%p12 bra 	$L__BB1_10;      // lanes 1-31 skip the store
+	…
+	st.global.f32 	[%rd35], %f8;
+
+$L__BB1_10:
+	<b>call __retprobe_func___Z11matvec_warpPKfS0_Pfii;</b>
+	ret;
+}</code></pre>
+      <p class="lcap">Listing 13.1 — <code>lab/gpu/out/matvec.sm_89.ptx:119–261</code>, with the two passes' text rules applied by hand. The bold lines are inserted; the two probe functions themselves are prepended to the file. This was not captured from a bpftime run; the bench test will produce the real file.</p>
+      <p>The kernel has one <code>ret</code>, and every early exit branches to the label in front of it. So the exit probe runs in all 131,072 threads, including the 31 lanes per warp that skip the store, and the entry probe runs in all of them too. A probe on a kernel is a probe on each of its threads.</p>
+      <p>The probe functions take no parameters. A kernel probe in the Linux kernel gets the registers of the probed function in its context argument. Here the call passes nothing, so the probe cannot read the kernel's arguments, such as the pointer to W or the value of n. What it can read comes from helpers: indices, the timer and the special registers. A third pass, <code>kprobe_memcapture</code>, adds a probe at every load and store for memory tracing, which is a different and much heavier tool.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  s(["one thread of the patched matvec_warp starts"]) --> p1["call __probe_func__…:<br/>the entry probe runs"]
+  p1 --> body["the original kernel body:<br/>loads, FFMAs, shuffles"]
+  body --> q{"lane 0 of a<br/>valid row?"}
+  q -->|yes| st["store y[row]"] --> lab
+  q -->|no| lab["label $L__BB1_10"]
+  lab --> p2["call __retprobe_func__…:<br/>the exit probe runs"] --> r(["ret"])
+  p1 -.->|"helpers like 502 and 509<br/>stay on the GPU"| g1[("registers and<br/>device memory")]
+  p1 -.->|"host-map helpers"| h1[("request area<br/>in host memory")]
+  style p1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style p2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 13.2 — One thread of the patched kernel.</b> Notice that both probes sit on paths that every thread takes, whatever it does in between. The dotted arrows are the two kinds of work a probe can do, from the maps chapter: cheap work on the GPU, and requests that wait for the host.</figcaption>
+      </figure>
+
+      <h3>Steps 4 to 6: trampoline, compile, load</h3>
+      <p>The probe functions call helpers by name, <code>_bpf_helper_ext_0502</code> and so on, and read two globals: <code>constData</code>, the GPU address of the request area in the shared segment, and <code>map_info</code>, a table describing up to 1,024 maps. All of these are defined in the <b>trampoline</b>, a CUDA file (<code>trampoline/default_trampoline.cu</code>) compiled to PTX and committed to the repository as a C string in <code>trampoline_ptx.h</code>. bpftime prepends that PTX to the patched file (<code>bpftime/attach/nv_attach_impl/nv_attach_utils.cpp:19–22</code>). Listing 6.3, the spinlock at the heart of helper calls, is from it.</p>
+      <p>Then the file is compiled for the GPU it will run on. bpftime rewrites the PTX's <code>.target</code> line to the detected architecture, <code>sm_89</code> on the laptop, and compiles it with NVIDIA's PTX compiler library at <code>-O3</code> (<code>bpftime/attach/nv_attach_impl/nv_attach_fatbin_record.cpp:103–188</code>). This is <code>ptxas</code> in library form. It allocates registers for each kernel and the probe it now calls, so the patched kernel can need more registers than the original, with the occupancy consequences of the scheduling chapter. Finally <code>cuModuleLoadDataEx</code> loads the result as a second module in the program's context, and bpftime copies the request-area address and the map table into the module's <code>constData</code> and <code>map_info</code> (<code>nv_attach_fatbin_record.cpp:229–268</code>). The original module is untouched, and both now exist side by side.</p>
+
+      <h3>Steps 7 to 9: swapping the function at launch</h3>
+      <p>The last step happens at every launch. bpftime replaces <code>cudaLaunchKernel</code>, <code>cudaLaunchKernel_ptsz</code> and <code>cuLaunchKernel</code> with its own versions, and hooks the graph-node calls that the host-side chapter described (<code>nv_attach_impl.cpp:421–450</code>). For a driver launch, its version finds the name of the <code>CUfunction</code> being launched, looks for a patched function with the same name, and if there is one, launches that instead, with the same grid, block and arguments (<code>nv_attach_impl_frida_setup.cpp:489–527</code>). Runtime launches are matched by the host stub's address, which step 1 recorded with the kernel's name, and relaunched through <code>cuLaunchKernel</code> with the patched function (<code>nv_attach_impl_frida_setup.cpp:165–192</code>). The patched kernel has the same parameter list as the original, because the probe lives inside the body, so the arguments fit unchanged.</p>
+
+      <h3>Where attaching fails</h3>
+      <p>Each step depends on something being present, and each has a way to fail without an error, with the program running and the probe silent. The table lists them in pipeline order. The first column is what you see; the last is how to check.</p>
+      <table class="gen">
+        <caption>Silent failures, by step</caption>
+        <tr><th>Symptom</th><th>Cause</th><th>Check</th></tr>
+        <tr><td>No probe output at all</td><td>Static CUDA runtime: the registration hooks never fire, and only the late scan can help</td><td><code>nm -D</code> on the program for <code>__cudaRegisterFatBinary</code>; the compiler chapter's check</td></tr>
+        <tr><td>Some kernels probed, others not</td><td>No PTX in that fatbin: only SASS was shipped</td><td><code>cuobjdump -lptx</code> on the binary or library; PyTorch must be built with <code>+PTX</code> for bpftime's example</td></tr>
+        <tr><td>Kernels from Triton or NVRTC never probed</td><td>Loaded at run time with <code>cuModuleLoadData</code>, which bpftime calls and does not hook</td><td>Source of the kernel: generated at run time or compiled in</td></tr>
+        <tr><td>Patched module fails to load on an H100</td><td><code>wgmma</code> code with the target rewritten to <code>sm_90</code></td><td>bpftime's log; set <code>BPFTIME_SM_ARCH=sm_90a</code></td></tr>
+        <tr><td>A CUDA 13 program shows no probe output</td><td>Its stubs launch through <code>__cudaLaunchKernel</code>, which is not on the hook list; whether it reaches a hooked entry is untested</td><td>The host-side chapter's uprobe experiment</td></tr>
+        <tr><td>Probe silent in a graph-replaying server</td><td>Graph captured before the probe attached</td><td>Attach before the server warms up</td></tr>
+        <tr><td>A wrong kernel name</td><td>Mangled name mismatch</td><td><code>cuobjdump -symbols</code>, as in the last chapter</td></tr>
+      </table>
+
+      <table class="gen">
+        <caption>The pipeline on the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Final compile target</td><td><code>sm_61</code></td><td><code>sm_89</code></td><td><code>sm_90</code>, or <code>sm_90a</code> by hand</td></tr>
+        <tr><td>PTX in the application's fatbin</td><td>llama.cpp's CUDA 12 build ships <code>61-virtual</code>, which is PTX</td><td>our lab build has <code>compute_89</code> PTX</td><td>depends on the build; libraries often ship <code>sm_90a</code> code</td></tr>
+        <tr><td>Status here</td><td>untested</td><td>bench tests pending</td><td>untested</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Check the two preconditions on the lab program and on a library you care about, without a GPU. Does the binary use the shared runtime, and does its fatbin carry PTX for the kernels you want?</p>
+<pre><code>cd lab/gpu
+nm -D out/matvec_shared | grep __cudaRegisterFatBinary     # shared runtime: an import
+cuobjdump -lptx out/matvec_shared                          # PTX entries in the fatbin
+cuobjdump -lptx /opt/cuda/lib64/libcublas.so | grep -o 'sm_[0-9]*' | sort | uniq -c</code></pre>
+        <p>The last line answers "does cuBLAS ship PTX, and for which target?". Compare it with <code>cuobjdump -lelf</code>, which lists the SASS. Then apply listing 13.1's rules to <code>matvec_warp4</code> by hand: find its <code>.entry</code>, count its <code>ret</code> and <code>exit</code> instructions, and say how many calls the exit pass would insert.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>bpftime makes a probed copy of a kernel and swaps it in at launch. Frida listeners on the registration functions catch each fatbin, which needs the shared CUDA runtime, and a late scan of loaded modules covers fatbins registered earlier. Only PTX entries are used: passes loaded with <code>dlopen</code> insert <code>call __probe_func__&lt;kernel&gt;</code> after the body's opening brace and <code>call __retprobe_func__&lt;kernel&gt;</code> before each <code>ret</code> or <code>exit</code>, with the probe compiled by llvmbpf for <code>sm_61</code>. The trampoline PTX adds the helpers and two globals; the file's target is rewritten to the device's, it is compiled with the PTX compiler library, and loaded as a second module. Launch hooks swap the <code>CUfunction</code> by name, with the same arguments; every thread runs both probes, and the probes cannot see the kernel's arguments.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>pass</dt><dd>A bpftime plug-in, loaded with <code>dlopen</code>, that rewrites PTX for one kind of attach point.</dd>
+          <dt>trampoline</dt><dd>bpftime's PTX library of helpers and globals, prepended to every patched file.</dd>
+          <dt>late attach</dt><dd>Attaching after fatbins were registered, by scanning loaded ELF modules for them.</dd>
+          <dt>launch redirect</dt><dd>Replacing the launched <code>CUfunction</code> with the patched one of the same name.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: after patching, <code>ptxas</code> reports 48 registers per thread for <code>matvec_warp</code> instead of 40. With 256-thread blocks on the laptop, how many blocks and warps fit per SM now, and how many waves does the 512-block launch take?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>5 blocks, 40 warps, and 5.12 waves. A block needs 48 × 256 = 12,288 registers, and 65,536 / 12,288 = 5.33, so 5 blocks fit, against 6 before. That is 40 of 48 warps, 83% occupancy. 512 / (5 × 20) = 5.12 waves, against 4.27, so the launch now has six rounds, the last one almost empty.</p>
+          <p>For a memory-bound kernel, 40 warps may still hide latency well, so the time may barely change. The point is that a probe can cost time without executing a single slow instruction, by changing how the original kernel fits. The near-miss is to count only the probe's own instructions as its cost.</p>
+        </details>
+        <p>2. Your probe on a cuBLAS GEMV kernel, called from the lab program, never fires, while the same probe on <code>matvec_warp</code> works. Give three causes from this chapter that could explain it, and the order in which you would check them.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>First the name: cuBLAS kernels have long templated C++ names, so copy the real one from <code>cuobjdump -symbols</code>. Second, PTX: run <code>cuobjdump -lptx</code> on the library. On this laptop's CUDA 13.4, every PTX entry in <code>libcublas.so</code> is for <code>sm_120</code>, and the SASS covers <code>sm_75</code>, 80, 86, 90, 100 and 120, so the laptop runs <code>sm_86</code> SASS. bpftime would have to retarget <code>sm_120</code> PTX to <code>sm_89</code> by rewriting its <code>.target</code> line, which compiles only if those kernels use nothing newer. Third, the loading path: if cuBLAS loads its kernels through the driver without registering them, the registration hooks never see them, and only the late scan of loaded modules could.</p>
+          <p>The first two checks need no GPU. Whether cuBLAS's kernels are reachable at all is a bench test for this document. The near-miss is to blame the probe code, which ran fine on the other kernel.</p>
+        </details>
+        <p>3. NVBit edits SASS; bpftime edits PTX. Give one thing bpftime's choice buys and one thing it costs, with a concrete example of each from this chapter.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It buys a stable, documented language and a real compiler for the combined code. The pass inserts one line of text, and <code>ptxas</code> allocates registers and schedules the kernel and the probe together, for whichever generation is present, the same pass on Pascal, Ada and Hopper. NVBit has to work in each generation's undocumented SASS and save and restore state around each inserted call.</p>
+          <p>It costs the dependency on PTX and a recompile. A library that ships only SASS cannot be probed, the patched kernel's register allocation can change (question 1), and every patched module is compiled at start-up. The near-miss is to call one approach better. They make different trade-offs, which diagram 10.3 placed on either side of <code>ptxas</code>.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/bpftime/tree/master/attach/nv_attach_impl">bpftime <code>attach/nv_attach_impl</code></a>. The whole pipeline: <code>nv_attach_impl.cpp</code>, the Frida setup, the fatbin record, the passes and the trampoline.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://lpc.events/event/19/contributions/2168/">Extending eBPF to GPU Device and Driver Contexts</a> (Linux Plumbers Conference 2025). The authors' talk on the GPU attach design.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://frida.re/docs/javascript-api/">Frida Interceptor documentation</a>. The difference between attaching a listener and replacing a function, the two hook kinds used in steps 1 and 7.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/cuda-pro-tip-understand-fat-binaries-jit-caching/">CUDA Pro Tip: Understand Fat Binaries and JIT Caching</a> (NVIDIA blog). Why some fatbins carry PTX and others do not.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://doi.org/10.1145/3352460.3358307">Villa et al., NVBit</a> (MICRO 2019). The SASS-level alternative, for question 3.</li>
+        </ul>
+      </div>
+    </section>

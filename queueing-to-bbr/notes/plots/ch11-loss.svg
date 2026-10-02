@@ -1,0 +1,108 @@
+<svg viewBox="0 0 720 488" role="img" aria-label="Goodput against random loss for CUBIC and Reno on the bench, with the Mathis formula; below, the probe ratio g(1-p) for three pacing gains and the BBRv1 policer detector threshold" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="234.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="190.0" y2="190.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="194.0" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="570" y1="150.0" y2="150.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="154.0" text-anchor="end" fill="#898781">4</text>
+<line x1="58" x2="570" y1="110.0" y2="110.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="114.0" text-anchor="end" fill="#898781">6</text>
+<line x1="58" x2="570" y1="70.0" y2="70.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="74.0" text-anchor="end" fill="#898781">8</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="130.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 130.0)">goodput (Mbit/s)</text>
+<line x1="58" x2="570" y1="38.8" y2="38.8" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="42.8" fill="#898781">link 9.56</text>
+<polyline points="58.0,38.7 59.5,52.5 65.3,151.6 72.6,174.9 87.3,194.6 131.1,211.4 204.3,219.8 277.4,221.8 350.6,223.2 423.7,225.1 496.9,226.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="210.0" y2="210.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="214.0" fill="#1b1f24">Cubic</text>
+<polyline points="58.0,38.7 59.5,66.2 65.3,133.5 72.6,170.8 87.3,184.8 131.1,209.3 204.3,217.0 277.4,220.7 350.6,223.9 423.7,225.4 496.9,226.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="227.0" y2="227.0" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="231.0" fill="#1b1f24">Reno</text>
+<polyline points="61.7,104.4 65.3,141.2 69.0,157.5 72.6,167.2 76.3,173.8 79.9,178.7 83.6,182.5 87.3,185.6 90.9,188.1 94.6,190.3 98.2,192.1 101.9,193.7 105.5,195.2 109.2,196.4 112.9,197.6 116.5,198.6 120.2,199.5 123.8,200.4 127.5,201.2 131.1,201.9 134.8,202.6 138.5,203.2 142.1,203.8 145.8,204.4 149.4,204.9 153.1,205.4 156.7,205.8 160.4,206.3 164.1,206.7 167.7,207.1 171.4,207.4 175.0,207.8 178.7,208.1 182.3,208.5 186.0,208.8 189.7,209.1 193.3,209.3 197.0,209.6 200.6,209.9 204.3,210.1 207.9,210.4 211.6,210.6 215.3,210.8 218.9,211.1 222.6,211.3 226.2,211.5 229.9,211.7 233.5,211.9 237.2,212.1 240.9,212.2 244.5,212.4 248.2,212.6 251.8,212.7 255.5,212.9 259.1,213.1 262.8,213.2 266.5,213.4 270.1,213.5 273.8,213.6 277.4,213.8 281.1,213.9 284.7,214.0 288.4,214.2 292.1,214.3 295.7,214.4 299.4,214.5 303.0,214.7 306.7,214.8 310.3,214.9 314.0,215.0 317.7,215.1 321.3,215.2 325.0,215.3 328.6,215.4 332.3,215.5 335.9,215.6 339.6,215.7 343.3,215.8 346.9,215.9 350.6,216.0 354.2,216.0 357.9,216.1 361.5,216.2 365.2,216.3 368.9,216.4 372.5,216.5 376.2,216.5 379.8,216.6 383.5,216.7 387.1,216.8 390.8,216.8 394.5,216.9 398.1,217.0 401.8,217.0 405.4,217.1 409.1,217.2 412.7,217.2 416.4,217.3 420.1,217.4 423.7,217.4 427.4,217.5 431.0,217.6 434.7,217.6 438.3,217.7 442.0,217.7 445.7,217.8 449.3,217.9 453.0,217.9 456.6,218.0 460.3,218.0 463.9,218.1 467.6,218.1 471.3,218.2 474.9,218.2 478.6,218.3 482.2,218.3 485.9,218.4 489.5,218.4 493.2,218.5 496.9,218.5 500.5,218.6 504.2,218.6 507.8,218.7 511.5,218.7 515.1,218.8 518.8,218.8 522.5,218.9 526.1,218.9 529.8,218.9 533.4,219.0 537.1,219.0 540.7,219.1 544.4,219.1 548.1,219.1 551.7,219.2 555.4,219.2 559.0,219.3 562.7,219.3 566.3,219.3 570.0,219.4" fill="none" stroke="#898781" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<circle cx="58.0" cy="38.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="59.5" cy="52.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="65.3" cy="151.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72.6" cy="174.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="87.3" cy="194.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="131.1" cy="211.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="204.3" cy="219.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="277.4" cy="221.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.6" cy="223.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="423.7" cy="225.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="496.9" cy="226.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="58.0" cy="38.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="59.5" cy="66.2" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="65.3" cy="133.5" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72.6" cy="170.8" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="87.3" cy="184.8" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="131.1" cy="209.3" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="204.3" cy="217.0" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="277.4" cy="220.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.6" cy="223.9" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="423.7" cy="225.4" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="496.9" cy="226.6" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="18" r="4" fill="#2a78d6"/>
+<text x="85" y="22" fill="#1b1f24">Cubic (bench)</text>
+<circle cx="189" cy="18" r="4" fill="#1baf7a"/>
+<text x="202" y="22" fill="#1b1f24">Reno (bench)</text>
+<line x1="293" x2="307" y1="18" y2="18" stroke="#898781" stroke-width="2"/>
+<text x="312" y="22" fill="#1b1f24">Mathis formula, RTT 45 ms</text>
+<line x1="58" x2="570" y1="426.0" y2="426.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="430.0" text-anchor="end" fill="#898781">0.8</text>
+<line x1="58" x2="570" y1="386.0" y2="386.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="390.0" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="570" y1="346.0" y2="346.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="350.0" text-anchor="end" fill="#898781">1.2</text>
+<line x1="58" x2="570" y1="306.0" y2="306.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="310.0" text-anchor="end" fill="#898781">1.4</text>
+<line x1="58" x2="570" y1="446.0" y2="446.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="361.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 361.0)">g(1-p), a model</text>
+<line x1="58" x2="570" y1="386.0" y2="386.0" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="390.0" fill="#898781"></text>
+<polyline points="58.0,366.0 61.7,366.6 65.3,367.1 69.0,367.6 72.6,368.2 76.3,368.7 79.9,369.3 83.6,369.8 87.3,370.4 90.9,370.9 94.6,371.5 98.2,372.0 101.9,372.6 105.5,373.1 109.2,373.7 112.9,374.2 116.5,374.8 120.2,375.4 123.8,375.9 127.5,376.4 131.1,377.0 134.8,377.5 138.5,378.1 142.1,378.6 145.8,379.2 149.4,379.8 153.1,380.3 156.7,380.8 160.4,381.4 164.1,381.9 167.7,382.5 171.4,383.1 175.0,383.6 178.7,384.1 182.3,384.7 186.0,385.2 189.7,385.8 193.3,386.3 197.0,386.9 200.6,387.4 204.3,388.0 207.9,388.5 211.6,389.1 215.3,389.6 218.9,390.2 222.6,390.8 226.2,391.3 229.9,391.8 233.5,392.4 237.2,392.9 240.9,393.5 244.5,394.0 248.2,394.6 251.8,395.1 255.5,395.7 259.1,396.2 262.8,396.8 266.5,397.3 270.1,397.9 273.8,398.4 277.4,399.0 281.1,399.5 284.7,400.1 288.4,400.6 292.1,401.2 295.7,401.8 299.4,402.3 303.0,402.8 306.7,403.4 310.3,403.9 314.0,404.5 317.7,405.0 321.3,405.6 325.0,406.1 328.6,406.7 332.3,407.2 335.9,407.8 339.6,408.3 343.3,408.9 346.9,409.4 350.6,410.0 354.2,410.5 357.9,411.1 361.5,411.6 365.2,412.2 368.9,412.8 372.5,413.3 376.2,413.8 379.8,414.4 383.5,414.9 387.1,415.5 390.8,416.1 394.5,416.6 398.1,417.1 401.8,417.7 405.4,418.2 409.1,418.8 412.7,419.3 416.4,419.9 420.1,420.4 423.7,421.0 427.4,421.5 431.0,422.1 434.7,422.6 438.3,423.2 442.0,423.7 445.7,424.3 449.3,424.9 453.0,425.4 456.6,425.9 460.3,426.5 463.9,427.1 467.6,427.6 471.3,428.1 474.9,428.7 478.6,429.2 482.2,429.8 485.9,430.3 489.5,430.9 493.2,431.4 496.9,432.0 500.5,432.5 504.2,433.1 507.8,433.6 511.5,434.2 515.1,434.8 518.8,435.3 522.5,435.8 526.1,436.4 529.8,436.9 533.4,437.5 537.1,438.1 540.7,438.6 544.4,439.1 548.1,439.7 551.7,440.2 555.4,440.8 559.0,441.3 562.7,441.9 566.3,442.4 570.0,443.0" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="443.0" y2="443.0" stroke="#eda100" stroke-width="2"/>
+<text x="590" y="447.0" fill="#1b1f24">gain 1.1</text>
+<polyline points="58.0,336.0 61.7,336.6 65.3,337.2 69.0,337.9 72.6,338.5 76.3,339.1 79.9,339.8 83.6,340.4 87.3,341.0 90.9,341.6 94.6,342.2 98.2,342.9 101.9,343.5 105.5,344.1 109.2,344.8 112.9,345.4 116.5,346.0 120.2,346.6 123.8,347.2 127.5,347.9 131.1,348.5 134.8,349.1 138.5,349.8 142.1,350.4 145.8,351.0 149.4,351.6 153.1,352.2 156.7,352.9 160.4,353.5 164.1,354.1 167.7,354.8 171.4,355.4 175.0,356.0 178.7,356.6 182.3,357.2 186.0,357.9 189.7,358.5 193.3,359.1 197.0,359.8 200.6,360.4 204.3,361.0 207.9,361.6 211.6,362.2 215.3,362.9 218.9,363.5 222.6,364.1 226.2,364.8 229.9,365.4 233.5,366.0 237.2,366.6 240.9,367.2 244.5,367.9 248.2,368.5 251.8,369.1 255.5,369.8 259.1,370.4 262.8,371.0 266.5,371.6 270.1,372.2 273.8,372.9 277.4,373.5 281.1,374.1 284.7,374.8 288.4,375.4 292.1,376.0 295.7,376.6 299.4,377.2 303.0,377.9 306.7,378.5 310.3,379.1 314.0,379.8 317.7,380.4 321.3,381.0 325.0,381.6 328.6,382.3 332.3,382.9 335.9,383.5 339.6,384.1 343.3,384.8 346.9,385.4 350.6,386.0 354.2,386.6 357.9,387.2 361.5,387.9 365.2,388.5 368.9,389.1 372.5,389.8 376.2,390.4 379.8,391.0 383.5,391.6 387.1,392.2 390.8,392.9 394.5,393.5 398.1,394.1 401.8,394.8 405.4,395.4 409.1,396.0 412.7,396.6 416.4,397.2 420.1,397.9 423.7,398.5 427.4,399.1 431.0,399.8 434.7,400.4 438.3,401.0 442.0,401.6 445.7,402.2 449.3,402.9 453.0,403.5 456.6,404.1 460.3,404.8 463.9,405.4 467.6,406.0 471.3,406.6 474.9,407.2 478.6,407.9 482.2,408.5 485.9,409.1 489.5,409.8 493.2,410.4 496.9,411.0 500.5,411.6 504.2,412.2 507.8,412.9 511.5,413.5 515.1,414.1 518.8,414.8 522.5,415.4 526.1,416.0 529.8,416.6 533.4,417.2 537.1,417.9 540.7,418.5 544.4,419.1 548.1,419.8 551.7,420.4 555.4,421.0 559.0,421.6 562.7,422.2 566.3,422.9 570.0,423.5" fill="none" stroke="#eb6834" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="423.5" y2="423.5" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="427.5" fill="#1b1f24">gain 1.25</text>
+<polyline points="58.0,286.0 61.7,286.8 65.3,287.5 69.0,288.2 72.6,289.0 76.3,289.8 79.9,290.5 83.6,291.2 87.3,292.0 90.9,292.8 94.6,293.5 98.2,294.2 101.9,295.0 105.5,295.8 109.2,296.5 112.9,297.2 116.5,298.0 120.2,298.8 123.8,299.5 127.5,300.2 131.1,301.0 134.8,301.8 138.5,302.5 142.1,303.2 145.8,304.0 149.4,304.8 153.1,305.5 156.7,306.2 160.4,307.0 164.1,307.8 167.7,308.5 171.4,309.2 175.0,310.0 178.7,310.8 182.3,311.5 186.0,312.2 189.7,313.0 193.3,313.8 197.0,314.5 200.6,315.2 204.3,316.0 207.9,316.8 211.6,317.5 215.3,318.2 218.9,319.0 222.6,319.8 226.2,320.5 229.9,321.2 233.5,322.0 237.2,322.8 240.9,323.5 244.5,324.2 248.2,325.0 251.8,325.8 255.5,326.5 259.1,327.2 262.8,328.0 266.5,328.8 270.1,329.5 273.8,330.2 277.4,331.0 281.1,331.8 284.7,332.5 288.4,333.2 292.1,334.0 295.7,334.8 299.4,335.5 303.0,336.2 306.7,337.0 310.3,337.8 314.0,338.5 317.7,339.2 321.3,340.0 325.0,340.8 328.6,341.5 332.3,342.2 335.9,343.0 339.6,343.8 343.3,344.5 346.9,345.2 350.6,346.0 354.2,346.8 357.9,347.5 361.5,348.2 365.2,349.0 368.9,349.8 372.5,350.5 376.2,351.2 379.8,352.0 383.5,352.8 387.1,353.5 390.8,354.2 394.5,355.0 398.1,355.8 401.8,356.5 405.4,357.2 409.1,358.0 412.7,358.8 416.4,359.5 420.1,360.2 423.7,361.0 427.4,361.8 431.0,362.5 434.7,363.2 438.3,364.0 442.0,364.8 445.7,365.5 449.3,366.2 453.0,367.0 456.6,367.8 460.3,368.5 463.9,369.3 467.6,370.0 471.3,370.8 474.9,371.5 478.6,372.2 482.2,373.0 485.9,373.8 489.5,374.5 493.2,375.2 496.9,376.0 500.5,376.8 504.2,377.5 507.8,378.2 511.5,379.0 515.1,379.8 518.8,380.5 522.5,381.2 526.1,382.0 529.8,382.8 533.4,383.5 537.1,384.2 540.7,385.0 544.4,385.8 548.1,386.5 551.7,387.2 555.4,388.0 559.0,388.8 562.7,389.5 566.3,390.2 570.0,391.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="385.0" y2="385.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="389.0" fill="#1b1f24">gain 1.5</text>
+<polyline points="297.0,446.0 297.0,276.0" fill="none" stroke="#898781" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 3"/>
+<text x="65.3" y="438.0" fill="#4a5560" text-anchor="start">dashed line at 1: the probe delivers the estimate</text>
+<text x="292.6" y="279.0" fill="#4a5560" text-anchor="end">policer detector:</text>
+<text x="292.6" y="289.0" fill="#4a5560" text-anchor="end">16.3% of packets sent</text>
+<text x="292.6" y="299.0" fill="#4a5560" text-anchor="end">(lost/delivered 19.5%)</text>
+<line x1="66" x2="80" y1="264" y2="264" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="268" fill="#1b1f24">the probe phase delivers g(1-p) of the estimate (Cao Eq. 3)</text>
+<text x="58.0" y="462.0" text-anchor="middle" fill="#898781">0</text>
+<text x="131.1" y="462.0" text-anchor="middle" fill="#898781">5</text>
+<text x="204.3" y="462.0" text-anchor="middle" fill="#898781">10</text>
+<text x="277.4" y="462.0" text-anchor="middle" fill="#898781">15</text>
+<text x="350.6" y="462.0" text-anchor="middle" fill="#898781">20</text>
+<text x="423.7" y="462.0" text-anchor="middle" fill="#898781">25</text>
+<text x="496.9" y="462.0" text-anchor="middle" fill="#898781">30</text>
+<text x="570.0" y="462.0" text-anchor="middle" fill="#898781">35</text>
+<text x="314.0" y="480.0" text-anchor="middle" fill="#4a5560">random loss on the bottleneck (%)</text>
+<g class="hit"><title>random loss 0% · cubic: 9.56 Mbit/s · reno: 9.56 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.100, 1.25 -&gt; 1.250, 1.5 -&gt; 1.500</title><rect x="58.0" y="30" width="1.0" height="416.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 0.1% · cubic: 8.87 Mbit/s · reno: 8.19 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.099, 1.25 -&gt; 1.249, 1.5 -&gt; 1.498</title><rect x="58.7" y="30" width="3.7" height="416.0" fill="transparent"/><line x1="59.5" x2="59.5" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 0.5% · cubic: 3.92 Mbit/s · reno: 4.82 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.095, 1.25 -&gt; 1.244, 1.5 -&gt; 1.492</title><rect x="62.4" y="30" width="6.6" height="416.0" fill="transparent"/><line x1="65.3" x2="65.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 1% · cubic: 2.75 Mbit/s · reno: 2.96 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.089, 1.25 -&gt; 1.238, 1.5 -&gt; 1.485</title><rect x="69.0" y="30" width="11.0" height="416.0" fill="transparent"/><line x1="72.6" x2="72.6" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 2% · cubic: 1.77 Mbit/s · reno: 2.26 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.078, 1.25 -&gt; 1.225, 1.5 -&gt; 1.470</title><rect x="79.9" y="30" width="29.3" height="416.0" fill="transparent"/><line x1="87.3" x2="87.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 5% · cubic: 0.93 Mbit/s · reno: 1.03 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.045, 1.25 -&gt; 1.188, 1.5 -&gt; 1.425</title><rect x="109.2" y="30" width="45.3" height="416.0" fill="transparent"/><line x1="131.1" x2="131.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 8.2% · probe ratio g(1-p): 1.1 -&gt; 1.010, 1.25 -&gt; 1.147, 1.5 -&gt; 1.377</title><rect x="154.5" y="30" width="30.0" height="416.0" fill="transparent"/><line x1="178.0" x2="178.0" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 9.1% · probe ratio g(1-p): 1.1 -&gt; 1.000, 1.25 -&gt; 1.136, 1.5 -&gt; 1.364</title><rect x="184.5" y="30" width="13.2" height="416.0" fill="transparent"/><line x1="191.1" x2="191.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 10% · cubic: 0.51 Mbit/s · reno: 0.65 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.990, 1.25 -&gt; 1.125, 1.5 -&gt; 1.350</title><rect x="197.7" y="30" width="43.2" height="416.0" fill="transparent"/><line x1="204.3" x2="204.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 15% · cubic: 0.41 Mbit/s · reno: 0.47 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.935, 1.25 -&gt; 1.062, 1.5 -&gt; 1.275</title><rect x="240.9" y="30" width="46.1" height="416.0" fill="transparent"/><line x1="277.4" x2="277.4" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 16.3% · probe ratio g(1-p): 1.1 -&gt; 0.921, 1.25 -&gt; 1.046, 1.5 -&gt; 1.256</title><rect x="286.9" y="30" width="21.9" height="416.0" fill="transparent"/><line x1="296.4" x2="296.4" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 18% · probe ratio g(1-p): 1.1 -&gt; 0.902, 1.25 -&gt; 1.025, 1.5 -&gt; 1.230</title><rect x="308.9" y="30" width="21.2" height="416.0" fill="transparent"/><line x1="321.3" x2="321.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 19.2% · probe ratio g(1-p): 1.1 -&gt; 0.889, 1.25 -&gt; 1.010, 1.5 -&gt; 1.212</title><rect x="330.1" y="30" width="14.6" height="416.0" fill="transparent"/><line x1="338.9" x2="338.9" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 20% · cubic: 0.34 Mbit/s · reno: 0.30 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.880, 1.25 -&gt; 1.000, 1.5 -&gt; 1.200</title><rect x="344.7" y="30" width="20.5" height="416.0" fill="transparent"/><line x1="350.6" x2="350.6" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 22% · probe ratio g(1-p): 1.1 -&gt; 0.858, 1.25 -&gt; 0.975, 1.5 -&gt; 1.170</title><rect x="365.2" y="30" width="36.6" height="416.0" fill="transparent"/><line x1="379.8" x2="379.8" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 25% · cubic: 0.25 Mbit/s · reno: 0.23 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.825, 1.25 -&gt; 0.938, 1.5 -&gt; 1.125</title><rect x="401.8" y="30" width="58.5" height="416.0" fill="transparent"/><line x1="423.7" x2="423.7" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 30% · cubic: 0.19 Mbit/s · reno: 0.17 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.770, 1.25 -&gt; 0.875, 1.5 -&gt; 1.050</title><rect x="460.3" y="30" width="60.7" height="416.0" fill="transparent"/><line x1="496.9" x2="496.9" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 33.3% · probe ratio g(1-p): 1.1 -&gt; 0.734, 1.25 -&gt; 0.834, 1.5 -&gt; 1.001</title><rect x="521.0" y="30" width="49.0" height="416.0" fill="transparent"/><line x1="545.1" x2="545.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>

@@ -1,0 +1,13 @@
+# tcpdump 4.99.6 -n -v, record 201 of each 20,000-skb capture at rcv:c0 (bigpair.sh, kernel 7.2.6-arch2-1, 2026-10-02)
+== cap-v4-65536.pcap
+IP (tos 0x0, ttl 64, id 4747, offset 0, flags [DF], proto TCP (6), length 65212)
+    10.0.14.1.53134 > 10.0.14.2.5014: Flags [P.], seq 5787048:5852208, ack 1, win 63, options [nop,nop,TS val 3327423884 ecr 3261519396], length 65160
+== cap-v4-185000.pcap
+IP (tos 0x0, ttl 64, id 47792, offset 0, flags [DF], proto TCP (6), length 183948 [was 0, presumed TSO])
+    10.0.14.1.49486 > 10.0.14.2.5014: Flags [P.], seq 14367072:14550968, ack 1, win 63, options [nop,nop,TS val 17856422 ecr 2681072780], length 183896
+== cap-v6-65536.pcap
+IP6 (flowlabel 0x2f2f5, hlim 64, next-header TCP (6), payload length 64292) fd14::1.34772 > fd14::2.5014: Flags [P.], seq 11309160:11373420, ack 1, win 64, options [nop,nop,TS val 1154202267 ecr 1528827358], length 64260
+IP6 (flowlabel 0x2f2f5, hlim 64, next-header TCP (6), payload length 64292) fd14::1.34772 > fd14::2.5014: Flags [P.], seq 11373420:11437680, ack 1, win 64, options [nop,nop,TS val 1154202267 ecr 1528827358], length 64260
+== cap-v6-185000.pcap
+IP6 (flowlabel 0x5654f, hlim 64, next-header TCP (6), payload length 0) fd14::1 > fd14::2: [|tcp]
+IP6 (flowlabel 0x5654f, hlim 64, next-header TCP (6), payload length 0) fd14::1 > fd14::2: [|tcp]

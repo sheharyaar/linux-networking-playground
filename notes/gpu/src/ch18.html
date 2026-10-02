@@ -1,0 +1,163 @@
+    <section id="ch18" class="chapter">
+      <span class="chnum">Chapter 18</span>
+      <h2>One machine: llama.cpp and ggml</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag LLM">LLM</span> — vLLM is built for a GPU server with many users. llama.cpp is built for one machine: a C and C++ program that runs a model from a single file on a laptop, an old workstation card or a CPU. Of the two, it is the only one that runs on the P5000. This chapter follows a decode step through it at commit ec7630a: the graph it builds, the file it reads, the quantized multiply and the instruction underneath, its CUDA graphs, and its server.</p>
+      <p class="readfirst">This chapter skips the CPU, Metal, Vulkan and ROCm backends, multimodal models, speculative decoding, the importance-matrix quantization types, and how quantization error is measured.</p>
+
+      <h3>Two libraries: llama and ggml</h3>
+      <p>llama.cpp is two layers. <b>ggml</b> is a tensor library: tensors, operations on them, a graph of operations, and backends that run a graph on a CPU or a GPU. <b>libllama</b> sits on top. It loads models, keeps the KV cache, and builds a ggml graph of the model for each batch, using the builder the transformer chapter (chapter 15) walked through (<code>src/models/qwen2.cpp:53–154</code>). The programs you run, <code>llama-completion</code>, <code>llama-bench</code> and <code>llama-server</code>, all submit work through libllama's <code>llama_process</code>, or the older <code>llama_decode</code>, which ends in the same place.</p>
+      <p>A call to <code>llama_process</code> splits its batch into <b>micro-batches</b>: up to 2,048 tokens per call by default, and 512 at a time on the device (<code>common/common.h:453–454</code>). For each micro-batch it builds the graph, and the CUDA backend walks it node by node. Each node becomes one kernel launch, or several nodes become one fused kernel, such as a matrix-vector multiply with its bias add (<code>ggml/src/ggml-cuda/ggml-cuda.cu:4134–4142</code>).</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  prog["llama-completion,<br/>llama-bench, llama-server"] --> dec["libllama: llama_process,<br/>micro-batches of 512"]
+  dec --> kv[("KV cache: one<br/>buffer of cells")]
+  dec --> gb["qwen2.cpp builds<br/>a ggml graph:<br/>one node per operation"]
+  gb --> be["CUDA backend:<br/>a kernel per node<br/>or fused group;<br/>a CUDA graph<br/>on Volta and newer"]
+  be --> k["mul_mat_vec_q<br/>rms_norm_f32<br/>rope_neox<br/>k_get_rows<br/>flash_attn_ext_…"]
+  style be fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 18.1 — llama.cpp's layers for one decode step.</b> Notice that the whole stack runs in one process, with one loop deciding each step: no scheduler process, no worker. The kernel names at the bottom are real <code>__global__</code> functions in <code>ggml/src/ggml-cuda/</code>, which is what a GPU probe names.</figcaption>
+      </figure>
+
+      <h3>GGUF: one file holds the model</h3>
+      <p>A llama.cpp model is one GGUF file, the format the transformer chapter downloaded. It starts with the four bytes <code>GGUF</code> and a version number, 3 (<code>ggml/include/gguf.h:41–42</code>). Then come key-value metadata (the architecture, the number of layers, the context length the model was trained with, the tokenizer's 151,936 tokens), a table of tensors with each one's name, shape, type and offset, and the tensor data, aligned to 32 bytes (line 46). By default llama.cpp maps the file into memory and copies the tensors to the GPU from there (<code>common/arg.cpp:2693</code>).</p>
+      <p>The tensor table is enough to know what a decode step reads, before running anything. Reading the first megabytes of the two official files of our model gives this:</p>
+      <table class="gen">
+        <caption>The tensors of Qwen2.5-0.5B-Instruct in two official GGUF files, from their headers</caption>
+        <tr><th>Tensors</th><th>Shape</th><th>Q8_0 file, 676 MB</th><th>Q4_K_M file, 491 MB</th></tr>
+        <tr><td><code>token_embd</code>, the embedding table</td><td>151,936 × 896</td><td>Q8_0</td><td>Q5_0</td></tr>
+        <tr><td><code>output</code>, its separate copy</td><td>151,936 × 896</td><td>Q8_0</td><td>Q8_0</td></tr>
+        <tr><td><code>attn_q</code>, <code>attn_k</code>, <code>attn_output</code>, <code>ffn_gate</code>, <code>ffn_up</code>, in 24 layers</td><td>rows of 896</td><td>Q8_0</td><td>Q5_0</td></tr>
+        <tr><td><code>attn_v</code>, 24 layers</td><td>rows of 896</td><td>Q8_0</td><td>Q5_0 in 12 layers, Q8_0 in 12</td></tr>
+        <tr><td><code>ffn_down</code>, 24 layers</td><td>rows of 4,864</td><td>Q8_0</td><td>Q4_K in 12 layers, Q6_K in 12</td></tr>
+        <tr><td>norms and biases</td><td>vectors</td><td>F32</td><td>F32</td></tr>
+      </table>
+      <p>The file named Q4_K_M has only 24 Q4_K tensors. The next section explains why.</p>
+
+      <h3>Quantization: small integers with a scale</h3>
+      <p>Each of these types stores weights as small integers in fixed-size blocks, with one or two scale factors per block. Q8_0, the transformer chapter's file, takes 32 weights, stores one FP16 scale <i>d</i> and 32 signed 8-bit integers, and a weight is <i>d</i> × <i>q</i>: 34 bytes per 32 weights, 8.5 bits per weight (<code>ggml/src/ggml-common.h:251–256</code>). <b>Q5_0</b> does the same with 5-bit integers, 22 bytes per 32 weights. The <b>k-quants</b> work on super-blocks of 256 weights. <b>Q4_K</b> stores two FP16 numbers for the super-block, a 6-bit scale and a 6-bit minimum for each of its eight sub-blocks of 32, and 4 bits per weight: 144 bytes per 256, 4.5 bits per weight (<code>ggml-common.h:320–338</code>).</p>
+
+      <figure class="dia">
+        @@SVG:qblocks@@
+        <figcaption><b>Diagram 18.2 — 256 weights in four formats, to scale.</b> Notice how little of each strip the scales take: almost every byte is the quantized weights themselves, so the bytes a decode step reads fall almost in proportion to the bits per weight.</figcaption>
+      </figure>
+
+      <p>A name like Q4_K_M names a recipe for a whole file. Most tensors get Q4_K, and in 12 of the 24 layers, chosen by a fixed rule, <code>attn_v</code> and <code>ffn_down</code> get the larger Q6_K (<code>src/llama-quant.cpp:452–454</code>, <code>590–591</code> and <code>646–651</code>). On Llama-3-8B the recipe averages 4.89 bits per weight (<code>tools/quantize/README.md:167</code>). But k-quants need each row's length to be a multiple of 256, and our model's rows have 896 entries, which is 3.5 × 256. The quantizer then falls back: Q4_K becomes Q5_0 and Q6_K becomes Q8_0 (<code>llama-quant.cpp:396–418</code>). Only <code>ffn_down</code>, whose rows have 4,864 = 19 × 256 entries, keeps its k-quants. The file's name says what was asked for; the tensor table says what you got.</p>
+
+      <h3>One multiply, five kernels to choose from</h3>
+      <p>Every matrix multiply in the graph goes through <code>ggml_cuda_mul_mat</code> (<code>ggml-cuda.cu:1822–1875</code>), which picks a kernel from the weight type and the number of columns in the batch.</p>
+
+      <figure class="dia">
+        @@SVG:kernelgrid@@
+        <figcaption><b>Diagram 18.3 — How ggml picks a kernel for one multiply.</b> Notice that decode and prefill run different kernels on the same weights: a vector kernel when the batch is a few columns wide, a tiled matrix kernel when it is hundreds. A probe on one sees nothing of the other.</figcaption>
+      </figure>
+
+      <p>Decode is the top-left cell. Before <code>mul_mat_vec_q</code> runs, ggml quantizes the activation vector too, to 8-bit integers in blocks of 32 with a scale (<code>ggml/src/ggml-cuda/mmvq.cu:1506</code>). Each thread then loads four weights and four activations packed into two 32-bit registers and multiplies them with one instruction, <b>dp4a</b>: four 8-bit products, summed into a 32-bit integer (<code>vecdotq.cuh:246–258</code>). The scales are applied once per block, in floating point. ggml calls dp4a from compute capability 6.1, Pascal's GP104, and multiplies byte by byte below that (<code>common.cuh:51</code> and <code>740–746</code>). A three-line kernel shows the instruction in PTX and in SASS:</p>
+<pre><code>// out[i] = __dp4a(w[i], x[i], 0);   nvcc 13.4, -arch=sm_89
+PTX:   ld.global.u32   %r2, [%rd8];
+       ld.global.u32   %r3, [%rd9];
+       mov.u32         %r4, 0;
+       <b>dp4a.s32.s32    %r5, %r2, %r3, %r4;</b>
+SASS:  LDG.E R2, [R2.64] ;
+       LDG.E R5, [R4.64] ;
+       <b>IDP.4A.S8.S8 R9, R2, R5, RZ ;</b></code></pre>
+      <p class="lcap">Listing 18.1 — dp4a in PTX and in Ada SASS, compiled for this chapter. The <code>sm_90</code> build emits the same <code>IDP.4A.S8.S8</code>. CUDA 13 cannot target Pascal, so its SASS needs a 12.x toolkit.</p>
+      <p>This is the prologue's matvec again, with bytes in place of floats. Each weight is still used for one multiply-add, but it takes about a quarter of the FP32 matvec's bytes in Q8_0, a sixth in Q5_0 and a seventh in Q4_K. Decode is bound by bytes, so that is where the speed comes from.</p>
+      <p>Prefill is the matrix path. <code>mul_mat_q</code> multiplies tiles of quantized weights with tiles of the 512 activation columns, on int8 tensor cores from Turing on (<code>mmq.cu:371–373</code>), and with dp4a on Pascal (lines 375–387).</p>
+
+      <h3>CUDA graphs, and the launch path on Hopper</h3>
+      <p>llama.cpp builds ggml with CUDA graphs on (<code>CMakeLists.txt:169–171</code>), and ggml switches them off below Volta, so on the P5000 every kernel is launched one by one (<code>ggml-cuda.cu:4430–4436</code>). The environment variable <code>GGML_CUDA_DISABLE_GRAPHS</code> turns them off anywhere (<code>common.cuh:1289</code>). ggml captures a graph once two calls in a row have identical nodes: the same shapes, strides and data pointers (<code>ggml-cuda.cu:2597–2637</code> and <code>4459–4481</code>). After that it replays the graph until something changes, then runs one call directly and captures again. The part of the KV cache that attention reads is padded to a multiple of 256 tokens (<code>src/llama-kv-cache.cpp:1265–1270</code>), so a decode loop can replay one graph for up to 256 tokens. Every capture goes through the launch functions, so a probe loaded with the process sees each capture, as the host-side chapter (chapter 8) described.</p>
+      <p>Hopper adds <b>programmatic dependent launch</b>: a kernel may start before the kernel ahead of it in the same stream has finished, and waits inside for the data it needs. NVIDIA's guide says it is available from compute capability 9.0, and that the dependent kernel must be launched with the extensible launch call, <code>cudaLaunchKernelEx</code>. ggml uses it for every kernel whose PTX was compiled for 9.0 or newer (<code>common.cuh:1670–1701</code>). bpftime at commit a900f85 replaces <code>cudaLaunchKernel</code>, its <code>_ptsz</code> variant and <code>cuLaunchKernel</code> (<code>nv_attach_impl.cpp:421–429</code>), and nothing named <code>LaunchKernelEx</code>. So on an H100 build for <code>90</code>, ggml's launches skip bpftime's redirect. <code>GGML_CUDA_PDL=0</code> sends them through the normal launch (<code>common.cuh:1693–1696</code>). This follows from the source; it has not been run on an H100.</p>
+
+      <h3>llama-server: slots in a fixed cache</h3>
+      <p><code>llama-server</code> serves several conversations at once, each in a <b>slot</b>. By default it creates 4 slots that share one cache (<code>tools/server/server.cpp:160–165</code>, <code>common/arg.cpp:1403</code>), and continuous batching is on (<code>arg.cpp:2570</code>). Each step, <code>update_slots</code> (<code>tools/server/server-context.cpp:2793</code>) adds one sampled token for every slot that is generating (line 3096), adds waiting prompt tokens until the batch holds 2,048 (line 3108), and calls <code>llama_process</code>. That is vLLM's step in miniature, with a batch size where vLLM has a token budget.</p>
+      <p>The cache is one buffer of token cells, allocated at start-up. Its size is <code>-c</code>, by default the context length the model was trained with, 32,768 here, reduced to fit free memory when <code>--fit</code> is on, which is the default (<code>common/common.h:452</code> and <code>478</code>). When a step finds no free cells, the server halves the batch and tries again (<code>server-context.cpp:3728–3733</code>). A request that arrives while all slots are busy is deferred until one frees up (<code>server-context.cpp:2405–2407</code>). A new request goes preferably to a slot whose last prompt shares at least 10% of its own, and the shared start is reused from that slot's cache (<code>arg.cpp:3796–3797</code>, <code>common.h:697</code>).</p>
+      <table class="gen">
+        <caption>The same job, two designs</caption>
+        <tr><th></th><th>vLLM V1</th><th>llama-server</th></tr>
+        <tr><td>Who decides each step</td><td>a scheduler in its own process</td><td>the server's loop, in the same process as the model</td></tr>
+        <tr><td>Work per step</td><td>a token budget across up to 256 or 1,024 requests</td><td>one token per generating slot, plus prompt tokens up to 2,048</td></tr>
+        <tr><td>KV cache</td><td>pages of 16 tokens, allocated as requests grow</td><td>one buffer of cells, sized at start-up</td></tr>
+        <tr><td>Shared prompt starts</td><td>hashed blocks, shared by any requests</td><td>reused within a slot</td></tr>
+        <tr><td>Out of cache</td><td>preempt a request, recompute it later</td><td>halve the batch and retry</td></tr>
+        <tr><td>Weights</td><td>BF16 or FP16 by default</td><td>whatever the GGUF file holds, often 4 to 8 bits</td></tr>
+      </table>
+
+      <h3>What llama-server reports</h3>
+      <p>With <code>--metrics</code> (<code>arg.cpp:3592</code>), <code>/metrics</code> serves counters and gauges named <code>llamacpp:…</code> (<code>tools/server/server-task.cpp:1523–1598</code>): <code>prompt_tokens_total</code> and <code>tokens_predicted_total</code>, the seconds spent on each, <code>n_decode_total</code> for decode calls, average throughput in <code>prompt_tokens_seconds</code> and <code>predicted_tokens_seconds</code>, <code>requests_processing</code>, <code>requests_deferred</code> for requests waiting for a slot, and <code>n_busy_slots_per_decode</code>. There is no TTFT or ITL histogram. Each response carries a <code>timings</code> object instead, with <code>prompt_ms</code>, <code>predicted_per_token_ms</code> and <code>cache_n</code>, the prompt tokens reused from the cache (<code>tools/server/server-common.cpp:84–95</code>). <code>prompt_ms</code> is the prefill alone: its clock starts when a slot begins the prompt (<code>server-context.cpp:3141</code>, <code>server-common.h:391–415</code>). The time a request spent waiting for a slot appears nowhere per request, and that gap is one reason to probe, which is where the next chapter starts.</p>
+
+      <table class="gen">
+        <caption>llama.cpp on the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Build</td><td><code>61</code>, with a CUDA 12.x toolkit; ggml adds Pascal only below CUDA 13 (<code>ggml/src/ggml-cuda/CMakeLists.txt:43–44</code>)</td><td><code>89</code></td><td><code>90</code></td></tr>
+        <tr><td>Decode multiply</td><td>dp4a</td><td>dp4a</td><td>dp4a</td></tr>
+        <tr><td>Prefill multiply</td><td>dp4a tiles; no tensor cores</td><td>int8 tensor cores</td><td>int8 tensor cores; ggml has no <code>wgmma</code> or TMA code at this commit</td></tr>
+        <tr><td>FP16 arithmetic</td><td>slow on GP104, and ggml avoids its FP16 paths there (<code>common.cuh:313–317</code>)</td><td>fast</td><td>fast</td></tr>
+        <tr><td>CUDA graphs</td><td>off</td><td>on</td><td>on</td></tr>
+        <tr><td>Kernel launch</td><td>the normal launch</td><td>the normal launch</td><td><code>cudaLaunchKernelEx</code>, unless <code>GGML_CUDA_PDL=0</code></td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Build llama.cpp as in Before you start, with the architecture named. First check that the library carries PTX, which the next chapter's probes need, and count the dp4a instructions in it:</p>
+<pre><code>cuobjdump --list-ptx build/bin/libggml-cuda.so | head -3
+cuobjdump -ptx build/bin/libggml-cuda.so | grep -c dp4a</code></pre>
+        <p>Then, with the dGPU in Hybrid mode, compare the two files and the effect of CUDA graphs. Write down a prediction for each <code>tg128</code> first, from the first question below:</p>
+<pre><code>./build/bin/llama-bench -p 512 -n 128 \
+    -m qwen2.5-0.5b-instruct-q8_0.gguf,qwen2.5-0.5b-instruct-q4_k_m.gguf
+GGML_CUDA_DISABLE_GRAPHS=1 ./build/bin/llama-bench -p 512 -n 128 \
+    -m qwen2.5-0.5b-instruct-q8_0.gguf</code></pre>
+        <p>The measured numbers will be below the ceilings. A token of this small model is a few hundred short kernels, and each one has a fixed cost that bytes do not explain. The run without graphs shows how much of that cost was on the CPU side.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>llama.cpp is libllama on top of ggml: <code>llama_process</code> splits a batch into micro-batches, builds a ggml graph of the model for each, and the CUDA backend runs one kernel per node or per fused group. A model is one GGUF file whose weights are blocks of small integers with scales; Q4_K_M is a recipe, and for rows that are not a multiple of 256 its k-quants fall back to Q5_0 and Q8_0. Each multiply picks a kernel, dp4a vector kernels for decode and tiled kernels on tensor cores or dp4a for prefill, and CUDA graphs are captured once shapes repeat, except below Volta. On Hopper, ggml launches with <code>cudaLaunchKernelEx</code>, which bpftime does not hook. <code>llama-server</code> runs slots in a fixed cache, halves its batch when the cache is full, and reports throughput but no latency histograms.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>ggml, libllama</dt><dd>llama.cpp's tensor-and-graph library, and the model library built on it.</dd>
+          <dt>micro-batch</dt><dd>The slice of a batch that one graph run processes on the device, 512 tokens by default.</dd>
+          <dt>Q5_0</dt><dd>Blocks of 32 weights as 5-bit integers with one FP16 scale.</dd>
+          <dt>k-quants, Q4_K, super-block</dt><dd>Formats over 256 weights, with 6-bit scales and minimums for each 32.</dd>
+          <dt>quantization recipe</dt><dd>A per-tensor choice of types, named by one label such as Q4_K_M.</dd>
+          <dt>dp4a</dt><dd>One instruction that multiplies four pairs of 8-bit integers and adds the sum to a 32-bit integer.</dd>
+          <dt>programmatic dependent launch</dt><dd>Hopper's way to start a kernel before the one ahead of it in the stream has finished.</dd>
+          <dt>slot</dt><dd>llama-server's place for one conversation, with its share of the cache.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: using the tensor table above, roughly how many bytes does one decode step read from the Q4_K_M file, and what is the ceiling in tokens per second for one sequence on the laptop and on the P5000? The F32 vectors and the tokenizer are small enough to ignore.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 392 MB, so about 550 tokens per second on the laptop and about 735 on the P5000. The tensors add up to about 485 MB, and the 94 MB Q5_0 embedding table is read one row at a time, which leaves about 392 MB. Most of it is Q5_0, plus the 145 MB Q8_0 output copy and the Q4_K and Q6_K <code>ffn_down</code> layers. 0.392 GB / 216 GB/s ≈ 1.8 ms, and 0.392 GB / 288 GB/s ≈ 1.4 ms.</p>
+          <p>The near-miss is to multiply 494 million weights by 4.89 bits, which gives about 300 MB and a ceiling near 715 tokens per second on the laptop. It uses a Llama-3-8B average for a file that is mostly Q5_0 and holds a second Q8_0 copy of the largest matrix.</p>
+        </details>
+        <p>2. A uprobe on <code>cudaLaunchKernel</code> during <code>llama-bench</code>'s generation test shows a steady stream of calls on the P5000, and on the laptop a burst every now and then with almost nothing in between. Explain both.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>ggml disables CUDA graphs below Volta, so on the P5000 every node of every token's graph is an ordinary launch: a few hundred calls per token, steadily. On the laptop, ggml captures a graph once two calls in a row have identical nodes, and replays it with one <code>cudaGraphLaunch</code>, which does not call <code>cudaLaunchKernel</code>.</p>
+          <p>The bursts are the captures, plus the step that runs directly before each one. They come when something in the graph changes, for example when the padded length of cache that attention reads crosses a multiple of 256 tokens. The near-miss is that the laptop's GPU is idle between bursts. It is busy the whole time, running kernels whose launches no longer pass through the probed function.</p>
+        </details>
+        <p>3. Users of a <code>llama-server</code> with 4 slots report a time to first token of several seconds, but every response's <code>timings.prompt_ms</code> is under 200 ms. Where did the time go, which metric shows it, and what would you change?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The time went to waiting for a slot. <code>prompt_ms</code> measures only the prefill, so a request that waited behind four long generations shows a small <code>prompt_ms</code> and a long TTFT. <code>llamacpp:requests_deferred</code> above zero, with <code>requests_processing</code> at 4, shows requests queueing.</p>
+          <p>More slots help, with <code>-np</code>, as long as the cache is large enough for them: each slot needs room for its context. So do shorter outputs, or a second server. The near-miss is to tune prefill, for example with a larger batch. Prefill was never the slow part.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://github.com/ggml-org/llama.cpp">llama.cpp on GitHub</a>, pinned here at commit ec7630a, with the <a href="https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md">llama-server README</a> for every flag and endpoint used above.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://github.com/ggml-org/ggml/blob/master/docs/gguf.md">The GGUF specification</a> (ggml docs), and <a href="https://huggingface.co/docs/hub/gguf">GGUF on the Hugging Face Hub</a>, which shows any GGUF file's tensor table in the browser.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://github.com/ggml-org/llama.cpp/pull/1684">k-quants, pull request 1684</a> (ikawrakow, 2023), where the Q2_K to Q6_K formats were introduced and explained, and the <a href="https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md">quantize README</a> for today's sizes and speeds.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#integer-arithmetic-instructions-dp4a">PTX ISA: dp4a</a>, the instruction behind every quantized decode multiply.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/programmatic-dependent-launch.html">CUDA Programming Guide: Programmatic Dependent Launch and Synchronization</a>. The Hopper feature that moves ggml's launches to <code>cudaLaunchKernelEx</code>.</li>
+        </ul>
+      </div>
+    </section>

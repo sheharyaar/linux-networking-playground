@@ -1,0 +1,1 @@
+mflow send: 16 flows, goodput after 5 s (Mbit/s): min 0.485 median 0.485 max 0.485 total 7.76; RTT median 1743 ms; retransmissions 1614

@@ -1,0 +1,181 @@
+    <section id="ch14" class="chapter">
+      <span class="chnum">Chapter 14</span>
+      <h2>Writing GPU probes, and what they cost</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag EBPF">EBPF</span> <span class="tag TOOLS">TOOLS</span> — The last two chapters took bpftime apart. This one uses it. We write a probe that measures what the scheduling chapter predicted for our matvec, the waves and the tail, and then work out what the probe costs, from the code that runs it. The chapter ends with the two extensions the finish line asked for: a new helper, and a new kind of attach point.</p>
+
+      <h3>A probe for the tail</h3>
+      <p>The scheduling chapter predicted that <code>matvec_warp</code>'s 512 blocks run in about 4.27 waves on the laptop, with a partial last wave as a tail. A probe can check that from inside the kernel. Each warp of <code>matvec_warp</code> computes one row, so the probe records, for each row, when its warp started and finished and on which SM. The loader then reads the 4,096 records and prints the spread of start times, the length of the tail and the rows per SM. The files are in <code>lab/gpu/probe/</code>: the probe, a loader, and a Makefile that builds both with the system's clang, bpftool and libbpf.</p>
+<pre><code>struct {
+	__uint(type, BPF_MAP_TYPE_GPU_ARRAY_MAP);   // 1503: one copy, in device memory
+	__uint(max_entries, ROWS);
+	__type(key, u32);
+	__type(value, struct row_times);
+} rows SEC(".maps");
+…
+SEC("kprobe/_Z11matvec_warpPKfS0_Pfii")
+int matvec_warp_entry()
+{
+	u32 row;
+	struct row_times *t;
+
+	if (lane0_row(&amp;row))         // lanes 1 to 31 stop here
+		return 0;
+	t = bpf_map_lookup_elem(&amp;rows, &amp;row);
+	if (!t)
+		return 0;
+	t-&gt;start_ns = bpf_get_globaltimer();   // helper 502
+	t-&gt;start_sm = bpf_get_sm_id();         // helper 509
+	return 0;
+}</code></pre>
+      <p class="lcap">Listing 14.1 — <code>lab/gpu/probe/matvec_tail.bpf.c:26–65</code>. The exit probe, on <code>kretprobe/</code> with the same name, writes <code>end_ns</code> and <code>end_sm</code> the same way.</p>
+      <p>Three choices in it come straight from the last two chapters. The map is a GPU array map, so a lookup returns a device pointer and the stores go to device memory without involving the host. Only lane 0 of each warp records, because the warp's 32 lanes run the same row in lockstep and one record per row is all the question needs. And it records the SM at both ends, so a block that was preempted and moved, as in the scheduling chapter, shows up instead of corrupting the timing. The helper <code>lane0_row</code> recomputes the row exactly as the kernel does, from the block index, the block size and the thread index (helpers 503, 504 and 505).</p>
+      <p>clang compiles the entry probe to 46 eBPF instructions with six helper calls, and <code>llvm-objdump</code> shows them in order: 505, 503, 504, then helper 1 for the map lookup, then 502 and 509. All six are on the "no" side of the last chapter's table: none of them needs the host.</p>
+
+      <h3>Running it</h3>
+      <p>bpftime itself must be built first (Before you start). Then the loader runs under the syscall server in one terminal, and the target under the agent in another, with the same segment name. Run the lab program with one iteration, so the map holds a single, clean launch of <code>matvec_warp</code>:</p>
+<pre><code># terminal 1
+cd lab/gpu/probe &amp;&amp; make
+BPFTIME_LOG_OUTPUT=console BPFTIME_GLOBAL_SHM_NAME=matvec_tail \
+LD_PRELOAD=$HOME/workspace/repos/bpftime/build/runtime/syscall-server/libbpftime-syscall-server.so \
+    ./matvec_tail
+
+# terminal 2
+BPFTIME_LOG_OUTPUT=console BPFTIME_GLOBAL_SHM_NAME=matvec_tail \
+LD_PRELOAD=$HOME/workspace/repos/bpftime/build/runtime/agent/libbpftime-agent.so \
+    ../out/matvec_shared 4096 4096 1</code></pre>
+      <p>Before you run it, write down what the scheduling and tooling chapters predict. All 4,096 rows should be recorded. The kernel span should be close to the 311 µs floor plus whatever the probe adds. About 205 rows should land on each of the 20 SMs. The first bucket of start times should hold about 960 rows, the first wave of 120 blocks of 8 rows, and the later waves should blur, as the scheduling chapter said. The last 10% of rows should take a visible share of the span, which is the tail. No row should change SM on an otherwise idle laptop. Two things in this setup are untested: whether the system libbpf behaves like the one bpftime's examples build from its submodule, and whether a CUDA 13 launch reaches bpftime's hooks at all, the host-side chapter's open question.</p>
+
+      <h3>What a probe costs</h3>
+      <p>A probe's cost has four parts, and each comes from a mechanism you have already seen.</p>
+      <p>The first is instructions, paid by whole warps. Every thread executes the probe, and its first branch, <code>if (tx &amp; 31)</code>, splits each warp: 31 lanes return while lane 0 runs the rest. Under SIMT the warp as a whole waits for lane 0 (diagram 1.2), so every warp pays for the longest path once. Limiting the work to lane 0 saves memory traffic and map space, and saves no issue slots. The GPU helpers are separate functions in the trampoline, marked <code>__noinline__</code>, and the ones that return three values do so through pointers into the probe's stack, which in PTX is local memory: the <code>STL</code> and <code>LDL</code> of the SASS chapter.</p>
+      <p>The second is registers. <code>ptxas</code> compiles the kernel and the probe together, and the combined kernel can need more registers than the original, with fewer blocks per SM as a result (the last chapter's first question).</p>
+      <p>The third is the one that can be enormous: helpers that need the host. A lookup in an ordinary map, <code>bpf_printk</code>, <code>bpf_get_current_pid_tgid</code>, <code>bpf_perf_event_output</code> and helper 501 all go through <code>make_helper_call</code>. That function takes the active lanes of the warp one at a time. Each takes a single spinlock shared by every thread on the GPU, writes its request into the host-memory request area, sets a flag, and spins until the host answers (<code>bpftime/attach/nv_attach_impl/trampoline/default_trampoline.cu:131–172</code>). On the host, the agent's watcher thread checks the flag, handles at most one request, and then sleeps for a millisecond, every time round its loop (<code>bpftime/runtime/src/attach/bpf_attach_ctx_cuda.cpp:118–276</code>).</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant L as one GPU lane
+  participant K as GPU-wide lock
+  participant R as request area,<br/>host memory
+  participant W as watcher thread
+  L->>K: spin until acquired
+  L->>R: key, request id, flag1 = 1,<br/>membar.sys
+  Note over W: sleeping, up to 1 ms
+  W->>R: sees flag1, runs the real<br/>map operation, writes the answer
+  W->>R: flag2 = 1
+  L->>R: polls flag2 over PCIe,<br/>reads the answer, flag2 = 0
+  L->>K: release
+  Note over L,W: the next lane, from any warp on any SM, can start now
+        </div>
+        <figcaption><b>Diagram 14.1 — One host-call helper.</b> Notice the note on the watcher: the request waits until the thread's next wake-up, and the lock keeps every other host call on the GPU waiting behind it. Nothing here depends on how fast the GPU is.</figcaption>
+      </figure>
+
+      <p>Put together, those two pieces of code serve at most one host call per watcher wake-up, about a thousand per second for the entire GPU, each taking up to a millisecond. While they wait, the other threads that want a host call spin on the lock, issuing atomic operations that use the SMs and the memory system. Diagram 14.2 draws five lanes asking at once.</p>
+
+      <figure class="dia">
+        @@SVG:hostcalls@@
+        <figcaption><b>Diagram 14.2 — Host calls, one per wake-up.</b> Notice that the five requests arrive within microseconds of each other and finish four milliseconds apart. The order across warps depends on who wins the lock; the spacing depends only on the watcher's sleep. The timing here is the model from the source code, to be measured on the bench.</figcaption>
+      </figure>
+
+      <p>The fourth is start-up. Every fatbin with a probed kernel is patched and compiled by the PTX compiler library at registration, before <code>main</code>, so a program with thousands of kernels starts noticeably slower. The cost is paid once per process; within a process, results are cached by hash.</p>
+
+      <table class="gen">
+        <caption>What each kind of probe work costs, from the code at commit a900f85</caption>
+        <tr><th>Work in the probe</th><th>Example</th><th>Where it runs</th><th>Cost</th></tr>
+        <tr><td>Arithmetic and branches</td><td>the lane-0 test</td><td>the SM</td><td>an instruction each; a divergent path is paid by the whole warp</td></tr>
+        <tr><td>GPU helper</td><td>502 to 511</td><td>the SM</td><td>a function call and a special-register read; out-parameters through local memory</td></tr>
+        <tr><td>GPU map access</td><td>per-thread array, GPU array</td><td>the SM and device memory</td><td>address arithmetic and one global-memory access</td></tr>
+        <tr><td>Host helper</td><td>ordinary maps, 6, 14, 25, 501</td><td>the agent's watcher thread</td><td>one at a time for the whole GPU, up to about 1 ms each</td></tr>
+        <tr><td>Larger kernel</td><td>any probe</td><td><code>ptxas</code></td><td>possibly more registers, fewer blocks per SM</td></tr>
+        <tr><td>Patching</td><td>any probe</td><td>the host, at registration</td><td>one compile per fatbin, per process</td></tr>
+      </table>
+      <p>The table gives one rule for writing probes: keep everything that runs per thread on the GPU, and let the loader do aggregation on the host. A probe that needs the process ID can have the loader write it into a GPU map once, instead of calling helper 14 in every thread. A probe that wants to print should count into a GPU map and let the loader print.</p>
+
+      <h3>Adding a helper</h3>
+      <p>The finish line asked for enough understanding to add a helper. Here is helper 512, which returns the SM's cycle counter. The PTX manual documents <code>%clock64</code> as a 64-bit cycle counter. By contrast, it describes <code>%globaltimer</code>, behind helper 502, as a register "intended for use by NVIDIA tools" whose behaviour is target-specific, so a second clock is useful. The work has four steps, all of them in bpftime's tree.</p>
+      <p>First, implement it in the trampoline, next to the others, with the five 64-bit parameters every helper takes:</p>
+<pre><code>extern "C" __noinline__ __device__ uint64_t
+_bpf_helper_ext_0512(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+{
+	// get this SM's cycle counter
+	uint64_t cycles;
+	asm volatile("mov.u64 %0, %%clock64;" : "=l"(cycles));
+	return cycles;
+}</code></pre>
+      <p class="lcap">Listing 14.2 — added to <code>bpftime/attach/nv_attach_impl/trampoline/default_trampoline.cu</code>, before <code>bpf_main</code>. The name is fixed: llvmbpf calls helper <i>n</i> as <code>_bpf_helper_ext_%04u</code> (<code>bpftime/vm/llvm-jit/src/compiler_utils.hpp:39–44</code>).</p>
+      <p>Second, regenerate <code>trampoline_ptx.h</code>. The trampoline's Makefile compiles the file with clang for <code>sm_61</code>, keeps the PTX up to <code>bpf_main</code>, and wraps it in a C string. It expects clang 17's output file names. With this laptop's clang 22, add <code>--cuda-device-only</code> and name the output yourself:</p>
+<pre><code>cd ~/workspace/repos/bpftime/attach/nv_attach_impl/trampoline
+clang++ -S --cuda-device-only --cuda-gpu-arch=sm_61 -O2 \
+    -U__FLOAT128__ -U__SIZEOF_FLOAT128__ default_trampoline.cu -o tramp.ptx
+( echo 'static const char TRAMPOLINE_PTX[] = R"('
+  grep -B 10000 "// .globl	bpf_main" tramp.ptx | grep -v "// .globl	bpf_main"
+  echo ')";' ) &gt; ../trampoline_ptx.h</code></pre>
+      <p>Done in a scratch copy for this chapter, that produced <code>_bpf_helper_ext_0512</code> as a short PTX function around <code>mov.u64 %rd1, %clock64;</code>. One difference to watch: clang 22 writes <code>.version 8.8</code>, where the committed header says <code>.version 8.1</code>, and a PTX compiler library older than CUDA 12.9 will refuse 8.8. That matters for the P5000's CUDA 12.x toolkit.</p>
+      <p>Third, tell llvmbpf the helper exists, by adding one line next to helper 511 in <code>bpftime/attach/nv_attach_impl/pass/ptxpass_core/src/core.cpp:207–222</code>:</p>
+<pre><code>vm.register_external_function(512, "get_clock64", (void *)test_func);</code></pre>
+      <p>Without it, compiling a probe that calls 512 fails with "Ext func not found: _bpf_helper_ext_0512" (<code>bpftime/vm/llvm-jit/src/compiler_utils.cpp:368</code>), and the kernel runs unprobed. Fourth, rebuild bpftime and declare the helper in the probe, as the examples do: <code>static const u64 (*bpf_get_clock64)(void) = (void *)512;</code>. A helper that needs the host takes two more steps. Add a request kind to the trampoline's <code>HelperOperation</code> list and call <code>make_helper_call</code> with it. Then handle that request kind in the watcher thread's loop. Diagram 14.1 then applies to every call of it.</p>
+
+      <h3>Adding a kind of attach point</h3>
+      <p>The other extension is a new kind of attach point, such as a probe before every <code>bar.sync</code>, the PTX of <code>__syncthreads</code>. That is a new pass. A pass is a shared library that exports <code>print_config</code>, returning JSON with its name, attach type and name patterns, and <code>process_input</code>, taking the JSON request of the last chapter and returning new PTX. bpftime loads the libraries listed in <code>BPFTIME_PTXPASS_LIBRARIES</code>, colon-separated, or its built-in list, each with <code>dlmopen</code> in its own namespace (<code>bpftime/attach/nv_attach_impl/nv_attach_impl.cpp:501–530</code>).</p>
+      <p>The simplest way to give the new pass a name needs no change to libbpf or the loader. Claim a pattern inside the kprobe namespace, as the memory-capture pass does with <code>^kprobe/__memcapture$</code>. The catch is the matching rule. For each handler, bpftime picks the first pass whose attach type and pattern match (<code>nv_attach_impl.cpp:173–193</code>), and <code>kprobe_entry</code> claims every <code>^kprobe/.*$</code> except <code>__memcapture</code>. Its exclusion list, in <code>pass/ptxpass_kprobe_entry/main.cpp:29–30</code>, must also exclude your new pattern, or the entry pass will take your probes first.</p>
+
+      <table class="gen">
+        <caption>Writing probes across the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Helpers 502, 509 to 512</td><td>all present: <code>%globaltimer</code>, <code>%smid</code>, <code>%clock64</code> exist from <code>sm_30</code> or earlier</td><td>present</td><td>present</td></tr>
+        <tr><td>Trampoline PTX version</td><td>keep it at 8.1 or what the CUDA 12.x compiler library accepts</td><td>8.8 from clang 22 is fine with CUDA 13.4</td><td>same as Ada</td></tr>
+        <tr><td>Host-call cost</td><td colspan="3">the same everywhere: bounded by the watcher's 1 ms sleep</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Without a GPU, build the probe and read what the compiler made of it:</p>
+<pre><code>cd lab/gpu/probe &amp;&amp; make
+llvm-objdump -d --no-show-raw-insn matvec_tail.bpf.o | grep -E 'call|^0'</code></pre>
+        <p>Find the six helper calls of the entry probe and the map relocation. Then change the probe to call <code>bpf_printk</code> in lane 0 at exit, and before you run anything, use the table to predict how long one launch of <code>matvec_warp</code> will take. With the GPU, run both versions and compare.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>The tail probe records, per row, the start and end time and SM of the warp computing it, from lane 0 only, into a GPU array map, using only helpers that stay on the GPU. A probe costs instructions paid by whole warps, possibly registers and occupancy, start-up compile time, and above all host round trips: every host-call helper waits for the agent's watcher thread, which serves one request per wake-up and sleeps 1 ms between them, behind one lock for the whole GPU. So keep per-thread work on the GPU and aggregate in the loader. A new helper is a <code>_bpf_helper_ext_05xx</code> function in the trampoline, a regenerated <code>trampoline_ptx.h</code>, and a registration in the pass core. A new attach kind is a pass library with a name pattern that <code>kprobe_entry</code> must exclude.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>host-call helper</dt><dd>A helper whose work is done by the agent's watcher thread on the host, through the request area.</dd>
+          <dt>watcher thread</dt><dd>The agent's host thread that serves GPU helper requests, one per wake-up.</dd>
+          <dt>helper 512</dt><dd>This chapter's new helper: it returns the SM's 64-bit cycle counter, <code>%clock64</code>.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: a colleague adds <code>bpf_printk</code> in lane 0 at the exit of <code>matvec_warp</code>, one call per row. Using the model of diagram 14.2, about how long does one launch take now, against about 330 µs without the probe?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 4 seconds. There are 4,096 rows, so 4,096 host calls. They are served one at a time, roughly one per millisecond, so the launch cannot finish in less than about 4.1 seconds, around 12,000 times slower. The lab program's default 200 iterations would then take more than 13 minutes.</p>
+          <p>Nothing about the GPU enters the answer, which is the point. The near-miss is to estimate the cost of a print as a few microseconds of PCIe traffic. The traffic is small; the wait for the watcher's next wake-up is what costs.</p>
+        </details>
+        <p>2. Restricting the probe to lane 0 does not save issue slots, as this chapter said. Then why do it, and what would go wrong if every thread wrote its own record into a per-thread array map instead?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It saves memory traffic and map space, and it records exactly the unit the question is about, a row. One record per row is 4,096 records of 24 bytes; one per thread is 131,072, each a store into device memory competing with the kernel's own loads, in a kernel that is memory-bound.</p>
+          <p>A per-thread array map would also need <code>BPFTIME_MAP_GPU_THREAD_COUNT</code> of at least 131,072 (the bpftime chapter's first question), and the loader would copy 32 identical-in-meaning start times per row. The near-miss is that "fewer lanes means a faster probe". The warp pays for lane 0's path either way.</p>
+        </details>
+        <p>3. You add helper 512 to the trampoline and regenerate the header, but forget the line in <code>core.cpp</code>. Where does it fail, and what do you see? Then: why is comparing two <code>%clock64</code> values from a thread's entry and exit only meaningful if you also compare its two SM IDs?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It fails when the pass compiles the probe: llvmbpf has no helper 512 registered and reports "Ext func not found: _bpf_helper_ext_0512". The pass fails, that kernel is left unpatched, and the program runs without the probe, so you see the error only in bpftime's log.</p>
+          <p><code>%clock64</code> is a cycle counter on the SM that reads it, and different SMs' counters are not the same clock. If a preemption moved the block between entry and exit, the two readings come from different counters and their difference means nothing. Recording the SM at both ends, as the tail probe does, lets you discard those records. The near-miss is to treat <code>%clock64</code> like <code>%globaltimer</code>, which is one clock for the whole GPU.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu">bpftime GPU examples</a>. <code>threadhist</code> and <code>gpu_shared_map</code> show GPU maps; <code>launchlate</code> joins a host uprobe to a GPU probe; <code>mem_trace</code> uses the memory-capture pass.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/bpftime/tree/master/attach/nv_attach_impl/trampoline">bpftime trampoline directory</a>, with the Makefile and README for regenerating <code>trampoline_ptx.h</code>.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#special-registers">PTX ISA: Special registers</a>, for <code>%clock64</code>, <code>%globaltimer</code>, <code>%smid</code> and their caveats.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://arxiv.org/abs/2512.12615">gpu_ext: Extensible OS Policies for GPUs via eBPF</a> (2025). What the same authors build on top of GPU probes when the goal is policy as well as observation.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://eunomia.dev/tutorials/47-cuda-events/">eBPF Tutorial: Tracing CUDA GPU Operations</a>. Host-side uprobes on the CUDA runtime, the cheap complement to everything in this chapter.</li>
+        </ul>
+      </div>
+    </section>

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From Warp to Probe — a GPU programming and GPU-eBPF dossier</title>
+<style>
+@@CSS@@
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-in">
+    <h1>From Warp to Probe</h1>
+    <p class="sub">Follow one matrix-vector multiply from a line of CUDA to a token in an LLM server. On the way, learn how an NVIDIA GPU runs it, read it as PTX and SASS, and put an eBPF probe inside it, on Pascal, Ada and Hopper.</p>
+    <p class="meta">@@META@@</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#how-to-read"><span class="num">—</span>How to read this<span class="rt">3 min</span></a></li>
+      <li><a href="#before"><span class="num">—</span>Before you start: prerequisites and benches<span class="rt">4 min</span></a></li>
+      <li><a href="#ch0"><span class="num">0</span>One multiply, three ways to watch it<span class="rt">@@RT0@@</span></a></li>
+      <li class="toc-part">Part I · The machine</li>
+      <li><a href="#ch1"><span class="num">1</span>Four ways to be parallel<span class="rt">@@RT1@@</span></a></li>
+      <li><a href="#ch2"><span class="num">2</span>Inside a streaming multiprocessor<span class="rt">@@RT2@@</span></a></li>
+      <li><a href="#ch3"><span class="num">3</span>Memory and the bandwidth wall<span class="rt">@@RT3@@</span></a></li>
+      <li class="toc-part">Part II · The language</li>
+      <li><a href="#ch4"><span class="num">4</span>CUDA: writing the matvec<span class="rt">@@RT4@@</span></a></li>
+      <li><a href="#ch5"><span class="num">5</span>From .cu to machine code<span class="rt">@@RT5@@</span></a></li>
+      <li><a href="#ch6"><span class="num">6</span>Reading PTX<span class="rt">@@RT6@@</span></a></li>
+      <li><a href="#ch7"><span class="num">7</span>SASS: what the SM runs<span class="rt">@@RT7@@</span></a></li>
+      <li class="toc-part">Part III · Running it</li>
+      <li><a href="#ch8"><span class="num">8</span>The host side: streams, pinned memory, the launch path<span class="rt">@@RT8@@</span></a></li>
+      <li><a href="#ch9"><span class="num">9</span>Scheduling, from grid to warp<span class="rt">@@RT9@@</span></a></li>
+      <li><a href="#ch10"><span class="num">10</span>Measuring: the tools and what each one sees<span class="rt">@@RT10@@</span></a></li>
+      <li><a href="#ch11"><span class="num">11</span>Three generations: Pascal, Ada, Hopper<span class="rt">@@RT11@@</span></a></li>
+      <li class="toc-part">Part IV · eBPF on the GPU</li>
+      <li><a href="#ch12"><span class="num">12</span>eBPF without the kernel: bpftime<span class="rt">@@RT12@@</span></a></li>
+      <li><a href="#ch13"><span class="num">13</span>Getting inside someone else's kernel<span class="rt">@@RT13@@</span></a></li>
+      <li><a href="#ch14"><span class="num">14</span>Writing GPU probes, and what they cost<span class="rt">@@RT14@@</span></a></li>
+      <li class="toc-part">Part V · The language model</li>
+      <li><a href="#ch15"><span class="num">15</span>Just enough transformer<span class="rt">@@RT15@@</span></a></li>
+      <li><a href="#ch16"><span class="num">16</span>Prefill, decode and the KV cache<span class="rt">@@RT16@@</span></a></li>
+      <li><a href="#ch17"><span class="num">17</span>Serving many users: vLLM<span class="rt">@@RT17@@</span></a></li>
+      <li><a href="#ch18"><span class="num">18</span>One machine: llama.cpp and ggml<span class="rt">@@RT18@@</span></a></li>
+      <li><a href="#ch19"><span class="num">19</span>Observing inference: where the probes go<span class="rt">@@RT19@@</span></a></li>
+      <li><a href="#ch20"><span class="num">20</span>Epilogue: traps, limits, what comes next<span class="rt">@@RT20@@</span></a></li>
+      <li class="toc-part">Back matter</li>
+      <li><a href="#glossary"><span class="num">—</span>Merged glossary</a></li>
+      <li><a href="#references"><span class="num">—</span>All references, by layer</a></li>
+    </ol>
+  </nav>
+  <main>
+    <section id="how-to-read" class="card">
+      <h2>How to read this</h2>
+      <p>This document teaches four things in one line of argument: how an NVIDIA GPU runs a program; how to write that program in CUDA and read it again as PTX and SASS; how bpftime puts an eBPF program inside a GPU kernel you did not write; and how a large language model server uses the GPU to produce text, so that you know where to point those probes. It follows one matrix-vector multiply from the first chapter to the last.</p>
+      <div class="path">
+        <div><b>Path 1: straight through.</b> The intended way. Every chapter builds on the ones before it, and each one moves the same multiply one step further: from silicon, to source, to machine code, to a running kernel, to a probe inside it, to a token on a screen. About @@MIN@@ minutes.</div>
+        <div><b>Path 2: hop by layer.</b> Already own a layer? Use the coloured tags. <span class="tag HW">HW</span> silicon and memory · <span class="tag ISA">ISA</span> PTX and SASS · <span class="tag CUDA">CUDA</span> programming model, toolchain, runtime · <span class="tag TOOLS">TOOLS</span> profilers and debuggers · <span class="tag EBPF">EBPF</span> bpftime and eBPF on the GPU · <span class="tag LLM">LLM</span> language models and the servers that run them.</div>
+      </div>
+      <p><b>The vocabulary rule.</b> Every term of art appears in <b>bold</b> at the place it is defined, and never before. If you meet a word you do not remember, search backwards: its definition is behind you, and the merged glossary at the end lists every term by chapter. The document assumes you know Linux systems programming and kernel eBPF well. It assumes no GPU knowledge and no machine-learning knowledge. Two sibling dossiers in this folder go deeper on neighbouring ground, and chapters link to them where they help. They are optional.</p>
+      <p><b>Three benches.</b> Every hardware chapter ends with a small dated table comparing three NVIDIA generations, because three real machines are in play. The laptop has an Ada GPU and is where every lab in this document runs. An H100 (Hopper) arrives later. A customer runs a Quadro P5000 (Pascal). Listings are real compiler output from this laptop, unless a listing says it is illustrative: <code>nvcc</code> 13.4 for Ada and Hopper, and <code>clang</code> 22 for Pascal PTX. A runtime number marked <i>expected</i> was not measured.</p>
+      <p><b>Check yourself, and how to use it.</b> Every chapter ends with two or three questions, and each one carries its answer behind a toggle. Answer out loud first, in full sentences, and only then open it. A question you can half-answer is the one worth re-reading the chapter for. One question in most chapters gives you an observation and asks what happened. Those are the ones that test whether a mechanism will come to mind when you need it. If you would rather be quizzed properly, hand this file to an agent running the Alvar <code>probe</code> skill and ask it to quiz you chapter by chapter: it asks through a real question tool, scores your reasoning rather than your letter, and writes what it found to <code>.alvar/maps/</code>. <button id="answerctl" type="button">Open all answers</button></p>
+      <p><b>Diagrams.</b> Every diagram has a <i>zoom</i> button in its corner. It opens the picture full screen: scroll to zoom, drag to pan, double-click to fit, Esc to close.</p>
+      <p id="filters"><b>Filter references by layer:</b><br>
+        <button data-l="HW">HW</button>
+        <button data-l="ISA">ISA</button>
+        <button data-l="CUDA">CUDA</button>
+        <button data-l="TOOLS">TOOLS</button>
+        <button data-l="EBPF">EBPF</button>
+        <button data-l="LLM">LLM</button>
+      </p>
+    </section>
+@@BEFORE@@
+<!--APPEND-->
+  </main>
+</div>
+<footer>From Warp to Probe — written October 2026. URLs verified at time of writing; source citations pinned to bpftime a900f85, vLLM ccda909 and llama.cpp ec7630a.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:false, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, sequence:{actorMargin:20, width:110, messageFontSize:15, actorFontSize:14, noteFontSize:14}, securityLevel:'loose'});
+  /* Render one diagram at a time, each with its own id. Mermaid's default ids come from the
+     clock, and two diagrams rendered in the same millisecond can otherwise draw into one SVG. */
+  const blocks=[...document.querySelectorAll('div.mermaid')];
+  for (let i=0;i<blocks.length;i++){
+    const el=blocks[i];
+    try{
+      const ta=document.createElement('textarea');
+      ta.innerHTML=el.innerHTML.replace(/<br\s*\/?>/gi,'\u0001');
+      const src=ta.value.replace(/\u0001/g,'<br/>');
+      const {svg,bindFunctions}=await mermaid.render('dia-'+i, src);
+      el.innerHTML=svg; if(bindFunctions) bindFunctions(el);
+    }catch(e){ console.error('mermaid block', i, e); }
+  }
+</script>
+<script>
+  document.querySelectorAll('#filters button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      b.classList.toggle('off');
+      const off=[...document.querySelectorAll('#filters button.off')].map(x=>x.dataset.l);
+      document.querySelectorAll('li.ref').forEach(li=>{
+        li.style.display = off.includes(li.dataset.layer) ? 'none' : '';
+      });
+    });
+  });
+  const ctl=document.getElementById('answerctl');
+  if(ctl){ctl.addEventListener('click',()=>{
+    const all=[...document.querySelectorAll('details.ans')];
+    const open=all.every(d=>d.open);
+    all.forEach(d=>d.open=!open);
+    ctl.textContent = open ? 'Open all answers' : 'Close all answers';
+  });}
+  window.addEventListener('beforeprint',()=>document.querySelectorAll('details.ans').forEach(d=>d.open=true));
+@@ZOOM@@
+</script>
+</body>
+</html>

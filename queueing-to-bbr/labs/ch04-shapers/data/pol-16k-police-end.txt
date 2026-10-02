@@ -1,0 +1,12 @@
+filter protocol ip pref 1 flower chain 0 
+filter protocol ip pref 1 flower chain 0 handle 0x1 
+  eth_type ipv4
+  ip_proto tcp
+  dst_port 5001
+  not_in_hw
+	action order 1:  police 0x1 rate 5Mbit burst 16Kb mtu 2Kb action drop overhead 0b 
+	ref 1 bind 1  installed 21 sec firstused 20 sec
+	Action statistics:
+	Sent 6308628 bytes 4209 pkt (dropped 87, overlimits 87 requeues 0) 
+	backlog 0b 0p requeues 0
+

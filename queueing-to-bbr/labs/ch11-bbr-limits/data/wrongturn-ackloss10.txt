@@ -1,0 +1,6 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+flow send: cc=cubic label=cubic 36045065 bytes acked in 30.2 s = 9.54 Mbit/s, total_retrans=40, segs_out=25213, rows=603
+qdisc netem 879e: root refcnt 17 limit 100000 delay 40ms loss 10% seed 8695675277986237827
+ Sent 943156 bytes 13560 pkt (dropped 1499, overlimits 0 requeues 0) 
+ backlog 1056b 16p requeues 0
+  delayed 13576 dropped 1499 corrupted 0 duplicated 0 reordered 0 ecn_marked 0

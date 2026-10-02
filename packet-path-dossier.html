@@ -1256,7 +1256,9 @@ sequenceDiagram
   participant S as sender socket
   participant OUT as output route lookup
   participant NF1 as LOCAL_OUT and POST_ROUTING
+  box rgb(232,241,251) the device
   participant LO as loopback_xmit
+  end
   participant BL as backlog and core
   participant NF2 as PRE_ROUTING and LOCAL_IN
   participant R as receiver socket
@@ -1268,7 +1270,6 @@ sequenceDiagram
   LO->>BL: __netif_rx, same skb, same softirq
   BL->>NF2: ip_rcv, no route lookup: skb_valid_dst is true
   NF2->>R: ip_local_deliver, tcp_v4_rcv
-  style LO fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
 </div>
 <figcaption><strong>Diagram 8.1 — one skb through the loopback device, chart twice, lookup once.</strong> Notice that the route decided at the first step is still the one used at the last, so the input lookup is skipped. The four netfilter boxes are four real <code>nf_hook_slow</code> calls in the bench trace.</figcaption>
 </figure>

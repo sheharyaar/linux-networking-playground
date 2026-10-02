@@ -1,0 +1,6 @@
+fq_codel
+cat: /proc/sys/net/core/default_qdisc: No such file or directory
+cubic
+172:	if _, err := m.params.Sysctl.Read([]string{"net", "core", "default_qdisc"}); err != nil {
+173:		m.params.Log.Warn("BPF bandwidth manager could not read procfs. Disabling the feature.", logfields.Error, err)
+261:		{Name: []string{"net", "core", "default_qdisc"}, Val: "fq"},

@@ -1,0 +1,30 @@
+# bigpair.sh --gro-path: s0 tso off (the sender segments in software), c0 gro on (NAPI GRO); capture at rcv:c0, first 5,000 data skbs; kernel 7.2.6-arch2-1, 2026-10-02. Single runs.
+### --gro-path (default 65536)
+bigpair: snd:s0 gso_max_size 65536 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+bigpair: rcv:c0 gso_max_size 65536 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+flow: v6 "gbps": 21.406
+gro-64k-v6.pcap: IPv6 5000 data skbs, max 64346 B, median 64346 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+flow: v4 "gbps": 21.405
+gro-64k-v4.pcap: IPv4 5000 data skbs, max 65226 B, median 65226 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+### --gro-path --size 185000
+bigpair: snd:s0 gso_max_size 185000 gro_max_size 185000 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000 
+bigpair: rcv:c0 gso_max_size 185000 gro_max_size 185000 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000 
+flow: v6 "gbps": 22.967
+gro-185k-v6.pcap: IPv6 5000 data skbs, max 184298 B, median 184298 B, above 65,535: 4647 (92.9%), IP length field 0: 4647, hop-by-hop first: 0
+flow: v4 "gbps": 22.874
+gro-185k-v4.pcap: IPv4 5000 data skbs, max 183962 B, median 183962 B, above 65,535: 4390 (87.8%), IP length field 0: 4390, hop-by-hop first: 0
+### --gro-path --size 185000 --rate 10mbit
+bigpair: snd:s0 gso_max_size 185000 gro_max_size 185000 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000 
+bigpair: rcv:c0 gso_max_size 185000 gro_max_size 185000 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000 
+flow: v6 "gbps": 0.009
+gro-185k-10mbit-v6.pcap: IPv6 5000 data skbs, max 14366 B, median 1514 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+flow: v4 "gbps": 0.01
+gro-185k-10mbit-v4.pcap: IPv4 5000 data skbs, max 14546 B, median 1514 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+
+# frame sizes GRO handed up in the 10 Mbit/s IPv4 run (size: count)
+1514: 4858, 14546: 60, 13098: 58, 11650: 6, 10202: 5, 2962: 4, 5858: 3, 7306: 2
+# tcpdump, 10 Mbit/s IPv4 run, records 3000-3003: one 1514-byte frame every 1.21 ms
+15:55:43.458984 IP 10.0.14.1.52366 > 10.0.14.2.5014: Flags [.], seq 5093784:5095232, ack 1, win 63, options [nop,nop,TS val 2887386537 ecr 509366503], length 1448
+15:55:43.460196 IP 10.0.14.1.52366 > 10.0.14.2.5014: Flags [.], seq 5095232:5096680, ack 1, win 63, options [nop,nop,TS val 2887386537 ecr 509366503], length 1448
+15:55:43.461408 IP 10.0.14.1.52366 > 10.0.14.2.5014: Flags [.], seq 5096680:5098128, ack 1, win 63, options [nop,nop,TS val 2887386537 ecr 509366503], length 1448
+15:55:43.462618 IP 10.0.14.1.52366 > 10.0.14.2.5014: Flags [.], seq 5098128:5099576, ack 1, win 63, options [nop,nop,TS val 2887386537 ecr 509366503], length 1448

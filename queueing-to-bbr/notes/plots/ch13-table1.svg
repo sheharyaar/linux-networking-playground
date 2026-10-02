@@ -1,0 +1,120 @@
+<svg viewBox="0 0 720 344" role="img" aria-label="The paper's Table 1 rebuilt: three preference lists, the order slots were claimed, the table before and after backend B1 leaves" xmlns="http://www.w3.org/2000/svg" font-size="13" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<text x="151.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">Preference lists: permutation[i][j]</text>
+<text x="151.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">slot = (offset + j × skip) mod 7</text>
+<text x="97.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B0 (3, 4)</text>
+<rect x="76" y="76" width="42" height="3" fill="#2a78d6"/>
+<text x="151.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B1 (0, 2)</text>
+<rect x="130" y="76" width="42" height="3" fill="#eb6834"/>
+<text x="205.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B2 (3, 1)</text>
+<rect x="184" y="76" width="42" height="3" fill="#1baf7a"/>
+<text x="58.0" y="114.0" text-anchor="end" fill="#898781" font-size="12">j=0</text>
+<text x="58.0" y="148.0" text-anchor="end" fill="#898781" font-size="12">j=1</text>
+<text x="58.0" y="182.0" text-anchor="end" fill="#898781" font-size="12">j=2</text>
+<text x="58.0" y="216.0" text-anchor="end" fill="#898781" font-size="12">j=3</text>
+<text x="58.0" y="250.0" text-anchor="end" fill="#898781" font-size="12">j=4</text>
+<text x="58.0" y="284.0" text-anchor="end" fill="#898781" font-size="12">j=5</text>
+<text x="58.0" y="318.0" text-anchor="end" fill="#898781" font-size="12">j=6</text>
+<g class="hit"><title>B0 round 1: claims slot 3</title><rect x="73" y="95" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">3</text>
+<text x="115.0" y="106.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B0 round 2: slot 0 is taken, try the next preference</title><rect x="73" y="129" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="148.0" text-anchor="middle" fill="#898781">0</text>
+<line x1="88.0" x2="106.0" y1="144" y2="144" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 2: slot 4 is taken, try the next preference</title><rect x="73" y="163" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="182.0" text-anchor="middle" fill="#898781">4</text>
+<line x1="88.0" x2="106.0" y1="178" y2="178" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 2: claims slot 1</title><rect x="73" y="197" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">1</text>
+<text x="115.0" y="208.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B0 round 3: slot 5 is taken, try the next preference</title><rect x="73" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="250.0" text-anchor="middle" fill="#898781">5</text>
+<line x1="88.0" x2="106.0" y1="246" y2="246" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 3: slot 2 is taken, try the next preference</title><rect x="73" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="284.0" text-anchor="middle" fill="#898781">2</text>
+<line x1="88.0" x2="106.0" y1="280" y2="280" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 3: claims slot 6</title><rect x="73" y="299" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">6</text>
+<text x="115.0" y="310.0" text-anchor="end" fill="#4a5560" font-size="10">r3</text>
+<g class="hit"><title>B1 round 1: claims slot 0</title><rect x="127" y="95" width="48" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="145.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">0</text>
+<text x="169.0" y="106.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B1 round 2: claims slot 2</title><rect x="127" y="129" width="48" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="145.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">2</text>
+<text x="169.0" y="140.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="163" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="182.0" text-anchor="middle" fill="#c3c2b7">4</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="197" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="216.0" text-anchor="middle" fill="#c3c2b7">6</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="250.0" text-anchor="middle" fill="#c3c2b7">1</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="284.0" text-anchor="middle" fill="#c3c2b7">3</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="299" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="318.0" text-anchor="middle" fill="#c3c2b7">5</text>
+<g class="hit"><title>B2 round 1: slot 3 is taken, try the next preference</title><rect x="181" y="95" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="205.0" y="114.0" text-anchor="middle" fill="#898781">3</text>
+<line x1="196.0" x2="214.0" y1="110" y2="110" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B2 round 1: claims slot 4</title><rect x="181" y="129" width="48" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="199.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">4</text>
+<text x="223.0" y="140.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B2 round 2: claims slot 5</title><rect x="181" y="163" width="48" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="199.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">5</text>
+<text x="223.0" y="174.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="197" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="216.0" text-anchor="middle" fill="#c3c2b7">6</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="250.0" text-anchor="middle" fill="#c3c2b7">0</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="284.0" text-anchor="middle" fill="#c3c2b7">1</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="299" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="318.0" text-anchor="middle" fill="#c3c2b7">2</text>
+<text x="316.0" y="114.0" text-anchor="end" fill="#898781" font-size="12">slot 0</text>
+<text x="316.0" y="148.0" text-anchor="end" fill="#898781" font-size="12">slot 1</text>
+<text x="316.0" y="182.0" text-anchor="end" fill="#898781" font-size="12">slot 2</text>
+<text x="316.0" y="216.0" text-anchor="end" fill="#898781" font-size="12">slot 3</text>
+<text x="316.0" y="250.0" text-anchor="end" fill="#898781" font-size="12">slot 4</text>
+<text x="316.0" y="284.0" text-anchor="end" fill="#898781" font-size="12">slot 5</text>
+<text x="316.0" y="318.0" text-anchor="end" fill="#898781" font-size="12">slot 6</text>
+<text x="375.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">Table before</text>
+<text x="375.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">B0: 3 slots, B1: 2, B2: 2</text>
+<g class="hit"><title>slot 0: B1</title><rect x="330" y="95" width="90" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="375.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B1</text>
+<g class="hit"><title>slot 1: B0</title><rect x="330" y="129" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 2: B1</title><rect x="330" y="163" width="90" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="375.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B1</text>
+<g class="hit"><title>slot 3: B0</title><rect x="330" y="197" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 4: B2</title><rect x="330" y="231" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="375.0" y="250.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 5: B2</title><rect x="330" y="265" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="375.0" y="284.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 6: B0</title><rect x="330" y="299" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<text x="505.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">After B1 leaves</text>
+<text x="505.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">B0: 4 slots, B2: 3</text>
+<g class="hit"><title>slot 0: was B1, must move (B1 left)</title><rect x="460" y="95" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#eb6834" stroke-width="2" stroke-dasharray="4 3"/></g>
+<text x="505.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 1: B0</title><rect x="460" y="129" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="505.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 2: was B1, must move (B1 left)</title><rect x="460" y="163" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#eb6834" stroke-width="2" stroke-dasharray="4 3"/></g>
+<text x="505.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 3: B0</title><rect x="460" y="197" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="505.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 4: B2</title><rect x="460" y="231" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="505.0" y="250.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 5: B2</title><rect x="460" y="265" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="505.0" y="284.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 6: was B0, now B2. The one extra move: B0 never left</title><rect x="460" y="299" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#be123c" stroke-width="2.5"/></g>
+<text x="505.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<line x1="424" x2="456" y1="109.0" y2="109.0" stroke="#898781" stroke-width="1.5"/>
+<path d="M450,105.0L456,109.0L450,113.0" fill="none" stroke="#898781" stroke-width="1.5"/>
+<line x1="424" x2="456" y1="177.0" y2="177.0" stroke="#898781" stroke-width="1.5"/>
+<path d="M450,173.0L456,177.0L450,181.0" fill="none" stroke="#898781" stroke-width="1.5"/>
+<line x1="424" x2="456" y1="313.0" y2="313.0" stroke="#be123c" stroke-width="1.5"/>
+<path d="M450,309.0L456,313.0L450,317.0" fill="none" stroke="#be123c" stroke-width="1.5"/>
+<text x="566.0" y="114.0" text-anchor="start" fill="#4a5560" font-size="12">B1 left: must move</text>
+<text x="566.0" y="182.0" text-anchor="start" fill="#4a5560" font-size="12">B1 left: must move</text>
+<text x="566.0" y="312.0" text-anchor="start" fill="#be123c" font-size="12" font-weight="700">extra move:</text>
+<text x="566.0" y="327.0" text-anchor="start" fill="#4a5560" font-size="12">B0 stayed, lost it</text>
+</svg>

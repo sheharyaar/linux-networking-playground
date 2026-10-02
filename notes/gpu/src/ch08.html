@@ -1,0 +1,152 @@
+    <div class="part">Part III · Running it</div>
+    <section id="ch8" class="chapter">
+      <span class="chnum">Chapter 8</span>
+      <h2>The host side: streams, pinned memory, the launch path</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag CUDA">CUDA</span> — The language part (Part II) turned our matvec into SASS inside a fatbin, and showed the driver loading it into a context. Now the program runs it. This chapter is everything that happens on the host between "launch <code>matvec_warp</code>" and the first warp starting: the queues, the memory the host and the GPU can both see, and the path a launch takes down to the hardware.</p>
+      <p class="readfirst">Optional neighbours: the GPU-sharing dossier's <a href="gpu-sharing-dossier.html#ch2">How a launch reaches the silicon (chapter 2)</a> follows the same launch below the driver, through channels and pushbuffers. The SR-IOV dossier's <a href="sr-iov-dossier.html#ch1">Just enough PCIe (chapter 1)</a> covers the DMA and MMIO that this chapter uses as words.</p>
+
+      <h3>Two APIs, one driver</h3>
+      <p>The CUDA runtime is a convenience layer: every runtime call becomes one or more driver API calls. The runtime creates a context for you, the <i>primary context</i>, one per GPU per process. It loads modules from the registered fatbins, and it turns <code>kernel&lt;&lt;&lt;g, b&gt;&gt;&gt;(args)</code> into a driver launch. With the driver API you do each step yourself: <code>cuCtxCreate</code> or retain the primary context, <code>cuModuleLoadData</code>, <code>cuModuleGetFunction</code> to get a <b><code>CUfunction</code></b>, the driver's handle for one kernel in one loaded module, and <code>cuLaunchKernel</code>. Both roads end in <code>cuLaunchKernel</code>-like entry points in <code>libcuda.so</code>, which is why a tool that hooks the driver sees launches from both.</p>
+
+      <h3>Streams and events</h3>
+      <p>A <b>stream</b> is an ordered queue of GPU work: kernel launches, copies, memory sets. Work in one stream runs in the order it was queued, each item starting only after the one before has finished. Work in different streams has no order between them, so the GPU may run it at the same time. Every launch and every asynchronous copy names a stream; the fourth value inside <code>&lt;&lt;&lt;…&gt;&gt;&gt;</code> is the stream.</p>
+      <p>If you name none, you get the <b>default stream</b>, and it has a historical quirk. The legacy default stream waits for work in every other stream of the context and makes them wait for it, which serialises programs that thought they were concurrent. Compiling with <code>--default-stream per-thread</code> gives each host thread its own default stream that behaves like an ordinary one. The runtime then exports per-thread variants of its entry points, with a <code>_ptsz</code> suffix such as <code>cudaLaunchKernel_ptsz</code>, which is why bpftime hooks both names.</p>
+      <p>An <b>event</b> is a marker queued into a stream. When the GPU reaches it, it records a timestamp. <code>cudaEventRecord</code> queues one, <code>cudaEventSynchronize</code> waits until it has been reached, and <code>cudaEventElapsedTime</code> gives the milliseconds between two of them. The lab program times every kernel this way (<code>matvec.cu:104–122</code>): one event before 200 launches, one after, both measured on the GPU's own clock, so host-side noise stays out.</p>
+
+      <h3>Memory the host and the GPU can both see</h3>
+      <p>Copies between host and device are done by the GPU's <b>copy engines</b>, DMA engines that move data across PCIe while the SMs do other work. A DMA engine needs host memory that stays at a fixed physical address for the whole transfer. Ordinary <b>pageable memory</b>, from <code>malloc</code>, can be moved or swapped out by the host kernel at any time. So <code>cudaMemcpy</code> from a pageable buffer first copies it, with the CPU, into a hidden buffer the driver has locked, and DMAs from there. <b>Pinned memory</b>, also called page-locked, is host memory locked in place so that the copy engine can read it directly. <code>cudaMallocHost</code> allocates it; <code>cudaHostRegister</code> pins memory you already have. Pinned memory is what makes <code>cudaMemcpyAsync</code> truly asynchronous, and what lets copies overlap kernels.</p>
+      <p>Pinned memory can go one step further. <b>Mapped memory</b>, or zero-copy memory, is pinned host memory that is also mapped into the GPU's address space. A kernel can then load and store it directly: every access crosses PCIe, so it is slow for bulk data, but no copy is needed at all, and the host sees the writes. bpftime relies on exactly this. Its shared-memory segment, the one that holds the request area of listing 6.3, is registered in the target process with one call:</p>
+<pre><code>cudaError_t err =
+        cudaHostRegister(base_addr, seg_size, cudaHostRegisterMapped);</code></pre>
+      <p class="lcap">Listing 8.1 — <code>bpftime/runtime/src/bpftime_shm_internal.cpp:1243–1244</code>. The whole bpftime shared segment, pinned and mapped into the GPU's address space.</p>
+      <p>Three more kinds complete the picture. <b>Unified virtual addressing</b> (UVA) puts host and device allocations in one 64-bit address space, so the value of a pointer says which memory it is in, and <code>cudaMemcpy</code> can work out the direction itself. <b>Managed memory</b>, from <code>cudaMallocManaged</code>, is a single allocation valid on both sides: pages move between host and GPU on demand, when one side touches a page the other side holds, through hardware page faults that Pascal introduced. And <b>CUDA IPC</b> lets one process share a device allocation with another, through a handle from <code>cuIpcGetMemHandle</code> that the other process opens. bpftime's GPU array maps use it: the bpftime process that loads the probe allocates them in device memory, and the process being probed opens them (<code>runtime/src/bpf_map/gpu/nv_gpu_per_thread_array_map.cpp:74</code>).</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph PG["pageable buffer, from malloc"]
+    direction LR
+    pg1["host RAM,<br/>may move"] --> pg2["CPU copies it into<br/>a hidden pinned buffer"] --> pg3["copy engine DMAs it<br/>over PCIe"] --> pg4["GPU global memory"]
+  end
+  subgraph PN["pinned buffer, from cudaMallocHost"]
+    direction LR
+    pn1["host RAM,<br/>locked in place"] --> pn2["copy engine DMAs it directly,<br/>while kernels run"] --> pn3["GPU global memory"]
+  end
+  subgraph MP["mapped buffer, pinned and mapped"]
+    direction LR
+    mp1["host RAM, locked<br/>and visible to the GPU"] -.-> mp2["each load or store by a kernel<br/>crosses PCIe; nothing is copied"]
+  end
+  PG ~~~ PN ~~~ MP
+  style MP fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 8.1 — Three ways host memory reaches the GPU.</b> Notice the extra CPU copy in the top row, which is why pageable copies are slow and never fully asynchronous. The highlighted row is the one bpftime uses for its request area and some maps: nothing is copied, a kernel writes to memory that the host also reads.</figcaption>
+      </figure>
+
+      <h3>The launch, all the way down</h3>
+      <p>Here is one launch of <code>matvec_warp</code>, from the call to the first warp. The runtime finds the <code>CUfunction</code> for the stub, packs the five arguments, and calls into the driver. The driver writes the launch, as GPU commands, into a <b>pushbuffer</b>: a ring of commands in memory the GPU can read, belonging to one hardware queue. Then it writes the new end position to a <b>doorbell</b>, a register on the GPU mapped into the process's address space. The GPU's front end sees the doorbell change, fetches the commands, and hands the grid to the block scheduler, which places blocks on SMs.</p>
+      <p>Notice what is missing. After setup there is no system call. The pushbuffer and the doorbell were mapped into the process when the context and its queues were created, so a launch is a few memory writes in user space. That is why a launch costs only a few microseconds of CPU time. It is also why a uprobe on <code>cuLaunchKernel</code> sees every launch and a probe in the host kernel sees none of them.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant App as program
+  participant Rt as libcudart
+  participant Drv as libcuda
+  participant PB as pushbuffer
+  participant FE as front end
+  participant SMs as SMs
+  App->>Rt: matvec_warp<br/>512 × 256
+  Rt->>Drv: CUfunction,<br/>args, stream
+  Drv->>PB: launch<br/>commands
+  Drv->>FE: doorbell,<br/>an MMIO store
+  Note over App,Drv: call returns, no system call
+  FE->>PB: fetch over PCIe
+  FE->>SMs: blocks to the<br/>block scheduler
+  Note over SMs: first warps
+        </div>
+        <figcaption><b>Diagram 8.2 — One launch, from the call to the first warp.</b> Notice that the host kernel never appears: the doorbell is an ordinary store to a mapped register. The GPU-sharing dossier's launch-path chapter follows the right-hand half in detail, with channels and runlists.</figcaption>
+      </figure>
+
+      <p>The time from the launch call to the first warp running is <b>launch latency</b>. On an idle GPU it is microseconds. When a stream already has work queued, the new kernel also waits for everything ahead of it. bpftime's <code>launchlate</code> example measures exactly this gap, with a uprobe on <code>cudaLaunchKernel</code> on the host side and a GPU probe at the kernel's entry. For a kernel like ours, which takes a few hundred microseconds, a few microseconds of launch cost is noise. For the tiny kernels a language model runs for each new token, which can take tens of microseconds each, the CPU's launch work can become the limit: the GPU finishes each kernel before the CPU has queued the next.</p>
+
+      <h3>CUDA graphs: launch a whole sequence at once</h3>
+      <p>A <b>CUDA graph</b> records a fixed sequence of kernels and copies, with their dependencies, once, and then launches the whole sequence with a single call. You can build one node by node, or capture it: begin capture on a stream, run your normal launches, end capture. The launches are recorded rather than run. <code>cudaGraphInstantiate</code> prepares the graph for launch, and <code>cudaGraphLaunch</code> runs it, as often as you like. The CPU cost of a hundred launches becomes the cost of one.</p>
+      <p>Graphs matter twice in this document. vLLM captures the step that makes each new token as CUDA graphs, which is a large part of why it is fast. And a graph launch does not call <code>cudaLaunchKernel</code> once per kernel, so a uprobe on that function sees nothing while a graph runs. A tool that wants to change which kernel runs has to act when the graph is built. bpftime does it in two places. Launches made during stream capture still go through its launch hooks, so the captured graph records the patched kernel. Graphs built node by node go through <code>cuGraphAddKernelNode</code> and the calls that set node parameters, which bpftime also hooks to swap in the patched kernel (<code>attach/nv_attach_impl/nv_attach_impl_frida_setup.cpp:625–776</code>). A graph captured before bpftime attached keeps the original kernel.</p>
+
+      <figure class="dia">
+        @@SVG:streams@@
+        <figcaption><b>Diagram 8.3 — One stream against three, and one launch against a graph.</b> Notice in the top half that copies and kernels can only overlap when they are in different streams and the host memory is pinned: the copy engines and the SMs are separate hardware. In the bottom half the GPU work is the same, but the CPU's launch work shrinks to one call.</figcaption>
+      </figure>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>PCIe link</td><td>PCIe 3.0 x16</td><td>PCIe 4.0, laptop link (check <code>nvidia-smi -q</code>)</td><td>PCIe 5.0 x16 (SXM boards also have NVLink)</td></tr>
+        <tr><td>Managed memory with page faults</td><td>yes, introduced with Pascal</td><td>yes</td><td>yes</td></tr>
+        <tr><td>CUDA graphs</td><td>yes, with a CUDA 12.x toolkit</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Kernel driver</td><td>proprietary modules, a driver branch that still supports Pascal</td><td>open modules, driver 615</td><td>open modules</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Measure the pageable penalty with the bandwidth test in CUDA's samples, or with ten lines of your own: time <code>cudaMemcpy</code> of 64 MiB from a <code>malloc</code> buffer, then from a <code>cudaMallocHost</code> buffer, using events as the lab does. Then look at where launches go with a uprobe, which needs nothing new:</p>
+<pre><code>sudo bpftrace -c './out/matvec_shared 4096 4096 20' -e '
+  uprobe:/opt/cuda/lib64/libcudart.so.13:*LaunchKernel*,
+  uprobe:/usr/lib/libcuda.so.1:cuLaunchKernel* { @[probe] = count(); }'</code></pre>
+        <p>Use the <code>-cudart shared</code> build from the compiler chapter, or the runtime probe has nothing to attach to. The wildcards catch <code>cudaLaunchKernel</code>, <code>__cudaLaunchKernel</code> and their <code>_ptsz</code> twins. Which ones fire, and how often, tells you which entry a CUDA 13 binary uses. That is the same question bpftime has to answer on this laptop, so keep the output.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Runtime calls become driver calls, and every launch ends in a <code>cuLaunchKernel</code>-like entry of <code>libcuda.so</code>. Work is queued on streams, in order within a stream and unordered across them; events timestamp the GPU's progress. Copy engines DMA from pinned memory; pageable memory costs an extra CPU copy; mapped memory lets kernels read and write host memory directly, which is how bpftime's GPU code talks to the host; CUDA IPC shares device memory between processes, which is how its GPU maps cross from the loading process to the probed one. A launch is user-space writes to a pushbuffer and a doorbell, with no system call. CUDA graphs launch whole sequences with one call, and bypass per-kernel launch hooks.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt><code>CUfunction</code></dt><dd>The driver's handle for one kernel in one loaded module.</dd>
+          <dt>stream</dt><dd>An ordered queue of GPU work; separate streams may overlap.</dd>
+          <dt>default stream</dt><dd>The stream used when none is named; the legacy one serialises with all others, the per-thread one does not.</dd>
+          <dt>event</dt><dd>A marker in a stream that records a GPU timestamp when reached.</dd>
+          <dt>copy engine</dt><dd>A DMA engine on the GPU that moves data over PCIe while the SMs compute.</dd>
+          <dt>pageable / pinned memory</dt><dd>Ordinary host memory that may move / host memory locked in place for DMA.</dd>
+          <dt>mapped (zero-copy) memory</dt><dd>Pinned host memory also mapped into the GPU's address space.</dd>
+          <dt>unified virtual addressing</dt><dd>One address space for host and device, so a pointer says where it points.</dd>
+          <dt>managed memory</dt><dd>One allocation valid on both sides, migrated page by page on demand.</dd>
+          <dt>CUDA IPC</dt><dd>Sharing a device allocation between processes through a handle.</dd>
+          <dt>pushbuffer / doorbell</dt><dd>The ring of GPU commands in memory / the mapped GPU register written to announce new commands.</dd>
+          <dt>launch latency</dt><dd>Time from a launch call to the kernel starting on the GPU.</dd>
+          <dt>CUDA graph</dt><dd>A recorded sequence of GPU work, instantiated once and launched with one call.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: on the laptop, copying W (64 MiB) to the GPU takes T₁ from pinned memory. The matvec on that W takes about 311 µs at best. If PCIe gives roughly 12 GB/s in practice, about how long is T₁, and how many matvecs on that W would the GPU need to run before copying it once is worth it?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 5.6 ms, which is the time of roughly 18 matvecs. 67.1 MB / 12 GB/s ≈ 5.6 ms, and 5.6 ms / 311 µs ≈ 18. The copy moves the same bytes as one matvec, across a link about 18 times slower than the GPU's own memory.</p>
+          <p>This is why LLM servers load weights onto the GPU once and keep them there, and why anything that must cross PCIe per token, like a probe's call to the host, is expensive. The 12 GB/s is an assumption for a laptop link; measure yours. The near-miss is to compare against the GPU's arithmetic speed. The copy competes with memory bandwidth.</p>
+        </details>
+        <p>2. A program records CUDA graphs at start-up and replays them. A uprobe on <code>cudaLaunchKernel</code> shows a burst of calls at start-up and almost none afterwards, while <code>nvidia-smi</code> shows the GPU busy the whole time. What is happening, and where would a probe have to sit to see each kernel?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The burst is stream capture: during capture the launches are recorded into the graph, which is the only time the program calls <code>cudaLaunchKernel</code>. Afterwards each <code>cudaGraphLaunch</code> runs all of the recorded kernels without calling the launch function again (diagram 8.3).</p>
+          <p>To see each kernel you need to be inside the kernels themselves, which is what a bpftime GPU probe is, and the probe has to be in place when the graph is captured, because that is when the graph's kernels are chosen. A uprobe on <code>cudaGraphLaunch</code> fires once per replay, however many kernels the graph holds. The near-miss is that the probe is broken. It works; the call it watches stopped happening.</p>
+        </details>
+        <p>3. "A launch involves no system call." Where does the host kernel still take part in running a kernel, so that a tracepoint or kprobe in it would fire?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>At setup and at the edges. Creating the context and its queues, allocating device memory, pinning memory with <code>cudaHostRegister</code>, and mapping the doorbell all go through <code>ioctl</code>s on <code>/dev/nvidia*</code>. Waits can block in the host kernel: a synchronising call may sleep until an interrupt. Faults on managed memory are serviced by the driver in the host kernel.</p>
+          <p>The sentence is about the per-launch path of diagram 8.2: once the pushbuffer and the doorbell are mapped, queuing work is user-space stores. So kernel-side eBPF sees the program's setup, its waits and its page migrations, and never its launches.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html#cuda-streams">CUDA Programming Guide: Asynchronous execution, streams</a>, with <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html#cuda-events">events</a> and the graph-capture introduction on the same page.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/how-optimize-data-transfers-cuda-cc/">How to Optimize Data Transfers in CUDA C/C++</a> and <a href="https://developer.nvidia.com/blog/how-overlap-data-transfers-cuda-cc/">How to Overlap Data Transfers in CUDA C/C++</a> (NVIDIA blog). Pinned memory and overlap, measured. The pair behind diagram 8.3's top half.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/cuda-graphs/">Getting Started with CUDA Graphs</a> (NVIDIA blog), then <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html">CUDA Programming Guide: CUDA graphs</a>. Short first, reference second.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/unified-memory-cuda-beginners/">Unified Memory for CUDA Beginners</a> (NVIDIA blog). Managed memory and its page faults, with the Pascal change explained.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MODULE.html">CUDA Driver API: Module management</a>. <code>cuModuleLoadData</code> and <code>cuModuleGetFunction</code>, the calls the runtime makes for you and that bpftime makes itself.</li>
+        </ul>
+      </div>
+    </section>

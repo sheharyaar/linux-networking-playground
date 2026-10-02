@@ -1,0 +1,150 @@
+    <section id="ch19" class="chapter">
+      <span class="chnum">Chapter 19</span>
+      <h2>Observing inference: where the probes go</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag LLM">LLM</span> <span class="tag EBPF">EBPF</span> <span class="tag TOOLS">TOOLS</span> — The last two chapters ran one model in two servers. This one puts the whole document to work on them. It follows one request down through the layers that can observe it, writes a probe for the layer that sees each step, and then answers the question this document set out with: where can an eBPF program on the GPU go in a real inference server? Part of the answer is uncomfortable. In a stock vLLM install, almost no kernel can take a bpftime probe.</p>
+      <p class="readfirst">This chapter skips dashboards, alerting and distributed tracing back ends, and multi-GPU serving. Its two scripts have been checked against the source and the calling convention, but not run; the epilogue lists them with the other bench tests.</p>
+
+      <h3>One request, five layers</h3>
+      <p>Diagram 19.1 is one streaming request on a time axis: it waits in a queue, is prefilled in two chunks, and then gets one token per decode step. Under it are the five layers that can observe it, from the network down to the GPU. Each row marks what that layer sees.</p>
+
+      <figure class="dia">
+        @@SVG:reqtaps@@
+        <figcaption><b>Diagram 19.1 — What each layer sees of one request.</b> Notice that only the top row sees what the user sees, the time each token leaves the machine, and only the bottom row sees inside a step. Every row between trades one for the other: the server's metrics know the request but not its steps, the step loop knows the steps but not which request waited, and the driver knows when work was submitted but not when it ran.</figcaption>
+      </figure>
+
+      <table class="gen">
+        <caption>The five layers, what each one can tell you, and what it cannot</caption>
+        <tr><th>Layer</th><th>How to tap it</th><th>Sees</th><th>Blind to</th></tr>
+        <tr><td>Socket</td><td>kprobes on <code>tcp_recvmsg</code> and <code>tcp_sendmsg</code>, keyed by the <code>struct sock</code></td><td>the request's bytes in and every streamed chunk out: TTFT and ITL as the client gets them</td><td>why: queueing, prefill and network all look alike</td></tr>
+        <tr><td>Server</td><td>vLLM's <code>/metrics</code> histograms, or OpenTelemetry spans with <code>--otlp-traces-endpoint</code>; llama-server's counters and per-response <code>timings</code></td><td>per-request queue time, TTFT, prefill and decode time</td><td>single steps, the GPU</td></tr>
+        <tr><td>Step loop</td><td>uprobes on <code>libllama.so</code>; vLLM's loop is Python, with no stable native symbol</td><td>every step, its batch size and its duration</td><td>which request waited, inside the step</td></tr>
+        <tr><td>Driver</td><td>uprobes on <code>libcuda.so.1</code>: <code>cuGraphLaunch*</code>, <code>cuLaunchKernel*</code>; the <code>nvidia_unlocked_ioctl</code> kprobe from the tooling chapter (chapter 10)</td><td>every submission, from any library, with or without PTX</td><td>when the work ran: submission is asynchronous</td></tr>
+        <tr><td>GPU</td><td>bpftime probes, Nsight Compute, Nsight Systems, NVML and DCGM</td><td>inside kernels: per-SM timing, stalls, occupancy</td><td>requests; and bpftime needs PTX, which most stock kernels lack</td></tr>
+      </table>
+      <p>vLLM's spans carry the same split as its metrics, per request: time in queue, time to first token, and time in model prefill and decode (<code>vllm/tracing/utils.py:34–44</code>). On one GPU, vLLM runs the model inside the engine-core process, titled <code>VLLM::EngineCore</code> (<code>vllm/config/parallel.py:1040–1041</code>, <code>vllm/v1/engine/core.py:1370–1371</code>, <code>vllm/utils/system_utils.py:179–194</code>), so that is the process the driver and GPU rows attach to.</p>
+
+      <h3>A probe for each step</h3>
+      <p>For llama.cpp, the step loop is a C function with a stable name, which makes it the best single place to probe. At this commit the programs submit a step with <code>llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)</code>: llama-server at <code>tools/server/server-context.cpp:3682</code>, llama-bench at <code>tools/llama-bench/llama-bench.cpp:2186</code>. The older <code>llama_decode</code> converts its batch and ends in the same method (<code>src/llama-context.cpp:4383–4386</code>, <code>4401–4404</code> and <code>4477–4483</code>). One detail decides where the probe's end goes. The call returns before the GPU has finished: it queues the step and an asynchronous copy of the logits (line 1948), and the wait happens in <code>llama_synchronize</code>, which the server calls right after (<code>server-context.cpp:3682–3685</code>) and the sampler calls before it samples (<code>common/sampling.cpp:594</code>). So a step runs from <code>llama_process</code>'s entry to the return of the next <code>llama_synchronize</code> on the same thread.</p>
+<pre><code>// llama_step.bt: one llama.cpp step, from llama_process(..., DECODE, ...)
+// to the return of the llama_synchronize that waits for it.
+// Run from ~/workspace/repos/llama.cpp.
+uprobe:./build/bin/libllama.so:llama_process
+<b>/arg1 == 1/</b>                 // LLAMA_PROCESS_TYPE_DECODE
+{
+	@t0[tid] = nsecs;
+}
+
+uretprobe:./build/bin/libllama.so:llama_synchronize
+/@t0[tid]/
+{
+	@step_us = hist((nsecs - @t0[tid]) / 1000);
+	delete(@t0[tid]);
+}</code></pre>
+      <p class="lcap">Listing 19.1 — A step-time histogram for llama.cpp. Not yet run; it needs root.</p>
+      <p>The highlighted predicate keeps decode calls: <code>arg1</code> is the second argument, the process type, and <code>LLAMA_PROCESS_TYPE_DECODE</code> is 1 (<code>include/llama.h:296–299</code>). Prefill and decode steps land in the same histogram as two clusters, decode steps near the bandwidth floor and prefill micro-batches far above it. The batch size itself now sits inside an opaque <code>llama_batch_ext</code>, so the script does not key by it. The probe works with or without CUDA graphs, with or without PTX, and on all three benches, because nothing in it touches the GPU.</p>
+      <p>For vLLM, the driver row gives the same signal. A pure-decode step is one replay of a full CUDA graph, so the gaps between graph launches in the engine-core process are the step times:</p>
+<pre><code>// vllm_graphs.bt: run as
+//   sudo bpftrace vllm_graphs.bt (pgrep -f VLLM::EngineCore)
+uprobe:/usr/lib/libcuda.so.1:cuGraphLaunch*
+/pid == $1/
+{
+	if (@last) { @gap_us = hist((nsecs - @last) / 1000); }
+	@last = nsecs;
+}</code></pre>
+      <p class="lcap">Listing 19.2 — Gaps between CUDA graph launches in vLLM's engine core. Not yet run. <code>libcuda.so.1</code> 615.71.09 exports both <code>cuGraphLaunch</code> and <code>cuGraphLaunch_ptsz</code>, which the wildcard catches.</p>
+      <p>A mixed step replays one piecewise graph between each pair of attention layers, so its gaps are short and many. Expect the histogram to have two humps: steps, and pieces within steps.</p>
+
+      <h3>Where a GPU probe can go</h3>
+      <p>The bottom row of diagram 19.1 is where this document's eBPF lives, and it is the row with the most conditions. The attach-pipeline chapter (chapter 13) listed them: the kernel must arrive in a fat binary that bpftime sees being registered, it must carry PTX, it must be launched through one of the three launch functions bpftime replaces, and if it runs inside a CUDA graph, the graph must have been captured after the probe was attached. Here is what a serving stack ships.</p>
+      <table class="gen">
+        <caption>Which kernels in a serving stack a bpftime probe can reach, as of October 2026</caption>
+        <tr><th>Code</th><th>What it ships</th><th>Reachable?</th></tr>
+        <tr><td>Your own kernels, built with PTX</td><td>PTX and SASS</td><td>yes: the bpftime part of this document (Part IV)</td></tr>
+        <tr><td>llama.cpp, built with a named architecture such as <code>89</code></td><td>PTX and SASS for that architecture</td><td>yes; on an H100 build for <code>90</code>, only with <code>GGML_CUDA_PDL=0</code></td></tr>
+        <tr><td>llama.cpp, default build</td><td>SASS only, for <code>native</code></td><td>no</td></tr>
+        <tr><td>PyTorch release wheels</td><td>SASS only, for 7.5, 8.0, 8.6, 9.0, 10.0 and 12.0 (<code>.ci/wheel/linux/build_env_setup.py:75–96</code> at PyTorch commit d80e624)</td><td>no</td></tr>
+        <tr><td>vLLM's own kernels, from its wheels</td><td>SASS only, for 7.5 to 12.0; CMake drops a global <code>+PTX</code> (<code>docker/Dockerfile:289–296</code>, <code>CMakeLists.txt:222–223</code>)</td><td>no, unless rebuilt with <code>+PTX</code> on that kernel's arch list</td></tr>
+        <tr><td>cuBLAS and cuBLASLt, CUDA 13.4</td><td>PTX only for sm_120, plus 5 sm_75 images in cuBLASLt</td><td>almost none on Ada or Hopper</td></tr>
+        <tr><td>Triton kernels: some of vLLM's attention back ends, and code compiled by <code>torch.compile</code></td><td>a cubin, loaded with <code>cuModuleLoadData</code> and launched with <code>cuLaunchKernelEx</code> (Triton commit 79141cb: <code>third_party/nvidia/backend/driver.c:306</code> and <code>1058</code>, <code>compiler.py:213</code>)</td><td>no: no PTX, and neither the load nor the launch is hooked</td></tr>
+        <tr><td>FlashAttention 3, on the H100</td><td>code for <code>sm_90a</code></td><td>no: bpftime never compiles for <code>sm_90a</code> (<code>nv_attach_utils.cpp:94–160</code>)</td></tr>
+      </table>
+      <p>So the honest summary is this. In llama.cpp built from source with PTX, almost every kernel can take a probe, and the probe-cost chapter's per-SM tail measurement (chapter 14) should work on <code>mul_mat_vec_q</code> as it did on the matvec, though it has not been run there yet. Its instances are C++ templates, so a probe names one by the mangled name that <code>cuobjdump -symbols</code> lists. In a stock vLLM install, the GPU row belongs to NVIDIA's own tools, and eBPF works in the four rows above it. Reaching vLLM's kernels with bpftime means rebuilding them with PTX, and reaching Triton's would need bpftime to hook <code>cuModuleLoadData</code> and <code>cuLaunchKernelEx</code>, and to get PTX from Triton's compile cache instead of the loaded image. That is a concrete extension, of the kind the finish line of this document asked for: adding an attach path to bpftime.</p>
+
+      <h3>From symptom to layer</h3>
+      <table class="gen">
+        <caption>Common symptoms, the layer to look at first, and what to check next</caption>
+        <tr><th>Symptom</th><th>Look first</th><th>Then</th></tr>
+        <tr><td>TTFT high, ITL normal</td><td>queueing: <code>vllm:request_queue_time_seconds</code>, <code>num_requests_waiting</code>; <code>llamacpp:requests_deferred</code></td><td>if the queue is short: long prompts or prefix-cache misses (<code>prefix_cache_hits</code> over <code>queries</code>); the socket row, to rule out the network</td></tr>
+        <tr><td>ITL high for everyone</td><td>steps got longer: <code>num_requests_running</code>, <code>kv_cache_usage_perc</code></td><td>the step probe; Nsight Systems for gaps between kernels</td></tr>
+        <tr><td>ITL spikes now and then</td><td>a long prefill chunk in the step, or a graph recapture</td><td>the step probe shows the long step; the driver row shows a burst of single launches</td></tr>
+        <tr><td>TTFT tail jumps, ITL steady, preemptions rising</td><td>a full KV cache</td><td>fewer requests, shorter contexts, or a smaller cache format (the vLLM chapter's second question)</td></tr>
+        <tr><td>GPU "100% busy", throughput low</td><td>NVML counts any time a kernel was running (<code>nvml.h:245</code>)</td><td>DCGM's SM activity and occupancy, fields 1002 and 1003; then Nsight Compute on the hot kernel</td></tr>
+        <tr><td>One kernel slower than its bandwidth floor</td><td>Nsight Compute's stall reasons, the scheduling chapter's table (chapter 9)</td><td>a bpftime per-SM timing probe, if the kernel has PTX</td></tr>
+        <tr><td>A GPU probe prints nothing</td><td>the reachability table above</td><td>does the library carry PTX (<code>cuobjdump --list-ptx</code>), which launch call does it use (a uprobe on each), and was the graph captured before the probe?</td></tr>
+      </table>
+
+      <table class="gen">
+        <caption>Observing inference on the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Servers</td><td>llama.cpp only</td><td>both</td><td>both</td></tr>
+        <tr><td>Driver row</td><td>every kernel is a separate launch: ggml turns graphs off below Volta</td><td>graph replays hide most launches</td><td>same as Ada; ggml launches with <code>cudaLaunchKernelEx</code> unless <code>GGML_CUDA_PDL=0</code></td></tr>
+        <tr><td>NVIDIA's tools</td><td>no Nsight Compute; Nsight Systems up to 2025.3</td><td>all</td><td>all</td></tr>
+        <tr><td>bpftime GPU probes</td><td>needs bpftime built with a CUDA 12.x toolkit; untested</td><td>llama.cpp built with PTX; not stock vLLM</td><td>as Ada, and nothing in FlashAttention 3</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>With the dGPU in Hybrid mode, start a llama-server with 4 slots on the Q8_0 file from <code>~/workspace/repos/llama.cpp</code>, and attach listing 19.1 from the same directory in a second terminal:</p>
+<pre><code>./build/bin/llama-server -m qwen2.5-0.5b-instruct-q8_0.gguf \
+    -np 4 -c 16384 --metrics
+sudo bpftrace llama_step.bt</code></pre>
+        <p>Send one request, then four at once, each asking for a few hundred tokens:</p>
+<pre><code>for i in 1 2 3 4
+    curl -s localhost:8080/completion \
+        -d '{"prompt": "Tell a story.", "n_predict": 300}' &gt;/dev/null &amp;
+end</code></pre>
+        <p>That loop is fish syntax. Run the probe once for a single request and once for the four, and before each, predict the decode cluster's step time from the first question below. Then compare the single-request cluster with <code>llama-bench</code>'s <code>tg128</code> from the llama.cpp chapter: the two should be close, since both time one token's step.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Five layers can observe a request: the socket, the server's own metrics and traces, the step loop, the driver, and the GPU. Only the socket sees what the user sees, and only the GPU layer sees inside a step. llama.cpp's step can be timed from <code>llama_process</code>'s entry to the return of <code>llama_synchronize</code>, because the call itself returns before the GPU finishes; vLLM's from the gaps between CUDA graph launches in its engine-core process. A bpftime probe needs PTX, a hooked registration and launch, and a graph captured after attach. llama.cpp built from source meets all four; stock PyTorch, vLLM, cuBLAS, Triton and FlashAttention 3 kernels miss at least one, which leaves stock vLLM to host-side eBPF and NVIDIA's tools.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>observation layer</dt><dd>One level of the stack a probe can attach to: socket, server, step loop, driver or GPU.</dd>
+          <dt>step probe</dt><dd>A probe that times each run of the model, from submission to the wait for its result.</dd>
+          <dt>reachable kernel</dt><dd>A kernel a bpftime probe can patch: PTX, a hooked registration and launch, and a graph captured after attach.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: in the Try-it, one slot is generating with about 1,000 tokens of context, and then four slots are, each with about 1,000. Using the bandwidth floor alone, how long is a decode step in each case on the laptop, and how many tokens per second does the server produce?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 2.5 ms and 2.7 ms, so about 400 and 1,500 tokens per second. A step reads the 525 MB of weights once, whatever the batch, plus each slot's cache: 1,000 tokens × 12,288 bytes ≈ 12 MB per slot in F16. One slot moves about 537 MB, 2.5 ms at 216 GB/s; four move about 574 MB, 2.7 ms, and produce four tokens per step.</p>
+          <p>Four users cost each other about 7% here, because the weights dominate and are shared; <code>mul_mat_vec_q</code> takes up to 8 columns and reads each weight block once for all of them. The near-miss is to expect the step to take four times as long.</p>
+        </details>
+        <p>2. A bpftime probe on a vLLM attention kernel loads without errors and never fires. Give three causes in the order you would check them, and how to check each.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>First, the kernel has no PTX or never passes through bpftime's registration hook: run <code>cuobjdump --list-ptx</code> on the library it lives in, and if it is a Triton kernel, it was loaded with <code>cuModuleLoadData</code> as a cubin. Second, it is launched through a call bpftime does not replace: a uprobe on <code>cuLaunchKernelEx*</code> in <code>libcuda.so.1</code> shows whether it fires.</p>
+          <p>Third, the kernel runs inside a CUDA graph captured before the probe was attached, which vLLM does at start-up; restart the server with the agent loaded. On an H100, FlashAttention 3's <code>sm_90a</code> code is a fourth cause. The near-miss is to suspect the eBPF program itself, which loaded fine.</p>
+        </details>
+        <p>3. A client measures a 99th-percentile ITL of 120 ms. The server's <code>vllm:inter_token_latency_seconds</code> says 30 ms. Where can the other 90 ms come from, and which layer settles it?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>From between the engine and the client: the API server falling behind in turning tokens into chunks, a proxy that buffers the stream, or TCP holding small writes back, for example Nagle's algorithm waiting on a delayed acknowledgement. The engine's metric stops at the engine, before any of these.</p>
+          <p>The socket layer settles it. Timestamps of <code>tcp_sendmsg</code> on the server's connection show whether chunks leave every 30 ms. If they do, the delay is in the network or the proxy; if they leave in clumps, it is the API server. The near-miss is to tune the GPU, whose steps are already 30 ms.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/bpftrace/bpftrace/blob/master/man/adoc/bpftrace.adoc">The bpftrace manual</a>: uprobes, uretprobes, predicates and positional parameters, as used in both listings.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://docs.vllm.ai/en/latest/examples/observability/opentelemetry/">vLLM with OpenTelemetry</a>: the per-request spans of the server row, with a collector you can run locally.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://github.com/pytorch/pytorch/blob/main/.ci/wheel/linux/build_env_setup.py">PyTorch's wheel build settings</a>, where the release policy of SASS without PTX is written down, and <a href="https://github.com/triton-lang/triton">Triton on GitHub</a>, whose <code>third_party/nvidia/backend/driver.c</code> holds the load and launch calls.</li>
+        </ul>
+      </div>
+    </section>

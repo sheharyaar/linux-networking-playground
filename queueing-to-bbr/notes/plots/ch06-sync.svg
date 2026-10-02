@@ -1,0 +1,386 @@
+<svg viewBox="0 0 720 538" role="img" aria-label="Eight Reno flows started together through a 10 Mbit/s bottleneck with a 21-packet buffer: the sum of their windows, and when each flow entered recovery, unpaced and paced by fq" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="224.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="172.5" y2="172.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="176.5" text-anchor="end" fill="#898781">50</text>
+<line x1="58" x2="570" y1="125.0" y2="125.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="129.0" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="77.5" y2="77.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="81.5" text-anchor="end" fill="#898781">150</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">200</text>
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="125.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 125.0)">sum of 8 windows (pkts)</text>
+<line x1="58" x2="570" y1="139.2" y2="139.2" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="143.2" fill="#898781">pipe 85</text>
+<line x1="58" x2="570" y1="119.3" y2="119.3" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="123.3" fill="#898781">pipe + buffer 106</text>
+<polyline points="58.0,212.4 58.9,212.4 59.8,212.4 60.6,212.4 61.5,211.4 62.4,204.8 63.2,204.8 64.1,204.8 65.0,203.8 65.9,189.6 66.7,189.6 67.6,189.6 68.4,188.7 69.3,167.8 70.1,159.2 71.1,159.2 71.9,157.3 72.8,137.3 73.6,123.1 74.5,127.9 75.4,126.0 76.3,105.0 77.1,94.6 78.0,116.4 78.8,114.5 79.7,93.6 80.6,82.2 81.5,99.3 82.3,97.5 83.2,78.4 84.0,69.9 84.9,85.1 85.7,87.0 86.7,89.8 87.5,114.5 88.4,114.5 89.2,114.5 90.1,118.3 90.9,116.4 91.9,116.4 92.7,123.1 93.6,129.8 94.4,137.3 95.3,146.8 96.2,158.2 97.1,156.3 97.9,153.5 98.8,152.6 99.6,152.6 100.5,149.7 101.4,147.8 102.3,147.8 103.1,147.8 104.0,145.9 104.8,143.1 105.7,141.2 106.6,141.2 107.5,140.2 108.3,137.3 109.2,133.6 110.1,133.6 110.9,132.6 111.8,129.8 112.7,126.9 113.6,126.0 114.4,125.0 115.3,123.1 116.2,121.2 117.1,118.3 117.9,118.3 118.8,117.4 119.6,115.5 120.5,113.6 121.4,110.8 122.3,110.8 123.1,109.8 124.0,113.6 124.8,114.5 125.8,126.9 126.6,135.4 127.5,141.2 128.3,150.7 129.2,155.4 130.0,155.4 131.0,154.4 131.8,152.6 132.7,150.7 133.5,149.7 134.4,147.8 135.2,146.8 136.1,144.0 137.0,143.1 137.9,141.2 138.7,139.2 139.6,137.3 140.4,136.4 141.3,134.5 142.2,132.6 143.1,129.8 143.9,128.8 144.8,127.9 145.6,125.0 146.5,122.1 147.3,121.2 148.3,120.2 149.1,119.3 150.0,117.4 150.8,114.5 151.7,113.6 152.5,112.7 153.5,110.8 154.3,111.7 155.2,115.5 156.0,125.0 156.9,124.0 157.8,123.1 158.6,136.4 159.5,139.2 160.4,148.8 161.3,161.1 162.1,164.9 163.0,163.9 163.8,162.1 164.8,161.1 165.6,157.3 166.5,156.3 167.3,155.4 168.2,154.4 169.0,152.6 169.9,151.6 170.7,149.7 171.7,148.8 172.5,146.8 173.4,144.0 174.2,142.1 175.1,141.2 175.9,139.2 176.8,136.4 177.6,134.5 178.6,134.5 179.4,131.6 180.3,129.8 181.1,127.9 182.0,126.9 182.8,125.0 183.7,123.1 184.5,121.2 185.5,119.3 186.3,118.3 187.2,116.4 188.0,114.5 188.9,113.6 189.8,116.4 190.6,117.4 191.5,115.5 192.4,113.6 193.3,111.7 194.1,117.4 195.0,116.4 195.8,117.4 196.7,122.1 197.5,134.5 198.4,132.6 199.3,133.6 200.2,145.9 201.0,145.9 201.9,144.0 202.7,144.0 203.6,142.1 204.4,139.2 205.4,136.4 206.2,136.4 207.1,135.4 207.9,134.5 208.8,130.7 209.6,130.7 210.6,127.9 211.4,127.9 212.3,126.9 213.1,126.0 214.0,124.0 214.8,121.2 215.7,120.2 216.5,118.3 217.4,118.3 218.3,115.5 219.2,112.7 220.0,112.7 220.9,110.8 221.8,110.8 222.6,110.8 223.5,114.5 224.3,117.4 225.2,115.5 226.1,126.9 227.0,133.6 227.8,135.4 228.7,144.0 229.5,144.9 230.4,144.0 231.2,141.2 232.1,140.2 233.0,139.2 233.9,137.3 234.7,136.4 235.6,135.4 236.4,134.5 237.3,132.6 238.1,129.8 239.0,127.9 239.8,126.9 240.8,126.0 241.6,122.1 242.5,121.2 243.3,120.2 244.2,118.3 245.1,117.4 245.9,115.5 246.8,113.6 247.6,112.7 248.5,110.8 249.4,109.8 250.3,107.9 251.1,112.7 252.0,123.1 252.8,128.8 253.7,133.6 254.6,141.2 255.5,146.8 256.3,151.6 257.2,158.2 258.0,157.3 258.9,156.3 259.7,155.4 260.7,153.5 261.5,151.6 262.4,148.8 263.2,147.8 264.1,145.9 264.9,144.0 265.9,141.2 266.7,141.2 267.6,138.3 268.4,137.3 269.3,135.4 270.1,134.5 271.1,131.6 271.9,129.8 272.8,128.8 273.6,126.9 274.5,125.0 275.4,123.1 276.3,122.1 277.1,119.3 278.0,118.3 278.8,116.4 279.7,115.5 280.5,113.6 281.4,111.7 282.3,110.8 283.2,109.8 284.0,110.8 284.9,109.8 285.8,118.3 286.6,126.0 287.5,131.6 288.4,130.7 289.3,130.7 290.1,131.6 291.0,132.6 291.8,141.2 292.7,147.8 293.6,146.8 294.5,144.9 295.3,144.0 296.2,141.2 297.0,140.2 297.9,139.2 298.7,137.3 299.7,136.4 300.5,135.4 301.4,134.5 302.2,130.7 303.1,128.8 303.9,127.9 304.8,126.9 305.7,124.0 306.6,121.2 307.4,121.2 308.3,119.3 309.1,117.4 310.0,115.5 310.9,113.6 311.8,112.7 312.6,111.7 313.5,110.8 314.3,111.7 315.2,116.4 316.1,125.0 317.0,129.8 317.8,129.8 318.7,138.3 319.5,137.3 320.4,136.4 321.3,136.4 322.2,135.4 323.0,132.6 323.9,129.8 324.8,129.8 325.6,127.9 326.5,126.0 327.4,124.0 328.3,122.1 329.1,121.2 330.0,120.2 330.8,119.3 331.7,117.4 332.6,116.4 333.5,113.6 334.3,112.7 335.2,111.7 336.0,109.8 336.9,115.5 337.8,113.6 338.7,115.5 339.5,121.2 340.4,127.9 341.2,130.7 342.1,134.5 342.9,140.2 343.8,149.7 344.6,147.8 345.6,145.9 346.4,145.9 347.3,145.9 348.1,144.0 349.0,143.1 349.8,141.2 350.7,139.2 351.5,137.3 352.5,136.4 353.3,133.6 354.2,131.6 355.0,129.8 355.9,128.8 356.8,126.0 357.6,125.0 358.5,123.1 359.4,121.2 360.3,120.2 361.1,118.3 362.0,116.4 362.8,114.5 363.7,113.6 364.6,112.7 365.5,110.8 366.3,110.8 367.2,112.7 368.0,111.7 369.0,113.6 369.8,118.3 370.7,130.7 371.5,142.1 372.5,154.4 373.3,163.0 374.2,162.1 375.0,162.1 375.9,162.1 376.7,160.2 377.6,158.2 378.5,156.3 379.4,156.3 380.2,155.4 381.1,152.6 381.9,150.7 382.9,150.7 383.7,147.8 384.6,145.9 385.4,143.1 386.3,143.1 387.1,140.2 388.1,138.3 388.9,137.3 389.8,136.4 390.6,133.6 391.6,132.6 392.4,129.8 393.3,128.8 394.1,126.0 395.0,126.0 395.8,123.1 396.7,121.2 397.6,120.2 398.5,118.3 399.3,116.4 400.2,114.5 401.0,113.6 401.9,112.7 402.8,110.8 403.7,108.9 404.5,114.5 405.4,125.0 406.2,123.1 407.1,123.1 408.0,132.6 408.9,134.5 409.7,142.1 410.6,145.9 411.5,145.9 412.3,143.1 413.2,142.1 414.1,140.2 414.9,139.2 415.8,137.3 416.7,136.4 417.5,134.5 418.4,132.6 419.2,131.6 420.2,129.8 421.0,127.9 421.9,126.9 422.7,124.0 423.6,122.1 424.4,121.2 425.4,119.3 426.2,118.3 427.1,116.4 427.9,114.5 428.8,113.6 429.6,111.7 430.5,114.5 431.4,116.4 432.3,115.5 433.1,117.4 434.0,123.1 434.8,132.6 435.7,135.4 436.5,144.0 437.4,149.7 438.3,150.7 439.2,148.8 440.0,146.8 440.9,145.9 441.7,143.1 442.7,142.1 443.5,142.1 444.4,141.2 445.2,138.3 446.1,137.3 446.9,135.4 447.8,134.5 448.7,132.6 449.6,129.8 450.4,127.9 451.3,127.9 452.2,126.0 453.0,123.1 453.9,121.2 454.7,120.2 455.6,119.3 456.5,116.4 457.4,114.5 458.2,113.6 459.1,112.7 459.9,111.7 460.8,113.6 461.6,113.6 462.6,115.5 463.4,117.4 464.3,119.3 465.1,123.1 466.0,126.0 466.8,128.8 467.8,128.8 468.6,128.8 469.5,127.9 470.3,126.9 471.2,130.7 472.0,133.6 472.9,131.6 473.8,130.7 474.7,127.9 475.5,126.0 476.4,125.0 477.2,123.1 478.1,122.1 478.9,120.2 479.8,119.3 480.7,117.4 481.6,116.4 482.4,115.5 483.3,113.6 484.2,112.7 485.0,110.8 485.9,109.8 486.8,110.8 487.7,113.6 488.5,119.3 489.4,127.9 490.2,135.4 491.1,149.7 492.0,152.6 492.9,157.3 493.7,157.3 494.6,156.3 495.4,155.4 496.3,153.5 497.1,151.6 498.1,150.7 498.9,148.8 499.8,147.8 500.6,145.9 501.5,145.9 502.3,144.0 503.3,143.1 504.1,140.2 505.0,139.2 505.8,138.3 506.7,135.4 507.6,133.6 508.5,131.6 509.3,130.7 510.2,128.8 511.0,126.9 511.9,124.0 512.7,124.0 513.7,121.2 514.5,120.2 515.4,118.3 516.2,116.4 517.1,115.5 517.9,113.6 518.9,112.7 519.7,113.6 520.6,116.4 521.4,115.5 522.3,116.4 523.2,123.1 524.0,125.0 524.9,133.6 525.7,135.4 526.7,138.3 527.5,145.9 528.4,145.9 529.2,144.9 530.1,143.1 530.9,141.2 531.8,138.3 532.6,137.3 533.5,136.4 534.4,134.5 535.3,132.6 536.1,130.7 537.0,129.8 537.8,128.8 538.7,126.0 539.6,125.0 540.5,124.0 541.3,122.1 542.2,120.2 543.0,118.3 544.0,116.4 544.8,115.5 545.7,113.6 546.5,111.7 547.4,109.8 548.2,109.8 549.2,120.2 550.0,118.3 550.9,117.4 551.7,122.1 552.6,129.8 553.5,138.3 554.4,143.1 555.2,152.6 556.1,157.3 556.9,155.4 557.8,154.4 558.7,153.5 559.5,150.7 560.4,149.7 561.3,148.8 562.1,147.8 563.0,146.8 563.9,143.1 564.7,141.2 565.6,140.2 566.4,140.2 567.4,137.3 568.2,135.4 569.1,133.6 569.9,132.6" fill="none" stroke="#eb6834" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="161.1" y2="161.1" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="165.1" fill="#1b1f24">unpaced (pfifo)</text>
+<polyline points="58.0,212.4 58.9,212.4 59.7,212.4 60.6,212.4 61.5,211.4 62.4,204.8 63.2,204.8 64.1,204.8 65.0,203.8 65.9,189.6 66.7,189.6 67.6,189.6 68.4,188.7 69.3,167.8 70.2,159.2 71.1,159.2 71.9,158.2 72.8,137.3 73.6,117.4 74.5,98.4 75.4,97.5 76.3,79.4 77.1,58.5 78.0,43.3 78.8,48.0 79.7,71.8 80.6,91.8 81.5,119.3 82.3,126.9 83.2,128.8 84.0,128.8 84.9,126.9 85.7,126.9 86.7,126.9 87.5,126.9 88.4,129.8 89.2,136.4 90.1,144.0 90.9,148.8 91.9,155.4 92.7,156.3 93.6,155.4 94.4,154.4 95.3,151.6 96.1,149.7 97.0,148.8 97.9,146.8 98.8,146.8 99.6,144.9 100.5,142.1 101.3,139.2 102.2,139.2 103.1,139.2 103.9,135.4 104.8,133.6 105.7,131.6 106.6,131.6 107.4,128.8 108.3,126.9 109.1,124.0 110.0,124.0 110.8,124.0 111.8,121.2 112.6,119.3 113.5,116.4 114.3,116.4 115.2,116.4 116.0,112.7 117.0,111.7 117.8,111.7 118.7,115.5 119.5,119.3 120.4,121.2 121.2,123.1 122.1,127.9 123.0,132.6 123.9,135.4 124.7,134.5 125.6,136.4 126.4,134.5 127.3,134.5 128.1,133.6 129.1,129.8 129.9,128.8 130.8,126.9 131.6,126.9 132.5,125.0 133.3,124.0 134.3,121.2 135.1,119.3 136.0,118.3 136.8,117.4 137.7,114.5 138.6,113.6 139.4,111.7 140.3,111.7 141.2,112.7 142.1,116.4 142.9,118.3 143.8,126.0 144.6,135.4 145.5,143.1 146.3,144.9 147.3,144.9 148.1,144.0 149.0,144.0 149.8,143.1 150.7,142.1 151.5,138.3 152.5,138.3 153.3,137.3 154.2,135.4 155.0,132.6 155.9,130.7 156.7,129.8 157.7,127.9 158.5,126.9 159.4,124.0 160.2,123.1 161.1,122.1 161.9,121.2 162.9,119.3 163.7,115.5 164.6,114.5 165.4,114.5 166.3,113.6 167.1,111.7 168.1,108.9 168.9,111.7 169.8,114.5 170.6,121.2 171.5,126.9 172.3,128.8 173.3,140.2 174.1,143.1 175.0,143.1 175.8,140.2 176.7,139.2 177.6,138.3 178.5,138.3 179.3,136.4 180.2,134.5 181.1,132.6 181.9,130.7 182.8,129.8 183.7,128.8 184.5,126.0 185.4,124.0 186.3,123.1 187.1,122.1 188.0,120.2 188.9,118.3 189.8,115.5 190.6,114.5 191.5,114.5 192.3,112.7 193.3,110.8 194.1,108.9 195.0,113.6 195.8,119.3 196.7,129.8 197.6,141.2 198.5,143.1 199.3,145.9 200.2,149.7 201.0,149.7 202.0,150.7 202.8,149.7 203.7,147.8 204.5,146.8 205.4,145.9 206.2,143.1 207.1,141.2 208.0,140.2 208.9,139.2 209.7,136.4 210.6,135.4 211.4,132.6 212.4,132.6 213.2,130.7 214.1,129.8 214.9,126.9 215.8,125.0 216.6,124.0 217.5,122.1 218.4,120.2 219.3,118.3 220.1,117.4 221.0,116.4 221.8,114.5 222.7,113.6 223.5,110.8 224.5,109.8 225.3,109.8 226.2,115.5 227.0,121.2 227.9,122.1 228.8,124.0 229.7,130.7 230.5,131.6 231.4,136.4 232.3,137.3 233.1,136.4 234.0,134.5 234.8,134.5 235.7,131.6 236.6,130.7 237.5,127.9 238.3,126.9 239.2,126.0 240.0,124.0 241.0,122.1 241.8,120.2 242.7,119.3 243.5,118.3 244.4,117.4 245.2,114.5 246.1,112.7 247.0,111.7 247.9,110.8 248.7,109.8 249.6,109.8 250.4,112.7 251.4,122.1 252.2,128.8 253.1,135.4 253.9,138.3 254.8,138.3 255.6,142.1 256.6,141.2 257.4,140.2 258.3,137.3 259.1,135.4 260.0,134.5 260.8,134.5 261.7,131.6 262.6,129.8 263.5,128.8 264.3,127.9 265.2,125.0 266.0,123.1 266.9,123.1 267.7,121.2 268.7,118.3 269.5,117.4 270.4,115.5 271.2,115.5 272.1,113.6 273.0,111.7 273.9,109.8 274.7,112.7 275.6,116.4 276.5,125.0 277.3,128.8 278.2,133.6 279.1,134.5 280.0,136.4 280.8,134.5 281.7,134.5 282.5,131.6 283.4,130.7 284.3,128.8 285.2,126.9 286.0,126.9 286.9,125.0 287.8,124.0 288.7,122.1 289.5,119.3 290.4,118.3 291.2,117.4 292.1,116.4 292.9,113.6 293.8,112.7 294.6,111.7 295.6,110.8 296.4,112.7 297.3,116.4 298.1,122.1 299.0,126.0 299.8,128.8 300.8,133.6 301.6,134.5 302.5,133.6 303.3,132.6 304.2,132.6 305.0,129.8 305.9,127.9 306.8,126.0 307.7,125.0 308.5,125.0 309.4,124.0 310.2,121.2 311.1,119.3 312.0,118.3 312.9,117.4 313.7,115.5 314.6,113.6 315.5,111.7 316.3,109.8 317.2,109.8 318.1,111.7 318.9,110.8 319.8,119.3 320.7,127.9 321.5,138.3 322.4,142.1 323.3,147.8 324.2,146.8 325.0,145.9 325.9,145.9 326.7,144.9 327.7,142.1 328.5,139.2 329.4,138.3 330.2,137.3 331.1,136.4 331.9,135.4 332.8,131.6 333.7,130.7 334.6,129.8 335.4,127.9 336.3,125.0 337.1,123.1 338.1,122.1 338.9,121.2 339.8,119.3 340.6,118.3 341.5,116.4 342.3,114.5 343.2,113.6 344.1,112.7 345.0,111.7 345.8,110.8 346.7,112.7 347.5,117.4 348.4,122.1 349.3,126.9 350.2,133.6 351.0,143.1 351.9,146.8 352.7,151.6 353.6,155.4 354.5,153.5 355.4,153.5 356.2,151.6 357.1,149.7 357.9,147.8 358.9,146.8 359.7,145.9 360.6,144.0 361.4,143.1 362.3,140.2 363.2,139.2 364.0,136.4 364.9,135.4 365.8,133.6 366.7,132.6 367.5,130.7 368.4,128.8 369.2,126.9 370.1,125.0 371.0,124.0 371.9,122.1 372.7,121.2 373.6,118.3 374.4,117.4 375.3,116.4 376.1,114.5 377.1,113.6 377.9,112.7 378.8,109.8 379.6,113.6 380.5,114.5 381.3,119.3 382.2,121.2 383.0,126.0 383.9,131.6 384.8,134.5 385.7,137.3 386.5,136.4 387.4,140.2 388.2,139.2 389.1,138.3 389.9,136.4 390.8,135.4 391.7,131.6 392.6,130.7 393.4,129.8 394.3,127.9 395.2,126.0 396.0,125.0 396.9,123.1 397.7,123.1 398.6,121.2 399.5,118.3 400.4,117.4 401.2,115.5 402.1,114.5 402.9,113.6 403.8,110.8 404.6,110.8 405.6,109.8 406.4,111.7 407.3,112.7 408.1,117.4 409.0,124.0 409.8,127.9 410.7,128.8 411.6,129.8 412.5,131.6 413.3,133.6 414.2,134.5 415.0,131.6 415.9,131.6 416.7,129.8 417.7,129.8 418.5,125.0 419.4,124.0 420.2,123.1 421.1,122.1 421.9,121.2 422.8,119.3 423.7,117.4 424.6,115.5 425.4,114.5 426.3,113.6 427.2,112.7 428.0,110.8 428.9,113.6 429.7,113.6 430.7,115.5 431.5,120.2 432.4,122.1 433.2,127.9 434.1,129.8 434.9,129.8 435.8,129.8 436.7,127.9 437.6,127.9 438.4,126.0 439.3,125.0 440.1,123.1 441.0,122.1 441.8,120.2 442.8,118.3 443.6,118.3 444.5,116.4 445.3,113.6 446.2,112.7 447.0,110.8 447.9,110.8 448.7,108.9 449.6,107.0 450.5,116.4 451.4,121.2 452.2,127.9 453.1,130.7 453.9,132.6 454.8,140.2 455.7,144.0 456.5,142.1 457.4,141.2 458.3,139.2 459.2,138.3 460.0,138.3 460.9,136.4 461.7,133.6 462.6,130.7 463.4,130.7 464.3,129.8 465.2,126.0 466.1,124.0 466.9,124.0 467.8,123.1 468.6,121.2 469.5,119.3 470.4,117.4 471.3,116.4 472.1,115.5 473.0,114.5 473.8,110.8 474.7,110.8 475.5,112.7 476.5,115.5 477.3,118.3 478.2,128.8 479.0,138.3 479.9,145.9 480.7,149.7 481.6,150.7 482.5,149.7 483.4,149.7 484.2,149.7 485.1,147.8 485.9,145.9 486.8,144.0 487.7,142.1 488.6,142.1 489.4,139.2 490.3,136.4 491.2,135.4 492.0,134.5 492.9,131.6 493.8,130.7 494.7,128.8 495.5,127.9 496.4,126.0 497.2,124.0 498.1,122.1 499.0,120.2 499.9,119.3 500.7,118.3 501.6,116.4 502.4,115.5 503.3,113.6 504.1,111.7 505.1,110.8 505.9,108.9 506.8,114.5 507.6,116.4 508.5,120.2 509.3,123.1 510.2,130.7 511.1,133.6 512.0,138.3 512.8,144.9 513.7,145.9 514.5,144.0 515.4,143.1 516.3,143.1 517.2,141.2 518.0,138.3 518.9,138.3 519.7,135.4 520.6,134.5 521.5,133.6 522.4,131.6 523.2,127.9 524.1,127.9 524.9,126.9 525.8,126.0 526.7,122.1 527.6,120.2 528.4,119.3 529.3,119.3 530.1,118.3 531.0,114.5 531.9,112.7 532.8,111.7 533.6,111.7 534.5,110.8 535.4,113.6 536.2,115.5 537.1,118.3 538.0,122.1 538.9,123.1 539.7,126.0 540.6,127.9 541.5,128.8 542.4,130.7 543.2,129.8 544.1,126.9 544.9,126.0 545.8,124.0 546.6,123.1 547.6,121.2 548.4,120.2 549.3,118.3 550.1,117.4 551.0,115.5 551.8,114.5 552.7,113.6 553.5,110.8 554.4,109.8 555.3,111.7 556.2,114.5 557.0,122.1 557.9,129.8 558.7,137.3 559.6,144.0 560.4,146.8 561.3,146.8 562.1,146.8 563.0,145.9 563.9,143.1 564.8,141.2 565.6,140.2 566.5,139.2 567.4,137.3 568.2,134.5 569.1,133.6 570.0,133.6" fill="none" stroke="#2a78d6" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="98.4" y2="98.4" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="102.4" fill="#1b1f24">paced by fq</text>
+<text x="83.6" y="39.5" fill="#4a5560" text-anchor="start">fq-paced peak 188</text>
+<text x="93.8" y="77.5" fill="#4a5560" text-anchor="start">unpaced peak 157</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">unpaced: pfifo on s0, nothing paces</text>
+<line x1="337" x2="351" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="356" y="22" fill="#1b1f24">paced: fq on s0</text>
+<line x1="58" x2="570" y1="349.4" y2="349.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="353.4" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="274.6" y2="274.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="278.6" text-anchor="end" fill="#898781">7</text>
+<line x1="58" x2="570" y1="358.0" y2="358.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="312.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 312.0)">unpaced: flow</text>
+<circle cx="80.6" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="92.7" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="160.4" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="189.8" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="228.7" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.1" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="339.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="366.3" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="430.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="464.3" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.5" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="549.2" cy="349.4" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="124.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="161.3" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="223.5" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.8" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="286.6" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="317.0" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="340.4" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="370.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.5" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="489.4" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="519.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="551.7" cy="338.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.0" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="125.8" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="154.3" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="199.3" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.0" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="253.7" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="336.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="367.2" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.5" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="431.4" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="462.6" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="485.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="524.9" cy="328.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="74.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="94.4" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="129.2" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="158.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="194.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="223.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="253.7" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="286.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="371.5" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="405.4" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="491.1" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="520.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="552.6" cy="317.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.0" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="125.8" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="155.2" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="197.5" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="254.6" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="291.8" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="315.2" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="373.3" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="434.0" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="487.7" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="522.3" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="552.6" cy="306.7" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="73.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="124.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="158.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="200.2" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="222.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="254.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="284.0" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="316.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="337.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="372.5" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="407.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.1" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="463.4" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="486.8" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="520.6" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="551.7" cy="296.0" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="74.5" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="94.4" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="155.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="194.1" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="225.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="291.0" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="314.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="338.7" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="366.3" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="408.0" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="471.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="548.2" cy="285.3" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="77.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="90.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="127.5" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="157.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.0" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="285.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="316.1" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="343.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="370.7" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="408.0" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="432.3" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="460.8" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="490.2" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="523.2" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="553.5" cy="274.6" r="2.6" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="254" r="4" fill="#eb6834"/>
+<text x="85" y="258" fill="#1b1f24">a flow enters recovery (unpaced)</text>
+<line x1="58" x2="570" y1="487.4" y2="487.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="491.4" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="412.6" y2="412.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="416.6" text-anchor="end" fill="#898781">7</text>
+<line x1="58" x2="570" y1="496.0" y2="496.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="450.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 450.0)">fq-paced: flow</text>
+<circle cx="78.8" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="88.4" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="118.7" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="143.8" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="173.3" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="276.5" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="297.3" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.2" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="430.7" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="450.5" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="557.0" cy="487.4" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="141.2" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.8" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="225.3" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="298.1" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="321.5" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="347.5" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="406.4" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="428.9" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="479.0" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="506.8" cy="476.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.1" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.0" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="226.2" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="251.4" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="298.1" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="383.0" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="411.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="451.4" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="476.5" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="507.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="540.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="559.6" cy="466.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="142.1" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="171.5" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="249.6" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.8" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="452.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="478.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="510.2" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="555.3" cy="455.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.8" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="122.1" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="168.9" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="229.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="252.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="346.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="379.6" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="409.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="478.2" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="512.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="538.0" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="558.7" cy="444.7" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="78.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="117.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="145.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="196.7" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="274.7" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="318.1" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="345.8" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="381.3" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="450.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="475.5" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="510.2" cy="434.0" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="80.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="89.2" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="119.5" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="170.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="195.8" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.9" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="296.4" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="318.1" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="351.0" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="379.6" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="406.4" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="433.2" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="506.8" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="537.1" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="555.3" cy="423.3" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="79.7" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="142.9" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="168.9" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="200.2" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="227.0" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="274.7" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.8" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="347.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="384.8" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="407.3" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="431.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="475.5" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="535.4" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="557.0" cy="412.6" r="2.6" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="392" r="4" fill="#2a78d6"/>
+<text x="85" y="396" fill="#1b1f24">a flow enters recovery (fq-paced)</text>
+<text x="58.0" y="512.0" text-anchor="middle" fill="#898781">0</text>
+<text x="143.3" y="512.0" text-anchor="middle" fill="#898781">1</text>
+<text x="228.7" y="512.0" text-anchor="middle" fill="#898781">2</text>
+<text x="314.0" y="512.0" text-anchor="middle" fill="#898781">3</text>
+<text x="399.3" y="512.0" text-anchor="middle" fill="#898781">4</text>
+<text x="484.7" y="512.0" text-anchor="middle" fill="#898781">5</text>
+<text x="570.0" y="512.0" text-anchor="middle" fill="#898781">6</text>
+<text x="314.0" y="530.0" text-anchor="middle" fill="#4a5560">seconds since the eight flows started together</text>
+<g class="hit"><title>t = 0.00 s · sum of windows: unpaced 8, fq-paced 8 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="58.0" y="30" width="2.1" height="466.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.05 s · sum of windows: unpaced 16, fq-paced 16 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="60.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="62.3" x2="62.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.10 s · sum of windows: unpaced 32, fq-paced 32 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="64.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="66.5" x2="66.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.15 s · sum of windows: unpaced 64, fq-paced 64 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="68.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="70.8" x2="70.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.20 s · sum of windows: unpaced 99, fq-paced 129 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="72.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="75.1" x2="75.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.25 s · sum of windows: unpaced 133, fq-paced 156 packets · flows entering recovery: unpaced 3, fq-paced 8</title><rect x="77.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="79.3" x2="79.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.30 s · sum of windows: unpaced 158, fq-paced 96 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="81.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="83.6" x2="83.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.35 s · sum of windows: unpaced 111, fq-paced 98 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="85.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="87.9" x2="87.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.40 s · sum of windows: unpaced 109, fq-paced 68 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="90.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="92.1" x2="92.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.45 s · sum of windows: unpaced 65, fq-paced 74 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="94.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="96.4" x2="96.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.50 s · sum of windows: unpaced 74, fq-paced 82 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="98.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="100.7" x2="100.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.55 s · sum of windows: unpaced 81, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="102.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="104.9" x2="104.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.60 s · sum of windows: unpaced 91, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="107.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="109.2" x2="109.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.65 s · sum of windows: unpaced 99, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="111.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="113.5" x2="113.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.70 s · sum of windows: unpaced 107, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="115.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="117.7" x2="117.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.75 s · sum of windows: unpaced 115, fq-paced 97 packets · flows entering recovery: unpaced 2, fq-paced 2</title><rect x="119.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="122.0" x2="122.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.80 s · sum of windows: unpaced 89, fq-paced 90 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="124.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="126.3" x2="126.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.85 s · sum of windows: unpaced 69, fq-paced 98 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="128.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="130.5" x2="130.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.90 s · sum of windows: unpaced 76, fq-paced 106 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="132.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="134.8" x2="134.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.95 s · sum of windows: unpaced 85, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="136.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="139.1" x2="139.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.00 s · sum of windows: unpaced 95, fq-paced 99 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="141.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="143.3" x2="143.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.05 s · sum of windows: unpaced 104, fq-paced 79 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="145.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="147.6" x2="147.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.10 s · sum of windows: unpaced 112, fq-paced 86 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="149.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="151.9" x2="151.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.15 s · sum of windows: unpaced 100, fq-paced 94 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="154.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="156.1" x2="156.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.20 s · sum of windows: unpaced 75, fq-paced 102 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="158.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="160.4" x2="160.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.25 s · sum of windows: unpaced 62, fq-paced 111 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="162.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="164.7" x2="164.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.30 s · sum of windows: unpaced 71, fq-paced 114 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="166.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="168.9" x2="168.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.35 s · sum of windows: unpaced 80, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="171.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="173.2" x2="173.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.40 s · sum of windows: unpaced 90, fq-paced 86 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="175.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="177.5" x2="177.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.45 s · sum of windows: unpaced 98, fq-paced 94 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="179.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="181.7" x2="181.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.50 s · sum of windows: unpaced 107, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="183.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="186.0" x2="186.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.55 s · sum of windows: unpaced 108, fq-paced 111 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="188.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="190.3" x2="190.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.60 s · sum of windows: unpaced 109, fq-paced 112 packets · flows entering recovery: unpaced 2, fq-paced 4</title><rect x="192.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="194.5" x2="194.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.65 s · sum of windows: unpaced 92, fq-paced 81 packets · flows entering recovery: unpaced 3, fq-paced 1</title><rect x="196.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="198.8" x2="198.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.70 s · sum of windows: unpaced 80, fq-paced 74 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="200.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="203.1" x2="203.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.75 s · sum of windows: unpaced 89, fq-paced 83 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="205.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="207.3" x2="207.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.80 s · sum of windows: unpaced 97, fq-paced 92 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="209.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="211.6" x2="211.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.85 s · sum of windows: unpaced 105, fq-paced 100 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="213.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="215.9" x2="215.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.90 s · sum of windows: unpaced 113, fq-paced 108 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="218.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="220.1" x2="220.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.95 s · sum of windows: unpaced 108, fq-paced 116 packets · flows entering recovery: unpaced 4, fq-paced 2</title><rect x="222.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="224.4" x2="224.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.00 s · sum of windows: unpaced 80, fq-paced 101 packets · flows entering recovery: unpaced 2, fq-paced 3</title><rect x="226.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="228.7" x2="228.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.05 s · sum of windows: unpaced 85, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="230.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="232.9" x2="232.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.10 s · sum of windows: unpaced 92, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="235.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="237.2" x2="237.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.15 s · sum of windows: unpaced 103, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="239.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="241.5" x2="241.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.20 s · sum of windows: unpaced 110, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="243.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="245.7" x2="245.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.25 s · sum of windows: unpaced 118, fq-paced 116 packets · flows entering recovery: unpaced 2, fq-paced 4</title><rect x="247.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="250.0" x2="250.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.30 s · sum of windows: unpaced 83, fq-paced 86 packets · flows entering recovery: unpaced 5, fq-paced 1</title><rect x="252.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="254.3" x2="254.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.35 s · sum of windows: unpaced 67, fq-paced 87 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="256.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="258.5" x2="258.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.40 s · sum of windows: unpaced 76, fq-paced 95 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="260.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="262.8" x2="262.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.45 s · sum of windows: unpaced 83, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="264.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="267.1" x2="267.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.50 s · sum of windows: unpaced 93, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="269.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="271.3" x2="271.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.55 s · sum of windows: unpaced 102, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="273.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="275.6" x2="275.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.60 s · sum of windows: unpaced 110, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="277.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="279.9" x2="279.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.65 s · sum of windows: unpaced 115, fq-paced 96 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="282.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="284.1" x2="284.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.70 s · sum of windows: unpaced 94, fq-paced 103 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="286.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="288.4" x2="288.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.75 s · sum of windows: unpaced 76, fq-paced 112 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="290.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="292.7" x2="292.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.80 s · sum of windows: unpaced 84, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="294.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="296.9" x2="296.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.85 s · sum of windows: unpaced 90, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="299.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="301.2" x2="301.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.90 s · sum of windows: unpaced 101, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="303.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="305.5" x2="305.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.95 s · sum of windows: unpaced 110, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="307.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="309.7" x2="309.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.00 s · sum of windows: unpaced 114, fq-paced 110 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="311.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="314.0" x2="314.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.05 s · sum of windows: unpaced 86, fq-paced 114 packets · flows entering recovery: unpaced 1, fq-paced 4</title><rect x="316.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="318.3" x2="318.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.10 s · sum of windows: unpaced 89, fq-paced 82 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="320.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="322.5" x2="322.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.15 s · sum of windows: unpaced 99, fq-paced 79 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="324.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="326.8" x2="326.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.20 s · sum of windows: unpaced 106, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="328.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="331.1" x2="331.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.25 s · sum of windows: unpaced 114, fq-paced 97 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="333.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="335.3" x2="335.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.30 s · sum of windows: unpaced 104, fq-paced 106 packets · flows entering recovery: unpaced 4, fq-paced 0</title><rect x="337.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="339.6" x2="339.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.35 s · sum of windows: unpaced 74, fq-paced 113 packets · flows entering recovery: unpaced 1, fq-paced 1</title><rect x="341.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="343.9" x2="343.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.40 s · sum of windows: unpaced 80, fq-paced 103 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="346.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="348.1" x2="348.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.45 s · sum of windows: unpaced 88, fq-paced 72 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="350.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="352.4" x2="352.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.50 s · sum of windows: unpaced 99, fq-paced 72 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="354.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="356.7" x2="356.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.55 s · sum of windows: unpaced 107, fq-paced 80 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="358.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="360.9" x2="360.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.60 s · sum of windows: unpaced 115, fq-paced 89 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="363.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="365.2" x2="365.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.65 s · sum of windows: unpaced 107, fq-paced 98 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="367.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="369.5" x2="369.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.70 s · sum of windows: unpaced 61, fq-paced 107 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="371.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="373.7" x2="373.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.75 s · sum of windows: unpaced 65, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="375.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="378.0" x2="378.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.80 s · sum of windows: unpaced 73, fq-paced 104 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="380.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="382.3" x2="382.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.85 s · sum of windows: unpaced 81, fq-paced 88 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="384.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="386.5" x2="386.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.90 s · sum of windows: unpaced 91, fq-paced 89 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="388.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="390.8" x2="390.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.95 s · sum of windows: unpaced 99, fq-paced 99 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="392.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="395.1" x2="395.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.00 s · sum of windows: unpaced 109, fq-paced 107 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="397.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="399.3" x2="399.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.05 s · sum of windows: unpaced 117, fq-paced 115 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="401.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="403.6" x2="403.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.10 s · sum of windows: unpaced 92, fq-paced 108 packets · flows entering recovery: unpaced 3, fq-paced 4</title><rect x="405.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="407.9" x2="407.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.15 s · sum of windows: unpaced 81, fq-paced 93 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="410.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="412.1" x2="412.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.20 s · sum of windows: unpaced 88, fq-paced 95 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="414.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="416.4" x2="416.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.25 s · sum of windows: unpaced 97, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="418.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="420.7" x2="420.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.30 s · sum of windows: unpaced 106, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="422.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="424.9" x2="424.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.35 s · sum of windows: unpaced 114, fq-paced 112 packets · flows entering recovery: unpaced 1, fq-paced 2</title><rect x="427.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="429.2" x2="429.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.40 s · sum of windows: unpaced 108, fq-paced 97 packets · flows entering recovery: unpaced 5, fq-paced 2</title><rect x="431.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="433.5" x2="433.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.45 s · sum of windows: unpaced 74, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="435.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="437.7" x2="437.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.50 s · sum of windows: unpaced 81, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="439.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="442.0" x2="442.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.55 s · sum of windows: unpaced 87, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="444.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="446.3" x2="446.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.60 s · sum of windows: unpaced 97, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 4</title><rect x="448.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="450.5" x2="450.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.65 s · sum of windows: unpaced 105, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="452.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="454.8" x2="454.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.70 s · sum of windows: unpaced 113, fq-paced 86 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="456.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="459.1" x2="459.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.75 s · sum of windows: unpaced 108, fq-paced 94 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="461.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="463.3" x2="463.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.80 s · sum of windows: unpaced 96, fq-paced 102 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="465.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="467.6" x2="467.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.85 s · sum of windows: unpaced 91, fq-paced 110 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="469.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="471.9" x2="471.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.90 s · sum of windows: unpaced 100, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="474.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="476.1" x2="476.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.95 s · sum of windows: unpaced 108, fq-paced 74 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="478.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="480.4" x2="480.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.00 s · sum of windows: unpaced 115, fq-paced 74 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="482.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="484.7" x2="484.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.05 s · sum of windows: unpaced 97, fq-paced 82 packets · flows entering recovery: unpaced 6, fq-paced 0</title><rect x="486.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="488.9" x2="488.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.10 s · sum of windows: unpaced 66, fq-paced 93 packets · flows entering recovery: unpaced 1, fq-paced 0</title><rect x="491.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="493.2" x2="493.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.15 s · sum of windows: unpaced 72, fq-paced 101 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="495.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="497.5" x2="497.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.20 s · sum of windows: unpaced 78, fq-paced 109 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="499.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="501.7" x2="501.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.25 s · sum of windows: unpaced 86, fq-paced 117 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="503.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="506.0" x2="506.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.30 s · sum of windows: unpaced 96, fq-paced 94 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="508.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="510.3" x2="510.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.35 s · sum of windows: unpaced 105, fq-paced 80 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="512.4" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="514.5" x2="514.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.40 s · sum of windows: unpaced 113, fq-paced 86 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="516.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="518.8" x2="518.8" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.45 s · sum of windows: unpaced 102, fq-paced 97 packets · flows entering recovery: unpaced 3, fq-paced 0</title><rect x="520.9" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="523.1" x2="523.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.50 s · sum of windows: unpaced 78, fq-paced 105 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="525.2" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="527.3" x2="527.3" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.55 s · sum of windows: unpaced 86, fq-paced 113 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="529.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="531.6" x2="531.6" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.60 s · sum of windows: unpaced 94, fq-paced 110 packets · flows entering recovery: unpaced 0, fq-paced 3</title><rect x="533.7" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="535.9" x2="535.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.65 s · sum of windows: unpaced 101, fq-paced 97 packets · flows entering recovery: unpaced 0, fq-paced 2</title><rect x="538.0" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="540.1" x2="540.1" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.70 s · sum of windows: unpaced 109, fq-paced 98 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="542.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="544.4" x2="544.4" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.75 s · sum of windows: unpaced 116, fq-paced 105 packets · flows entering recovery: unpaced 2, fq-paced 0</title><rect x="546.5" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="548.7" x2="548.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.80 s · sum of windows: unpaced 95, fq-paced 112 packets · flows entering recovery: unpaced 5, fq-paced 0</title><rect x="550.8" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="552.9" x2="552.9" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.85 s · sum of windows: unpaced 68, fq-paced 103 packets · flows entering recovery: unpaced 0, fq-paced 5</title><rect x="555.1" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="557.2" x2="557.2" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.90 s · sum of windows: unpaced 75, fq-paced 77 packets · flows entering recovery: unpaced 0, fq-paced 1</title><rect x="559.3" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="561.5" x2="561.5" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.95 s · sum of windows: unpaced 84, fq-paced 84 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="563.6" y="30" width="4.3" height="466.0" fill="transparent"/><line x1="565.7" x2="565.7" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.00 s · sum of windows: unpaced 92, fq-paced 91 packets · flows entering recovery: unpaced 0, fq-paced 0</title><rect x="567.9" y="30" width="2.1" height="466.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="496.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>

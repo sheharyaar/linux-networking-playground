@@ -1,0 +1,175 @@
+    <div class="part">Part II · The language</div>
+    <section id="ch4" class="chapter">
+      <span class="chnum">Chapter 4</span>
+      <h2>CUDA: writing the matvec</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag CUDA">CUDA</span> — The machine part (Part I) gave us warps on SMs, fed by a memory that puts a 311 µs floor under our matvec on the laptop. Now we write the matvec for that machine, three times. Each version fixes what the one before got wrong, and all three are in <code>lab/gpu/matvec.cu</code>.</p>
+
+      <h3>The shape of a launch</h3>
+      <p>A CUDA source file mixes host code and device code, and three keywords say which is which. A function marked <code>__global__</code> is a kernel: it runs on the device and is launched from the host. A function marked <code>__device__</code> runs on the device and can only be called from device code; our <code>warp_sum</code> helper is one. Anything unmarked is ordinary host code.</p>
+      <p>One launch creates a <b>grid</b>: every thread that launch will run. The grid is cut into <b>thread blocks</b>, usually just "blocks", of up to 1,024 threads each. A block is the unit placed on an SM: all its threads run on the same SM, can use the same shared memory, and can wait for each other. In NVIDIA's lower-level documents a block is called a <b>CTA</b>, a cooperative thread array, and the two names mean the same thing. Inside the block, the hardware cuts the threads into warps of 32, in order.</p>
+      <p>Each thread finds its place through four built-in variables. <b><code>threadIdx</code></b> is the thread's index within its block. <b><code>blockIdx</code></b> is the block's index within the grid. <b><code>blockDim</code></b> is the number of threads per block, and <b><code>gridDim</code></b> the number of blocks. Each has <code>.x</code>, <code>.y</code> and <code>.z</code> parts, for problems that are naturally two- or three-dimensional; a matvec only needs <code>.x</code>. The usual first line of a kernel turns them into one global index:</p>
+<pre><code>int row = blockIdx.x * blockDim.x + threadIdx.x;    // matvec.cu:45</code></pre>
+      <p>The host starts a kernel with a <b>launch configuration</b> in triple angle brackets: <code>matvec_naive&lt;&lt;&lt;16, 256&gt;&gt;&gt;(W, x, y, n, d)</code> asks for 16 blocks of 256 threads. Two more optional values can go inside the brackets, the bytes of shared memory per block and a queue to launch into. The host-side chapter covers the second.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph N["matvec_naive, launched with 16 blocks of 256 threads"]
+    direction TB
+    n1["grid: 4,096 threads"] --> n2["block 0: threads 0 to 255<br/>8 warps"] --> n3["warp 0 of block 0:<br/>threads 0 to 31"] --> n4["thread 5 computes y[5]<br/>alone, over all 4,096 columns"]
+  end
+  subgraph V["matvec_warp, launched with 512 blocks of 256 threads"]
+    direction TB
+    v1["grid: 131,072 threads<br/>= 4,096 warps"] --> v2["block 0: 8 warps"] --> v3["warp 5 of block 0:<br/>32 lanes"] --> v4["the 32 lanes share row 5:<br/>lane i takes columns i, i+32, i+64, …"]
+  end
+  N ~~~ V
+  style n4 fill:#fdf3e3,stroke:#b45309
+  style v4 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 4.1 — Two ways to map threads onto the rows of W.</b> Notice the last box of each row. In the naive kernel one thread owns a whole row, so the 32 lanes of a warp are in 32 different rows (the uncoalesced pattern of diagram 3.2). In the warp kernel one warp owns a row, so its lanes sit side by side in memory.</figcaption>
+      </figure>
+
+      <h3>The host half</h3>
+      <p>Device code can only read device memory, so the host has to put W and x there first. <code>cudaMalloc</code> allocates global memory and returns a device pointer. <code>cudaMemcpy</code> copies between host and device memory, in a direction you name. <code>cudaFree</code> gives the memory back. The lab program's <code>main</code> does exactly that (<code>matvec.cu:153–159</code>), launches each kernel, and copies y back to compare it with cuBLAS.</p>
+      <p>Errors need care because the launch is asynchronous. A bad launch configuration is reported by <code>cudaGetLastError()</code> straight after the launch. A fault while the kernel runs, such as reading outside an allocation, is reported by whatever CUDA call comes next, often a copy many lines later. The lab wraps every call in a <code>CHECK</code> macro that prints the file and line and exits, which is the minimum for code you want to debug.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant H as Host code
+  participant R as CUDA runtime
+  participant D as Device
+  H->>R: cudaMalloc W, x, y
+  H->>R: cudaMemcpy W and x to the device
+  R->>D: copy 64 MiB and 16 KiB
+  H->>R: matvec_warp with 512 blocks of 256 threads
+  R-->>H: returns at once
+  R->>D: the kernel runs
+  H->>R: cudaMemcpy y back to the host
+  Note over R: waits for the kernel to finish first
+  R-->>H: y is ready
+  H->>H: compare with the cuBLAS answer
+        </div>
+        <figcaption><b>Diagram 4.2 — One run of the lab program, as calls.</b> Notice that nothing waits after the launch. The copy back is what makes the host wait, because a copy on the same queue starts only after the kernel before it has finished. The prologue's asynchronous launch, in a real program.</figcaption>
+      </figure>
+
+      <h3>Version one: a thread per row</h3>
+<pre><code>__global__ void matvec_naive(const float *__restrict__ W, const float *__restrict__ x,
+                             float *__restrict__ y, int n, int d)
+{
+	int row = blockIdx.x * blockDim.x + threadIdx.x;
+	if (row &gt;= d)
+		return;
+	float sum = 0.0f;
+	for (int j = 0; j &lt; n; j++)
+		sum += W[(size_t)row * n + j] * x[j];
+	y[row] = sum;
+}</code></pre>
+      <p class="lcap">Listing 4.1 — <code>lab/gpu/matvec.cu:41–52</code>.</p>
+      <p>It is the C loop with the outer loop removed: the grid is the outer loop. <code>__restrict__</code> promises the compiler that the three arrays do not overlap, and together with <code>const</code> that lets it read W and x through a read-only path; a later chapter shows the instruction this becomes. The <code>if</code> guards against a grid with more threads than rows. Its problem is the one diagram 4.1 marks in orange. Lanes of one warp walk 32 different rows in step, so every warp-wide load touches 32 sectors. It has a second, quieter problem, which the first question below asks you to find.</p>
+
+      <h3>Version two: a warp per row, and a shuffle</h3>
+      <p>Give each row to a whole warp. Lane i adds up columns i, i + 32, i + 64 and so on, so at every step the 32 lanes read 32 neighbouring floats, the coalesced pattern. Each lane ends with a partial sum of 128 products, and the 32 partial sums must be added into one.</p>
+      <p>Adding many values into one is a <b>reduction</b>. Within a warp it can be done without touching memory, with a <b>warp shuffle</b>: an instruction that lets each lane read a register of another lane in the same warp. <code>__shfl_down_sync(mask, v, offset)</code> gives each lane the value of <code>v</code> held by the lane <code>offset</code> places above it. The <code>mask</code> names the lanes taking part, all 32 here, which is the explicit mask the previous chapter said modern code must pass.</p>
+<pre><code>__device__ __forceinline__ float warp_sum(float v)
+{
+	for (int offset = 16; offset &gt; 0; offset /= 2)
+		v += __shfl_down_sync(0xffffffff, v, offset);
+	return v;
+}
+
+	int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+	int lane = threadIdx.x % 32;
+	…
+	for (int j = lane; j &lt; n; j += 32)
+		sum += w[j] * x[j];
+	sum = warp_sum(sum);
+	if (lane == 0)
+		y[warp] = sum;</code></pre>
+      <p class="lcap">Listing 4.2 — <code>lab/gpu/matvec.cu:56–79</code>, the shuffle helper and the body of <code>matvec_warp</code>.</p>
+
+      <figure class="dia">
+        @@SVG:shuffle@@
+        <figcaption><b>Diagram 4.3 — <code>warp_sum</code>, step by step.</b> Notice that the useful lanes halve at each row, 32 to 16 to 8 to 4 to 2 to 1, so five shuffles fold 32 values. This is the same tree the CPU used in the parallelism chapter (chapter 1) to add up the sixteen lanes of a <code>zmm</code> register: the <code>vextractf64x4</code> and <code>vaddps</code> pair that followed the loop.</figcaption>
+      </figure>
+
+      <p>Two more tools belong here, though this kernel does not need them. If a whole block, rather than one warp, shared a row, the warps would have to combine their results through memory they can all see. That memory is <code>__shared__</code>: a variable declared with that keyword lives in the SM's shared memory, one copy per block. And the warps would have to wait for each other between writing and reading it. <b><code>__syncthreads()</code></b> is that wait: a barrier that every thread of the block must reach before any of them continues. It covers one block only. Threads in different blocks have no barrier inside a kernel; the end of the kernel is the only point where all of them have finished.</p>
+
+      <h3>Version three: sixteen bytes per lane</h3>
+      <p><code>matvec_warp4</code> (<code>matvec.cu:82–100</code>) is version two with one change: it reinterprets W and x as arrays of <code>float4</code>, a 16-byte struct of four floats, so each lane loads four neighbouring floats in one instruction. A warp-wide load then fetches 512 bytes, four full cache lines, instead of 128. The bytes moved are exactly the same. What shrinks is the number of load instructions, and with it the address arithmetic and loop overhead per byte. It requires that every row starts on a 16-byte boundary, which holds because <code>cudaMalloc</code> returns well-aligned memory and n is a multiple of 4.</p>
+      <p>The loop <code>for (j = lane; j &lt; n; j += 32)</code> is a small case of a common pattern. A <b>grid-stride loop</b> lets a fixed number of threads cover any amount of work: each thread starts at its own index and steps by the total number of threads, <code>for (i = id; i &lt; N; i += gridDim.x * blockDim.x)</code>. Our lanes stride by the 32 threads of their warp instead of the whole grid, but the idea is the same.</p>
+
+      <h3>Or call the library</h3>
+      <p>Most production code writes none of this. <b>cuBLAS</b> is NVIDIA's library of tuned dense linear algebra, following the old BLAS interface (Basic Linear Algebra Subprograms). Its matvec is called <b>GEMV</b>, general matrix-vector multiply, and its matmul <b>GEMM</b>, general matrix-matrix multiply. The lab calls <code>cublasSgemv</code> (S for single precision, FP32) as the correct answer and as the speed to beat. One trap: cuBLAS stores matrices column by column, the Fortran way, so our row-major W looks to it like the transpose, and the call asks for <code>CUBLAS_OP_T</code> (<code>matvec.cu:166</code>). LLM servers call cuBLAS, or its newer sibling cuBLASLt, for most of their matmuls, which is why knowing its names matters when you are looking for kernels to probe.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026. Limits from the CUDA compute-capability tables (6.1 from the CUDA 12.9 edition, which still lists it)</caption>
+        <tr><th></th><th>Pascal (sm_61)</th><th>Ada (sm_89)</th><th>Hopper (sm_90)</th></tr>
+        <tr><td>Threads per block, at most</td><td>1,024</td><td>1,024</td><td>1,024</td></tr>
+        <tr><td>Resident blocks per SM, at most</td><td>32</td><td>24</td><td>32</td></tr>
+        <tr><td>Shared memory per block, at most</td><td>48 KB</td><td>99 KB</td><td>227 KB</td></tr>
+        <tr><td>Can this laptop's CUDA 13.4 build it?</td><td>no: CUDA 12.x at most</td><td>yes</td><td>yes</td></tr>
+        <tr><td>The lab code as written</td><td>runs unchanged</td><td>runs</td><td>runs</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Change the block size and see what the grid becomes. In <code>matvec.cu:171</code> set <code>threads = 128</code>, rebuild, run:</p>
+<pre><code>nvcc -O3 -lineinfo -arch=sm_89 matvec.cu -lcublas -o out/matvec &amp;&amp; ./out/matvec</code></pre>
+        <p>The naive kernel's grid doubles to 32 blocks and the warp kernels' to 1,024. Watch which kernel's time moves and which does not, and keep the answer for the scheduling chapter. Then try the change in the second question below and look at the <code>max_err</code> column.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A launch creates a grid of blocks of threads; a block runs on one SM and can share shared memory and meet at <code>__syncthreads()</code>; the hardware cuts it into warps. Each thread finds its work from <code>blockIdx</code>, <code>blockDim</code> and <code>threadIdx</code>. The naive matvec gives each thread a row and loads uncoalesced; the warp version gives each warp a row, loads coalesced, and folds 32 partial sums with five warp shuffles; the float4 version moves the same bytes with a quarter of the load instructions. cuBLAS's <code>sgemv</code> is the reference, and GEMV and GEMM are the names to recognise in a server's kernel list.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt><code>__global__</code> / <code>__device__</code></dt><dd>Marks a kernel, launched from the host / a device function called from device code.</dd>
+          <dt>grid</dt><dd>All the threads of one launch.</dd>
+          <dt>thread block (CTA)</dt><dd>Up to 1,024 threads placed together on one SM, sharing shared memory and a barrier.</dd>
+          <dt><code>threadIdx</code>, <code>blockIdx</code>, <code>blockDim</code>, <code>gridDim</code></dt><dd>The built-ins that tell a thread where it is.</dd>
+          <dt>launch configuration</dt><dd>The <code>&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;</code> part of a launch, plus optional shared memory and queue.</dd>
+          <dt><code>cudaMalloc</code> / <code>cudaMemcpy</code> / <code>cudaFree</code></dt><dd>Allocate device memory / copy between host and device / release it.</dd>
+          <dt>reduction</dt><dd>Combining many values into one, such as a sum.</dd>
+          <dt>warp shuffle</dt><dd>An instruction that reads another lane's register in the same warp, without memory.</dd>
+          <dt><code>__shared__</code></dt><dd>Places a variable in shared memory, one copy per block.</dd>
+          <dt><code>__syncthreads()</code></dt><dd>A barrier for all threads of one block.</dd>
+          <dt>grid-stride loop</dt><dd>A loop that starts at a thread's index and steps by the total number of threads.</dd>
+          <dt>cuBLAS</dt><dd>NVIDIA's tuned dense linear-algebra library.</dd>
+          <dt>GEMV / GEMM</dt><dd>BLAS names for matvec / matmul.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: the naive kernel is launched as 16 blocks of 256 threads on the laptop's 20 SMs. At most how many SMs have any work at all, and what is the best occupancy any SM can reach during that launch?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>At most 16 SMs have work, so at least 4 sit idle, and the best occupancy is 8 / 48 ≈ 17%. A block is the unit placed on an SM and is never split across SMs, so 16 blocks can occupy at most 16 SMs. Each block is 256 / 32 = 8 warps, so an SM holding one block has 8 of its 48 warp places filled.</p>
+          <p>That is the quieter problem of listing 4.1: too little parallelism to hide latency (diagram 2.2), on top of uncoalesced loads. The near-miss is to think the 4,096 threads spread evenly over all 20 SMs. Threads only travel in blocks.</p>
+        </details>
+        <p>2. Someone tidies <code>matvec_warp</code> by deleting the <code>if (lane == 0)</code> in front of the final store, so all 32 lanes execute <code>y[warp] = sum;</code>. The results are now wrong by large, varying amounts. Using diagram 4.3, say what each row of y ends up holding.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Each row holds a partial sum from whichever lane's store the hardware happened to apply. After the five shuffles only lane 0 holds the whole row's total; lane k holds a sum over some subset of lanes, and the upper lanes hold little more than their own 128 products (diagram 4.3, the grey boxes). All 32 lanes store to the same address in one warp-wide instruction, and when lanes of one store collide, CUDA does not promise which value lands.</p>
+          <p>The near-miss is "a race between warps". No other warp writes y[warp]. The collision is inside one instruction of one warp, which is why the original code lets exactly one lane store.</p>
+        </details>
+        <p>3. "<code>__syncthreads()</code> makes every thread of the kernel wait for the others." Where does that stop being true, and what do you use when you need every thread of the grid to have finished a step?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It is true only within one block. <code>__syncthreads()</code> is a barrier for the threads of the block that calls it. Other blocks may not have started yet, because they are waiting for an SM, or may already have finished. A barrier across blocks inside one kernel could wait for blocks that cannot start until the waiting ones leave.</p>
+          <p>To make every thread finish a step, end the kernel and launch the next one. Launches on the same queue run in order, so the second kernel sees everything the first wrote. That boundary is the only grid-wide barrier this chapter gives you. The language-model chapters show that real servers split their work into many kernels partly for this reason.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#thread-hierarchy">CUDA Programming Guide: Writing SIMT kernels, thread hierarchy</a>. The official version of the first section of this chapter, with the 2D and 3D cases.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/even-easier-introduction-cuda/">An Even Easier Introduction to CUDA (Updated)</a> and <a href="https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/">CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops</a> (NVIDIA blog). A complete first program in the style of our naive kernel, ten minutes; then the loop pattern that makes kernels independent of the grid size.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/">Using CUDA Warp-Level Primitives</a> (NVIDIA blog). Shuffles, votes, and how to build the mask correctly when not all lanes are active.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/">Using Shared Memory in CUDA C/C++</a> (NVIDIA blog). <code>__shared__</code> and <code>__syncthreads()</code> with a worked example, for when you need the block-level version of our reduction.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cublas/index.html">cuBLAS documentation</a>. Look up <code>cublasSgemv</code> once and read its note on column-major storage; it explains the <code>CUBLAS_OP_T</code> in the lab.</li>
+        </ul>
+      </div>
+    </section>

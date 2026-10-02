@@ -1,0 +1,21 @@
+fork: v1.19.6-vpc.25 at 8ab00248bc
+=== RUN   TestCh13MaglevLab
+Cilium pkg/maglev, M = 16381, seed JLfvgnHc2kaSUFaI
+weights 1 and 100 give the same table: yes
+N,M_over_N,min_entries,max_entries,k_removed,trials,extra_moved_pct_mean,extra_moved_pct_max
+3,5460.3,5460,5461,1,3,0.026,0.055
+3,5460.3,5460,5461,2,3,0.000,0.000
+100,163.8,163,164,1,20,1.305,1.374
+100,163.8,163,164,2,20,1.544,1.679
+100,163.8,163,164,3,20,1.654,1.758
+100,163.8,163,164,5,20,1.911,2.088
+160,102.4,102,103,1,20,1.539,1.624
+160,102.4,102,103,2,20,1.707,1.844
+160,102.4,102,103,3,20,1.859,1.990
+160,102.4,102,103,5,20,2.165,2.314
+build time N=160 M=16381: median 1.28ms; permutation scratch 21.4 MB; table 65524 bytes
+build time N=1000 M=65521: median 32.64ms; permutation scratch 524.2 MB; table 262084 bytes
+--- PASS: TestCh13MaglevLab (0.54s)
+PASS
+ok  	github.com/cilium/cilium/pkg/maglev	0.570s
+fork still clean: 0 changed files

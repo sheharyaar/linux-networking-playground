@@ -1,0 +1,13 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+qdisc netem 1: root refcnt 17 limit 50 rate 10Mbit seed 626017034035263217
+rtt min/avg/max/mdev = 40.163/40.562/40.943/0.325 ms
+rtt min/avg/max/mdev = 41.282/42.042/42.888/0.629 ms
+ backlog 13626b 9p requeues 0
+ backlog 1514b 1p requeues 0
+ backlog 21196b 14p requeues 0
+ backlog 22710b 15p requeues 0
+ backlog 3028b 2p requeues 0
+qdisc netem 1: root refcnt 17 limit 50 rate 10Mbit seed 626017034035263217
+ Sent 4697596 bytes 3116 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 7570b 5p requeues 0
+  delayed 3121 dropped 0 corrupted 0 duplicated 0 reordered 0 ecn_marked 0

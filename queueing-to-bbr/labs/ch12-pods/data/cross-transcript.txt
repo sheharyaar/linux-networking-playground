@@ -1,0 +1,70 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+7.2.6-arch2-1
+qdisc fq 8780: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+=== none: txtime.py --count 1000 --no-stamp
+txtime: clock=mono (NOT attached: --no-stamp) sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+--- arriving at rtr:r0
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4938.6 us, p1 -4943.3, p99 -4885.8, max -4764.2 us
+gap between packets: captured median 999.9 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+--- leaving rtr:r1 (after fq)
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4935.3 us, p1 -4941.7, p99 6110.9, max 15106.9 us
+gap between packets: captured median 999.9 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+=== mono: txtime.py --count 1000 --clock mono
+txtime: clock=mono sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+--- arriving at rtr:r0
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4939.3 us, p1 -4977.5, p99 -4881.9, max -4335.3 us
+gap between packets: captured median 999.8 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+--- leaving rtr:r1 (after fq)
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median 12.4 us, p1 11.6, p99 17.3, max 35.4 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+=== tai: txtime.py --count 1000 --clock tai
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+--- arriving at rtr:r0
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4937.2 us, p1 -4942.8, p99 -4893.3, max -4604.0 us
+gap between packets: captured median 999.9 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+--- leaving rtr:r1 (after fq)
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median 12.7 us, p1 11.6, p99 19.5, max 70.7 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+=== real: txtime.py --count 1000 --clock real
+txtime: clock=real sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+--- arriving at rtr:r0
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4934.9 us, p1 -4942.1, p99 -4882.5, max -4794.0 us
+gap between packets: captured median 999.8 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+--- leaving rtr:r1 (after fq)
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -4930.9 us, p1 -4940.5, p99 -4871.4, max -4724.7 us
+gap between packets: captured median 999.7 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+=== burst: txtime.py --count 50 --clock mono --burst
+txtime: clock=mono sent 50 of 50 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start, all handed down at once
+--- arriving at rtr:r0
+50 of 50 stamped datagrams captured
+lateness (captured - stamped): median -29329.4 us, p1 -53715.8, p99 -4961.0, max -4961.0 us
+gap between packets: captured median 4.5 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+--- leaving rtr:r1 (after fq)
+50 of 50 stamped datagrams captured
+lateness (captured - stamped): median 13.0 us, p1 12.3, p99 23.7, max 23.7 us
+gap between packets: captured median 1000.1 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+=== tc -s on rtr:r1
+qdisc fq 8780: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 980708 bytes 4058 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 3 (inactive 3 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 2008 throttled 2050 latency 11.6us
+txtime listen: 4050 datagrams on :9000

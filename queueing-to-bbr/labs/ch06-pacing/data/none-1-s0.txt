@@ -1,0 +1,3 @@
+qdisc pfifo 80ff: root refcnt 17 limit 10000p
+ Sent 19107520 bytes 32414 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0

@@ -1,0 +1,33 @@
+    <section id="before" class="card">
+      <h2>Before you start: prerequisites and benches</h2>
+      <p>The goal is three sentences you can say and prove. The first: I can write a CUDA kernel, read its PTX and SASS, and say from the numbers whether it is limited by arithmetic or by memory. The second: I can explain how bpftime turns an eBPF program into PTX inside someone else's kernel, well enough to add a helper. The third: I can say where the time to the first token and the time per token go in an LLM server, and which call or kernel to probe for each. Here is what those sentences rest on, and where each piece is taught.</p>
+      <table>
+        <tr><th>Prerequisite</th><th>Why the goal needs it</th><th>Where you get it</th></tr>
+        <tr><td>C, pointers, ELF, dynamic linking, <code>LD_PRELOAD</code></td><td>bpftime is a shared library injected into the program it observes</td><td>you own it</td></tr>
+        <tr><td>Virtual memory, page tables, CPU caches and cache lines, atomics and memory barriers</td><td>the GPU memory hierarchy; vLLM's block table is a page table for attention state</td><td>you own it; the memory, PTX and vLLM chapters map it onto the GPU</td></tr>
+        <tr><td>Kernel eBPF: bytecode, verifier, maps, helpers, kprobes, uprobes, libbpf</td><td>bpftime keeps all of it on the loader side</td><td>you own it; the bpftime chapter covers only what changes</td></tr>
+        <tr><td>PCIe, BARs, MMIO, DMA</td><td>copies between host and GPU, and why some host memory must be pinned</td><td>SR-IOV dossier, <a href="sr-iov-dossier.html#ch1">Just enough PCIe (chapter 1)</a></td></tr>
+        <tr><td>The IOMMU</td><td>optional background to pinned memory</td><td>SR-IOV dossier, <a href="sr-iov-dossier.html#ch2">The IOMMU (chapter 2)</a></td></tr>
+        <tr><td>The die map: GPCs, TPCs, SMs, HBM, L2 slices, copy engines</td><td>the SM and memory chapters zoom into it from the programmer's side</td><td>GPU-sharing dossier, <a href="gpu-sharing-dossier.html#ch1">The silicon (chapter 1)</a></td></tr>
+        <tr><td>Channels, pushbuffers, doorbells, runlists</td><td>the host-side and scheduling chapters start where it stops</td><td>GPU-sharing dossier, <a href="gpu-sharing-dossier.html#ch2">How a launch reaches the silicon (chapter 2)</a></td></tr>
+        <tr><td>Resource manager, GSP firmware, NVML</td><td>optional background to the tooling chapter</td><td>GPU-sharing dossier, <a href="gpu-sharing-dossier.html#ch3">The driver and the firmware (chapter 3)</a></td></tr>
+        <tr><td>Context time-slicing, preemption, MPS</td><td>the top two levels of the scheduling chapter</td><td>GPU-sharing dossier, <a href="gpu-sharing-dossier.html#ch4">Time-slicing (chapter 4)</a> and <a href="gpu-sharing-dossier.html#ch5">MPS (chapter 5)</a></td></tr>
+        <tr><td>C++ and Python at reading level</td><td>CUDA is a C++ dialect; vLLM is Python</td><td>assumed; the few C++ features CUDA code leans on, and name mangling, are explained where they appear</td></tr>
+        <tr><td>Parallel machine models, the SM, the roofline, CUDA, PTX, SASS, the toolchain, profilers, bpftime internals, matrix arithmetic, transformers, LLM serving</td><td>the goal itself</td><td>taught here from zero</td></tr>
+      </table>
+      <p>Fenced out, on purpose: graphics, training, multi-GPU communication libraries, the internals of NVIDIA's template libraries for matrix kernels, and GPUs from other vendors. Each is real and none is needed for the three sentences.</p>
+      <h3>The three benches</h3>
+@@BENCHES@@
+      <h3>Lab prerequisites (you install these; the document never does)</h3>
+      <ul>
+        <li><b>Turn the laptop GPU on.</b> <code>supergfxctl -m Hybrid</code>, log out and in, then <code>nvidia-smi -L</code> should list one GPU. The <code>nvidia-open-dkms</code> module must have built for the running kernel.</li>
+        <li><b>Nsight Systems and Nsight Compute</b>, for the tooling chapter only. They are not part of Arch's <code>cuda</code> package.</li>
+        <li><b>bpftime</b> in <code>~/workspace/repos/bpftime</code>: <code>git submodule update --init --recursive</code>, then <code>cmake -Bbuild -DBPFTIME_ENABLE_CUDA_ATTACH=1 -DBPFTIME_CUDA_ROOT=/opt/cuda</code> and <code>cmake --build build -j</code>. Its CMake downloads Frida. Upstream says it is tested with CUDA 12.6; this laptop has 13.4, so the first build is also a test.</li>
+        <li><b>vLLM</b>: a <code>uv</code> virtual environment on Python 3.12 or 3.13 (the system Python is 3.14, which vLLM does not list), then <code>uv pip install vllm</code>.</li>
+        <li><b>llama.cpp</b> in <code>~/workspace/repos/llama.cpp</code>: <code>cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89</code> and <code>cmake --build build -j</code>. Name the architecture: by default ggml builds for <code>native</code>, and nvcc then embeds no PTX, which a bpftime probe needs. <code>89</code> with no suffix embeds both PTX and SASS for the laptop; use <code>61</code> on the P5000 (with a CUDA 12.x toolkit) and <code>90</code> on the H100.</li>
+        <li><b>One small model</b>: <code>Qwen/Qwen2.5-0.5B-Instruct</code> for vLLM, and <code>Qwen/Qwen2.5-0.5B-Instruct-GGUF</code> for llama.cpp. Both are Apache-2.0 and ungated.</li>
+        <li><b>For Pascal SASS</b> only: a CUDA 12.x toolkit installed next to 13.4. CUDA 13 cannot target Pascal at all.</li>
+      </ul>
+      <h3>Conventions</h3>
+      <p>Source citations look like <code>attach/nv_attach_impl/nv_attach_impl.cpp:1224</code> and are pinned to the commits in the footer; the clones live in <code>~/workspace/repos</code>. The kernels, probes and scripts the labs use are in <code>lab/gpu/</code> next to this file. Every listing labelled with a compiler and an architecture was produced by that compiler for that architecture.</p>
+    </section>

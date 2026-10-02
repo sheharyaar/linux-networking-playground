@@ -1,0 +1,153 @@
+    <section id="ch0" class="chapter">
+      <span class="chnum">Chapter 0 · Prologue</span>
+      <h2>One multiply, three ways to watch it</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> <span class="tag LLM">LLM</span> — Where we are: nowhere yet. This chapter picks the one object every later chapter follows, a matrix-vector multiply, and sets out the three ways anyone can watch a GPU while it runs one.</p>
+
+      <h3>The object we follow</h3>
+      <p>A large language model writes text one piece at a time. Each piece is a <b>token</b>: a short run of characters, often a whole word, sometimes part of one. "Linux" might be one token or two ("Lin" and "ux"). To produce one token, the model runs a long, fixed sequence of arithmetic, and most of that arithmetic is a single operation repeated hundreds of times.</p>
+      <p>That operation needs three words. A <b>vector</b> is an ordered list of numbers. A <b>matrix</b> is a grid of numbers in rows and columns. A <b>dot product</b> multiplies two vectors of the same length element by element and adds up the results. The dot product of (1, 2, 3) and (4, 5, 6) is 1·4 + 2·5 + 3·6 = 32.</p>
+      <p>A <b>matrix-vector multiply</b>, written <b>matvec</b> from here on, takes a matrix W and a vector x and produces a vector y. Each number in y is the dot product of one row of W with x. If W has d rows and n columns, then x has n numbers and y has d. We write it y = W·x.</p>
+<pre><code>W = | 1 2 3 |     x = | 1 |     y = | 1·1 + 2·0 + 3·2 |  =  |  7 |
+    | 4 5 6 |         | 0 |         | 4·1 + 5·0 + 6·2 |     | 16 |
+                      | 2 |</code></pre>
+      <p>Doing the same thing for many vectors at once, stacked side by side as the columns of a second matrix, is a <b>matrix-matrix multiply</b>, written <b>matmul</b>. A matmul is many matvecs that share one W.</p>
+
+      <figure class="dia">
+        @@SVG:matvec@@
+        <figcaption><b>Diagram 0.1 — The object we follow.</b> Notice that x is drawn on its side above W so that the pairing is visible: each dashed line meets one number of the highlighted row, the pairs are multiplied and summed, and the sum lands in one box of y. Do this for every row and y is complete.</figcaption>
+      </figure>
+
+      <p>Our matvec has d = n = 4096 and stores each number in 4 bytes. W is then 4096 × 4096 × 4 = 67,108,864 bytes, which is 64 MiB. Computing y takes 4096 × 4096 = 16,777,216 multiplications and as many additions. The program that does it is <code>lab/gpu/matvec.cu</code>, and every listing of machine code in this document was compiled from that one file.</p>
+      <p>One property of this operation decides how fast it can ever run, and you can see it already in the diagram. Every number in W is read from memory, used in exactly one multiply and one add, and never touched again. The arithmetic is trivial. The cost is moving 64 MiB to wherever the arithmetic happens. The memory chapter turns that sentence into a number, and the language-model chapters show that this number sets the speed of every LLM server that answers one user at a time.</p>
+
+      <h3>Why a GPU</h3>
+      <p>A <b>GPU</b>, a graphics processing unit, is a chip with thousands of small arithmetic units, built to run one short function over a large amount of data at once. It sits on the PCIe bus and has its own memory. In GPU programming the CPU side, with its operating system and its memory, is the <b>host</b>. The GPU with its memory is the <b>device</b>.</p>
+      <p>The function that runs on the device is a <b>kernel</b>. One launch of a kernel starts thousands of copies of the same function, and each copy works on a different part of the data. The word collides with the Linux kernel, so this document always says <b>host kernel</b> for the operating system. A bare "kernel" is always GPU code.</p>
+      <p>The CPU and the GPU are built for opposite goals. <b>Latency</b> is how long one piece of work takes from start to finish. <b>Throughput</b> is how much work finishes per second. A CPU core spends its transistors on latency: large caches, branch prediction, out-of-order execution, all so that one thread finishes soon. A GPU spends them on throughput: many simple units, and enough independent work queued up that some of it is always ready while the rest waits for memory. Our matvec is 16.8 million multiplications that do not depend on each other, and 4096 sums that can be split into pieces in any order we like. That is exactly the kind of work a GPU is for.</p>
+      <p>The software that makes an NVIDIA GPU programmable is <b>CUDA</b>. It is a dialect of C++ for writing kernels, a compiler for that dialect, and two libraries that every CUDA program loads. The <b>CUDA runtime</b> (<code>libcudart.so</code>) is the convenient API most programs call. Under it sits the <b>CUDA driver library</b> (<code>libcuda.so</code>), which talks to the GPU driver in the host kernel. The GPU-sharing dossier follows those two libraries down to the hardware in <a href="gpu-sharing-dossier.html#ch2">How a launch reaches the silicon (chapter 2)</a>. This document starts from the programmer's side and goes down from there.</p>
+
+      <h3>Three ways to watch it</h3>
+      <p>Suppose the matvec runs inside a program you did not write, and you want to know how long it takes and why. There are three places to stand.</p>
+      <p><b>On the host, watching the calls.</b> A uprobe on <code>cudaLaunchKernel</code> in <code>libcudart.so</code> fires every time the program asks for a kernel to run. This is ordinary eBPF, and you already know how to write it. The problem is that a launch is <b>asynchronous</b>: the call puts the work in a queue for the GPU and returns, usually within a few microseconds. The GPU may not start the kernel for a long time after that. A host-side probe sees the request. The kernel's start, its running, and its end all happen somewhere the probe cannot see.</p>
+      <p><b>Asking the vendor.</b> NVIDIA's profilers are the <b>Nsight</b> tools. The library under them is <b>CUPTI</b>, the CUDA Profiling Tools Interface. Together they read counters built into the GPU and record exactly when each kernel ran and what it did. They are precise and heavy. The detailed per-kernel tool replays each kernel several times to collect all its counters, which is not something you do to a production server. And they move on without old hardware: the current version of that detailed tool does not support the customer's Pascal card at all.</p>
+      <p><b>Inside the kernel.</b> <b>bpftime</b> is a userspace eBPF runtime from the eunomia-bpf project. One of the things it can do is rewrite a kernel's GPU code while the program is loading it, so that an eBPF program you wrote runs inside that kernel, in every thread of the kernel, at the kernel's entry or exit. The probe can read the GPU's own clock and the thread's position on the chip, and write into maps that a host process reads. It sees what the first two places cannot: which threads of the kernel were slow, and where on the chip they ran.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph A["On the host, watching the calls"]
+    direction TB
+    A1["program calls cudaLaunchKernel"] --> A2["libcudart.so<br/>a uprobe fires here"]
+    A2 --> A3["work is queued for the GPU"]
+  end
+  subgraph B["Asking the vendor"]
+    direction TB
+    B1["Nsight tools"] --> B2["CUPTI"]
+    B2 --> B3["counters built into the GPU"]
+  end
+  subgraph C["Inside the kernel"]
+    direction TB
+    C1["bpftime rewrites the kernel's GPU code as it loads"] --> C2["your eBPF program runs in every thread of the kernel,<br/>at kernel entry or exit"]
+    C2 --> C3["maps that a host process reads"]
+  end
+  A ~~~ B ~~~ C
+  style C2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 0.2 — Three places to stand.</b> Notice that only the third column runs on the GPU itself. The first sees the program's request. The second reads the hardware's own records, through NVIDIA's software.</figcaption>
+      </figure>
+
+      <p>The first place is weaker than it looks, because of the asynchronous launch. Here is the order of events for one launch.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant P as Program
+  participant R as libcudart.so
+  participant Q as GPU work queue
+  participant G as GPU
+  P->>R: cudaLaunchKernel
+  Note over R: the uprobe fires here
+  R->>Q: append the launch
+  R-->>P: returns after a few microseconds
+  P->>P: keeps running host code
+  Q->>G: the launch reaches the front of the queue
+  Note over G: the kernel starts, runs, and ends
+  P->>R: wait until the GPU has finished
+  R-->>P: returns only when it has
+        </div>
+        <figcaption><b>Diagram 0.3 — An asynchronous launch.</b> Notice the gap between the call returning and the kernel starting. The host-side probe fires at the very top. Everything the GPU does happens later, while the program is either doing other work or sitting inside a call whose only job is to wait.</figcaption>
+      </figure>
+
+      <h3>The map of this document</h3>
+      <p>Each NVIDIA GPU generation has a name, and three of them appear constantly here. <b>Pascal</b> (2016) is the generation of the customer's Quadro P5000. <b>Ada</b> (2022) is the generation of the laptop's GPU. <b>Hopper</b> (2022) is the generation of the H100 that arrives later. They differ in ways that matter to probes and to LLM servers, and every hardware chapter ends with a dated table across all three.</p>
+      <p>The document climbs in five parts. Part I is the machine: how one chip runs tens of thousands of threads, and why memory sets the speed limit. Part II is the language: CUDA, and the two instruction sets underneath it that the compiler produces. Part III runs the code: the host side, scheduling, the measuring tools, and the three generations side by side. Part IV is eBPF on the GPU: what bpftime is, how it gets inside a kernel, and what a probe costs. Part V is the language model: just enough of how one works, why it keeps a cache of its past work, how vLLM and llama.cpp serve it, and where the probes go.</p>
+      <p>This chapter skips graphics entirely. GPUs still draw pixels, and nothing in this document needs them to.</p>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>The lab program compiles without a GPU. Running it needs the laptop GPU switched on (see the benches card).</p>
+<pre><code>cd lab/gpu
+nvcc -O3 -lineinfo -arch=sm_89 matvec.cu -lcublas -o out/matvec
+./out/matvec            # d = n = 4096, 200 runs of each kernel</code></pre>
+        <p>It prints the GPU's name, the size of W, then one line per kernel: the time per run, how many gigabytes per second that time implies, and the largest difference from NVIDIA's own library. On this laptop the first line should start <code>device: NVIDIA GeForce RTX 4050 Laptop GPU, sm_89</code> and go on to give two hardware counts that NVIDIA does not publish for this chip. Keep the output. The memory chapter predicts these numbers before you read them.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>We follow one matvec, y = W·x, with W a 4096 × 4096 matrix of 4-byte numbers: 64 MiB of data and 16.8 million multiply-adds, with every number of W used exactly once. A GPU is a throughput machine on the PCIe bus; a kernel is the function it runs, launched from the host through the CUDA runtime and driver libraries. You can watch a kernel from the host, which sees only the asynchronous request; through NVIDIA's profilers, which are precise but heavy; or from inside the kernel with bpftime, which runs your eBPF in every thread of the kernel.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>token</dt><dd>The unit a language model reads and writes: a short run of characters, often a word or part of one.</dd>
+          <dt>vector</dt><dd>An ordered list of numbers.</dd>
+          <dt>matrix</dt><dd>A grid of numbers in rows and columns.</dd>
+          <dt>dot product</dt><dd>Multiply two equal-length vectors element by element, then add up the products.</dd>
+          <dt>matrix-vector multiply (matvec)</dt><dd>y = W·x: each number of y is the dot product of one row of W with x.</dd>
+          <dt>matrix-matrix multiply (matmul)</dt><dd>Many matvecs at once, sharing one W.</dd>
+          <dt>GPU</dt><dd>A chip with thousands of small arithmetic units and its own memory, built for throughput.</dd>
+          <dt>host / device</dt><dd>The CPU side with its memory / the GPU with its memory.</dd>
+          <dt>kernel</dt><dd>A function that runs on the GPU, launched from the host as thousands of copies.</dd>
+          <dt>host kernel</dt><dd>This document's name for the operating-system kernel.</dd>
+          <dt>latency / throughput</dt><dd>Time for one piece of work / work finished per second.</dd>
+          <dt>CUDA</dt><dd>NVIDIA's platform for GPU programming: a C++ dialect, its compiler, and its libraries.</dd>
+          <dt>CUDA runtime</dt><dd><code>libcudart.so</code>, the convenient API most programs call.</dd>
+          <dt>CUDA driver library</dt><dd><code>libcuda.so</code>, the lower API under the runtime that talks to the host kernel's driver.</dd>
+          <dt>asynchronous launch</dt><dd>A launch call that queues the kernel and returns before it runs.</dd>
+          <dt>Nsight</dt><dd>NVIDIA's family of profiling tools.</dd>
+          <dt>CUPTI</dt><dd>CUDA Profiling Tools Interface, the library the profilers are built on.</dd>
+          <dt>bpftime</dt><dd>A userspace eBPF runtime that can also run eBPF programs inside GPU kernels.</dd>
+          <dt>Pascal / Ada / Hopper</dt><dd>NVIDIA GPU generations of 2016 / 2022 / 2022: the customer's P5000, the laptop, the H100.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: for our matvec (d = n = 4096, 4-byte numbers), how many multiply-adds are done per byte of W read? What happens to that ratio if you make W 8192 × 8192?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>One multiply-add per 4 bytes, so 0.25 per byte, and it stays 0.25 at 8192 × 8192. The 4096 case is 16,777,216 multiply-adds over 67,108,864 bytes. The 8192 case is four times the work (67,108,864 multiply-adds) over four times the bytes (268,435,456).</p>
+          <p>The mechanism is in diagram 0.1: each number of W meets x once and is never used again, however big W gets. The tempting wrong answer is that a bigger matrix gives "more reuse". For a matvec it gives none. Only x is reused, once per row, and x is tiny next to W.</p>
+        </details>
+        <p>2. A uprobe on <code>cudaLaunchKernel</code> shows each call taking about 4 µs. The step of the program that makes those calls takes 30 ms of wall-clock time, and a CPU profile says most of that 30 ms is spent inside one other CUDA call. What is the program doing during that time, and why can the uprobe not tell you?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The program is waiting for the GPU. The GPU work is the 30 ms; the 4 µs is only the time to queue each launch.</p>
+          <p>Launches are asynchronous (diagram 0.3): <code>cudaLaunchKernel</code> appends to the GPU's queue and returns. The program then blocks in a call whose only job is to wait for the GPU to finish, and that call is where a CPU profile puts the time. The near-miss is "the driver is slow because that call takes 30 ms". The call does nothing while it waits. The time belongs to kernels the uprobe never saw run.</p>
+        </details>
+        <p>3. "A matmul is many matvecs that share one W, so it moves the same number of bytes per multiply-add as a matvec." Where does that sentence stop being true?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It stops being true as soon as the matmul reads each number of W once and uses it for all the vectors before moving on. With k vectors, each number of W then feeds k multiply-adds per read, so the ratio becomes 0.25 × k per byte instead of 0.25.</p>
+          <p>The sentence is true only for a matmul written as k separate matvecs, each one reading W again from memory. The condition that makes the reuse real is that a number of W stays somewhere fast while all k vectors use it. That condition is what the memory chapter is about, and batching many users' requests together in an LLM server is this same trick.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://eunomia.dev/bpftime/documents/gpu/">Write and Run eBPF on GPU with bpftime</a>. The project's own GPU page. Read the problem statement and the architecture diagram now; leave the build steps for the bpftime chapters.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://www.usenix.org/conference/osdi25/presentation/zheng-yusheng">Extending Applications Safely and Efficiently</a> (Zheng et al., OSDI '25). The bpftime paper. Its introduction is a good statement of why userspace eBPF exists; the GPU work came later and is not in it.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html">CUDA Programming Guide: Programming Model</a>. NVIDIA's own first page on host, device and kernels. Skim it once; the next chapters go slower and deeper.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/">Mastering LLM Techniques: Inference Optimization</a> (NVIDIA, 2023). A preview of the language-model part (Part V). Read it after the prefill-and-decode chapter, when every word in it is yours.</li>
+        </ul>
+      </div>
+    </section>

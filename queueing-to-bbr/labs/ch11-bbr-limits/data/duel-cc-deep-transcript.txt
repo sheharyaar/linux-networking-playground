@@ -1,0 +1,7 @@
+flow send: cc=cubic label=a-cubic 64644513 bytes acked in 120.2 s = 4.30 Mbit/s, total_retrans=117, segs_out=44923, rows=2397
+flow send: cc=cubic label=b-cubic 78971025 bytes acked in 120.2 s = 5.26 Mbit/s, total_retrans=111, segs_out=54825, rows=2398
+duel: limit 330 packets, cubic against cubic, window 60-120 s
+ a-cubic:   4.29 Mbit/s  share  44.8%  retrans     48  mean rtt  379.6 ms  (60 s window)
+ b-cubic:   5.28 Mbit/s  share  55.2%  retrans     58  mean rtt  379.5 ms  (60 s window)
+   total:   9.56 Mbit/s  Jain index 0.989
+router: dropped 228

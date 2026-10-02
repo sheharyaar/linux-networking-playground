@@ -1,0 +1,137 @@
+    <div class="part">Part IV · eBPF on the GPU</div>
+    <section id="ch12" class="chapter">
+      <span class="chnum">Chapter 12</span>
+      <h2>eBPF without the kernel: bpftime</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag EBPF">EBPF</span> — The running-it part (Part III) ended with a gap: nothing on the host can see inside a running kernel. This part fills it with bpftime, an eBPF runtime that lives in user space and can compile eBPF programs into a GPU kernel's own code. This chapter is the runtime: which process does what, where maps live, and how an ordinary libbpf program ends up asking for a GPU probe without knowing it.</p>
+      <p class="readfirst">This chapter assumes kernel eBPF: programs, maps, helpers, libbpf skeletons, kprobes and uprobes. It skips bpftime's uprobe and syscall-tracing support, except where the GPU path reuses them, and its AMD backend.</p>
+
+      <h3>What the kernel did for eBPF, and who does it now</h3>
+      <p>In the kernel, eBPF rests on five services. The <code>bpf()</code> system call loads programs and creates maps. The verifier checks each program. The JIT compiles it to machine code. Map memory lives in the kernel. And attach mechanisms such as kprobes, uprobes and tracepoints run the program at the right moment. bpftime keeps the programs, the maps' semantics, the helper numbering and libbpf, and replaces each of the five services with code in user space. The table is the whole idea in one place.</p>
+
+      <table class="gen">
+        <caption>Kernel eBPF and its bpftime replacement</caption>
+        <tr><th>Service</th><th>In the kernel</th><th>In bpftime</th></tr>
+        <tr><td>Load programs, create maps</td><td><code>bpf()</code> and <code>perf_event_open()</code> system calls</td><td>the same calls, intercepted in the loader by <code>libbpftime-syscall-server.so</code></td></tr>
+        <tr><td>Store programs, maps, attachments</td><td>kernel memory</td><td>a shared-memory segment that the loader and the target both map</td></tr>
+        <tr><td>Check programs</td><td>the kernel verifier</td><td>optional; off in a default build</td></tr>
+        <tr><td>Compile programs</td><td>the kernel JIT</td><td>llvmbpf: eBPF to LLVM IR, then to x86 for host probes or to PTX for GPU probes</td></tr>
+        <tr><td>Run them at the right moment</td><td>kprobes, uprobes, tracepoints</td><td>attach implementations inside the target: Frida hooks for functions, and <code>nv_attach_impl</code> for GPU kernels</td></tr>
+      </table>
+
+      <h3>Two processes and a segment</h3>
+      <p>A bpftime session has two processes. The <b>loader</b> is an ordinary libbpf program, the kind you would run against the kernel, started with <code>LD_PRELOAD=libbpftime-syscall-server.so</code>. When libbpf calls <code>bpf()</code> or <code>perf_event_open()</code>, the preloaded library answers instead of the kernel. It writes the programs, the maps and the attach requests, which bpftime calls <b>handlers</b>, into a named shared-memory segment. The <b>target</b> is the program you want to observe, started with <code>LD_PRELOAD=libbpftime-agent.so</code>. When the <b>agent</b> starts inside it, it maps the same segment, compiles each program and hands each handler to the attach implementation registered for its type.</p>
+
+      <figure class="dia">
+        @@SVG:session@@
+        <figcaption><b>Diagram 12.1 — A bpftime session.</b> Notice that the two processes never talk to each other directly. Everything passes through the segment: the loader writes programs and handlers, the agent reads them, the probes write maps, and the loader reads the maps back with the same libbpf calls it would use against the kernel.</figcaption>
+      </figure>
+
+      <p>The segment is what lets this work without the kernel. It is a Boost.Interprocess shared-memory region whose name both sides take from <code>BPFTIME_GLOBAL_SHM_NAME</code>. Inside the target, the agent pins the whole segment and maps it into the GPU's address space, with the <code>cudaHostRegister(…, cudaHostRegisterMapped)</code> call of listing 8.1. So the segment is also memory that GPU code can read and write directly.</p>
+
+      <h3>How a kprobe becomes a GPU probe</h3>
+      <p>Here is the trick that lets an unmodified libbpf toolchain ask for a GPU probe. A probe on a GPU kernel is written as a kprobe on the kernel's mangled name:</p>
+<pre><code>SEC("kprobe/_Z9vectorAddPKfS0_Pf")
+int cuda__probe()
+{
+	u32 pid = bpf_get_current_pid_tgid() &gt;&gt; 32;
+	u64 ts = bpf_get_globaltimer();</code></pre>
+      <p class="lcap">Listing 12.1 — <code>bpftime/example/gpu/cuda-counter/cuda_probe.bpf.c:36–40</code>. A probe on the entry of the CUDA kernel <code>vectorAdd(const float*, const float*, float*)</code>.</p>
+      <p>libbpf turns that section name into a <code>perf_event_open()</code> call on the kprobe event type, with the function name attached, and then attaches the program to the returned descriptor. In the loader, the syscall server records it as a kprobe handler carrying the name (<code>bpftime/runtime/syscall-server/syscall_context.cpp:843–888</code>). In the target, handler types are numbers, and a kprobe is <code>BPF_TYPE_KPROBE = 8</code> (<code>bpftime/runtime/include/bpftime_shm.hpp:59</code>). The agent registers the GPU attach implementation for exactly the types <code>ATTACH_CUDA_PROBE</code> and <code>ATTACH_CUDA_RETPROBE</code>, which are 8 and 9 (<code>bpftime/runtime/agent/agent.cpp:1039–1046</code>). So every kprobe handler goes to <code>nv_attach_impl</code>, with the kernel name as its argument, and every kretprobe becomes a probe at the kernel's exit.</p>
+      <p>The cost of the trick is that there are no real kprobes in a bpftime session. Inside bpftime, a kprobe means a GPU kernel. A loader can still use the real kernel's eBPF for other programs: with <code>BPFTIME_RUN_WITH_KERNEL=1</code>, the syscall server passes ordinary kprobes through to the kernel, and treats only names that start with <code>cuda_</code> as GPU probes.</p>
+
+      <h3>The compiler, and the verifier that is not there</h3>
+      <p>bpftime compiles eBPF with <b>llvmbpf</b>, its own library. llvmbpf translates eBPF bytecode into LLVM IR. From there, LLVM's x86 backend produces machine code for host probes, and LLVM's NVPTX backend produces PTX for GPU probes, the same road to PTX as the compiler chapter's clang line. The GPU path is the subject of the next chapter.</p>
+      <p>The verifier is the part to be careful about. bpftime can run programs through PREVAIL, a userspace eBPF verifier, but its build option <code>ENABLE_EBPF_VERIFIER</code> is off by default (<code>bpftime/cmake/StandardSettings.cmake:95</code>). When it is on, <code>BPFTIME_VERIFIER_LEVEL</code> chooses strict checking, warnings only, or none. In a default build, nothing checks that a probe terminates or stays inside its memory. In the kernel the verifier is what makes eBPF safe to load. Here a probe is code you inject into someone else's GPU kernel, with the same power as that kernel's own code. A loop that never ends hangs the kernel it is in. Helper 507 exits the calling thread on purpose. Treat a GPU probe the way you would treat a patch to the application, because that is what it is.</p>
+
+      <h3>Maps: where the data lives</h3>
+      <p>Ordinary maps, hash and array and ring buffer, live in the shared segment, and the loader reads them with libbpf as usual. GPU code can reach the segment through the mapping, but a hash table in it is a host data structure that needs host code to search it. So a lookup from a GPU probe in an ordinary map becomes a request to the host, through the protocol the next two chapters take apart.</p>
+      <p>bpftime therefore adds <b>GPU maps</b>, with type numbers from 1500 (<code>bpftime/runtime/include/bpftime_shm.hpp:122–132</code>). Their data lives where GPU code can index it directly. The <b>per-thread array map</b> gives every GPU thread its own copy of each value, like a per-CPU map with a GPU thread in place of a CPU. The loader allocates it in device memory with <code>cuMemAlloc</code> and shares it with the target through a CUDA IPC handle (<code>bpftime/runtime/src/bpf_map/gpu/nv_gpu_per_thread_array_map.cpp:61–74</code>). The shared GPU array map has one copy, and there are a GPU ring buffer and a GPU hash map. For platforms without CUDA IPC, such as NVIDIA's Tegra boards, host-memory variants do the same job through pinned, mapped memory.</p>
+
+      <figure class="dia">
+        @@SVG:mapcost@@
+        <figcaption><b>Diagram 12.2 — Two kinds of map, two costs.</b> Notice the two arrows leaving the probe. The green one is a GPU map: the probe computes an address and uses it. The orange one is an ordinary map: the probe writes a request into host memory and waits for a host thread to answer. The probe-cost chapter (chapter 14) measures the difference; this picture tells you which to choose.</figcaption>
+      </figure>
+
+      <p>The per-thread map has a sizing rule that matters for our matvec. Each value is stored once per GPU thread, for as many threads as <code>BPFTIME_MAP_GPU_THREAD_COUNT</code> allows. The default is 1,024 (<code>bpftime/runtime/include/bpftime_shm.hpp:42–45</code>). Our <code>matvec_warp</code> launch has 131,072 threads. Reading the map back is one copy of every thread's slot for the key, so the map also costs host time in proportion to the thread count.</p>
+
+      <h3>Helpers: the same numbering, extended</h3>
+      <p>Helpers are called by number, as in the kernel, and bpftime keeps the kernel's numbers for the ones it shares: 1 to 3 for map lookup, update and delete, 6 for <code>bpf_trace_printk</code>, 14 for <code>bpf_get_current_pid_tgid</code>, 25 for <code>bpf_perf_event_output</code>. GPU helpers start at 501. A program declares them as pointers to a number, the old way of declaring helpers, as in <code>static const u64 (*bpf_get_globaltimer)(void) = (void *)502;</code> (<code>cuda_probe.bpf.c:31</code>).</p>
+
+      <table class="gen">
+        <caption>bpftime's GPU helpers at commit a900f85, from <code>bpftime/attach/nv_attach_impl/trampoline/default_trampoline.cu:413–515</code></caption>
+        <tr><th>Number</th><th>What it does</th><th>Needs the host?</th></tr>
+        <tr><td>501</td><td><code>puts</code>: print a string</td><td>yes</td></tr>
+        <tr><td>502</td><td>read <code>%globaltimer</code>, nanoseconds</td><td>no</td></tr>
+        <tr><td>503, 504, 505, 508</td><td>block index, block size, thread index, grid size</td><td>no</td></tr>
+        <tr><td>506</td><td><code>membar.sys</code>: make this thread's writes visible to the host</td><td>no</td></tr>
+        <tr><td>507</td><td>exit the calling thread</td><td>no</td></tr>
+        <tr><td>509, 510, 511</td><td>read <code>%smid</code>, <code>%warpid</code>, <code>%laneid</code></td><td>no</td></tr>
+      </table>
+      <p>The public documentation lists 501 to 506; the source at this commit has all eleven. The pass that compiles probes registers the same numbers with llvmbpf (<code>bpftime/attach/nv_attach_impl/pass/ptxpass_core/src/core.cpp:207–222</code>), and the probe-cost chapter (chapter 14) adds a twelfth.</p>
+
+      <table class="gen">
+        <caption>bpftime on the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>GPU maps through CUDA IPC</td><td>expected to work; untested</td><td>the default path; bench test pending</td><td>expected to work; untested</td></tr>
+        <tr><td>Toolkit to build bpftime against</td><td>CUDA 12.x</td><td>CUDA 13.4; whether it builds is a bench test</td><td>CUDA 13.4</td></tr>
+        <tr><td>Helpers 509 to 511</td><td>yes; the special registers exist</td><td>yes</td><td>yes</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>No GPU is needed to see the trick of this chapter. Read the cuda-counter example's three files side by side: <code>cuda_probe.bpf.c</code> (the probe, a kprobe and a kretprobe), <code>cuda_probe.c</code> (an ordinary libbpf loader with a skeleton), and <code>vec_add.cu</code> (the target). Then find the kernel name in the target as the compiler will mangle it:</p>
+<pre><code>cd ~/workspace/repos/bpftime/example/gpu/cuda-counter
+nvcc -cudart shared -arch=sm_89 -c vec_add.cu -o /tmp/vec_add.o
+cuobjdump -symbols /tmp/vec_add.o | grep -i vectorAdd</code></pre>
+        <p>The name you see must match the string after <code>kprobe/</code> exactly. A probe on a name that does not exist attaches to nothing while the loader reports success, so this check comes first, every time.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>bpftime keeps eBPF programs, map semantics, helper numbers and libbpf, and moves the kernel's services into user space. A loader running under <code>libbpftime-syscall-server.so</code> writes programs, maps and handlers into a shared segment; an agent inside the target reads them, compiles programs with llvmbpf, and attaches them. A kprobe handler has type 8, the same number as <code>ATTACH_CUDA_PROBE</code>, so <code>SEC("kprobe/&lt;mangled kernel name&gt;")</code> means the entry of that GPU kernel. The verifier is off by default; ordinary maps live in the segment and cost a host round trip from the GPU, while GPU maps such as the per-thread array live in device memory and cost address arithmetic. GPU helpers 501 to 511 add timers, indices, special registers, a fence and thread exit.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>bpftime</dt><dd>An eBPF runtime in user space, with attach points inside processes and inside GPU kernels.</dd>
+          <dt>loader</dt><dd>The process that loads programs and reads maps; a libbpf program under the syscall server.</dd>
+          <dt>target</dt><dd>The process being observed, running with the bpftime agent preloaded.</dd>
+          <dt>agent</dt><dd><code>libbpftime-agent.so</code>: reads the segment inside the target and attaches programs.</dd>
+          <dt>handler</dt><dd>bpftime's record of an attach request, such as a kprobe on a name.</dd>
+          <dt>llvmbpf</dt><dd>bpftime's eBPF compiler: eBPF to LLVM IR, then to x86 or PTX.</dd>
+          <dt>GPU map</dt><dd>A bpftime map type whose data GPU code can index directly.</dd>
+          <dt>per-thread array map</dt><dd>A GPU map with one slot per GPU thread for each key, in device memory.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: you put a per-thread array map with 4 keys of 8-byte values on <code>matvec_warp</code>'s 131,072 threads. How large must <code>BPFTIME_MAP_GPU_THREAD_COUNT</code> be, how much device memory does the map take, and how many bytes does one <code>bpf_map_lookup_elem</code> from the loader copy?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>At least 131,072; the map takes 4 × 131,072 × 8 bytes = 4 MiB of device memory; one lookup copies 131,072 × 8 bytes = 1 MiB. Every key holds one 8-byte slot per thread, and the loader's lookup returns all of a key's slots at once, the way a per-CPU map returns one value per CPU.</p>
+          <p>With the default of 1,024 the trampoline prints a warning and computes addresses past the end of the buffer for every thread above 1,023, so the setting is not optional. The near-miss is to size the map by the number of warps or blocks. It is indexed by the global thread index.</p>
+        </details>
+        <p>2. A colleague loads a bpftime loader with an ordinary kernel kprobe on <code>do_sys_openat2</code> next to a GPU probe, and the kernel kprobe never fires. Explain, and say what they could do.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Under the syscall server, every kprobe becomes a bpftime handler of type 8, and type 8 is the GPU probe. The request never reached the kernel; inside the target, bpftime looked for a GPU kernel called <code>do_sys_openat2</code> and found none.</p>
+          <p>They can run the loader in bpftime's "run with kernel" mode, where ordinary kprobes go to the kernel and only names starting with <code>cuda_</code> become GPU probes. Or they can split the two into separate loaders, one under bpftime and one plain. The near-miss is a missing symbol in the kernel. The kernel was never asked.</p>
+        </details>
+        <p>3. Why does a lookup in an ordinary hash map from a GPU probe need the host at all, when the map's memory is mapped into the GPU's address space?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Because mapped memory gives access to bytes, while a lookup needs an algorithm. The hash map is a host data structure in the segment, built with host pointers and searched by host code. GPU code could read its bytes, but it has no compiled lookup function that understands the layout, and the host might be changing the map at the same moment.</p>
+          <p>So the probe writes the key into the request area and waits while a thread in the agent runs the real lookup. GPU maps avoid this by having a layout that a GPU thread can index with arithmetic. The near-miss is "mapped memory is slow". It is slow, but the reason is that the GPU cannot run the lookup itself.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://eunomia.dev/bpftime/documents/gpu/">Write and Run eBPF on GPU with bpftime</a>. The official walkthrough of the cuda-counter example, with the run commands for both processes.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/bpftime">bpftime on GitHub</a>, pinned here at commit a900f85. The <code>example/gpu</code> directory has a dozen worked GPU probes.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://www.usenix.org/conference/osdi25/presentation/zheng-yusheng">Zheng et al., Extending Applications Safely and Efficiently</a> (OSDI 2025). The design of bpftime's userspace runtime and its host-side attach points.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/llvmbpf">llvmbpf</a>, the eBPF-to-LLVM compiler with its PTX output, and <a href="https://github.com/vbpf/ebpf-verifier">PREVAIL</a>, the userspace verifier bpftime can use, with its <a href="https://pldi19.sigplan.org/details/pldi-2019-papers/44/Simple-and-Precise-Static-Analysis-of-Untrusted-Linux-Kernel-Extensions">PLDI 2019 paper</a>.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://www.yunwei37.com/blog/gpu-observability-challenges">The GPU Observability Gap</a> (2025), by one of bpftime's authors. Why host-side tools stop at the kernel boundary, in more detail than diagram 10.1.</li>
+        </ul>
+      </div>
+    </section>

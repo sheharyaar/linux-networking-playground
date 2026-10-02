@@ -1,0 +1,106 @@
+# short path: no delay, no rate on rtr:r1 or rcv:c0 (veth, noqueue); ping RTT below
+rtt min/avg/max/mdev = 0.032/0.036/0.044/0.004 ms
+
+== before: snd:s0 root fq maxrate 24mbit; socket --max-pacing-rate 24mbit
+-- ss -tin at 6 s
+ESTAB 0      75296       10.0.1.1:49710     10.0.2.1:5001
+	 cubic wscale:10,10 rto:203 rtt:2.031/0.01 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:12 bytes_sent:17141424 bytes_acked:17132737 segs_out:11840 segs_in:5928 data_segs_out:11838 send 68443131bps lastrcv:5971 lastack:1 pacing_rate 24000000bps/24000000bps delivery_rate 22968928bps delivered:11833 busy:5971ms unacked:6 rcv_space:14480 rcv_ssthresh:64088 notsent:66608 minrtt:0.023 snd_wnd:77824 rcv_wnd:64512
+flow send: cc=cubic max_pacing_rate=24Mbit 28708049 bytes acked in 10.0 s = 22.95 Mbit/s, total_retrans=0, rows=991
+-- tc -s qdisc show dev s0 after the run
+qdisc fq 81da: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b maxrate 24Mbit low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 30082184 bytes 19876 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 3 (inactive 3 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 throttled 9935 latency 11us
+-- gaps.py (capture at rtr:r0, seconds 2-10)
+15702 data packets after 2 s, 7.92 s; frame sizes [1514]
+average rate: 24.002 Mbit/s of frames, 22.955 Mbit/s of payload
+gap median 22 us, mean 505 us
+      <50us   7851 ##################################################
+   50-500us      0 
+    0.5-1ms    135 #
+      1-2ms   7715 #################################################
+      2-3ms      0 
+      3-5ms      0 
+     5-10ms      0 
+      >10ms      0 
+bursts (packets < 30 us apart): 7851 of 2 packets; median gap between bursts 1008 us
+-- TCP_INFO, seconds 2-10: rtt median 2.026 ms (p10 2.024, p90 2.032), cwnd median 12, unacked median 4, wmem_alloc median 7712 B
+
+== edt: snd:s0 root fq; socket --max-pacing-rate 24mbit
+-- ss -tin at 6 s
+ESTAB 0      165072      10.0.1.1:59348     10.0.2.1:5001
+	 cubic wscale:10,10 rto:201 rtt:0.027/0.002 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:20 ssthresh:20 bytes_sent:17940720 bytes_acked:17934929 segs_out:12392 segs_in:6206 data_segs_out:12390 send 8580740741bps lastsnd:1 lastrcv:5974 lastack:1 pacing_rate 24000000bps/24000000bps delivery_rate 23958632bps delivered:12387 busy:5974ms unacked:4 rcv_space:14480 rcv_ssthresh:64088 notsent:159280 minrtt:0.016 snd_wnd:101376 rcv_wnd:64512
+flow send: cc=cubic max_pacing_rate=24Mbit 30054689 bytes acked in 10.0 s = 24.01 Mbit/s, total_retrans=0, rows=993
+-- tc -s qdisc show dev s0 after the run
+qdisc fq 81db: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 31589462 bytes 20869 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 8 throttled 10429 latency 11.3us
+-- gaps.py (capture at rtr:r0, seconds 2-10)
+16382 data packets after 2 s, 7.91 s; frame sizes [1514]
+average rate: 25.095 Mbit/s of frames, 24.001 Mbit/s of payload
+gap median 34 us, mean 483 us
+      <50us   8191 ##################################################
+   50-500us      0 
+    0.5-1ms   8187 ##################################################
+      1-2ms      3 
+      2-3ms      0 
+      3-5ms      0 
+     5-10ms      0 
+      >10ms      0 
+bursts (packets < 30 us apart): 8189 of 2 packets, 4 of 1 packets; median gap between bursts 964 us
+-- TCP_INFO, seconds 2-10: rtt median 0.028 ms (p10 0.025, p90 0.049), cwnd median 20.0, unacked median 4.0, wmem_alloc median 7712.0 B
+
+== internal: snd:s0 root fq_codel; socket --max-pacing-rate 24mbit
+-- ss -tin at 6 s
+ESTAB 0      124528      10.0.1.1:56468     10.0.2.1:5001
+	 cubic wscale:10,10 rto:201 rtt:0.019/0.005 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:20 bytes_sent:17917552 bytes_acked:17917553 segs_out:12376 segs_in:6197 data_segs_out:12374 send 12193684211bps lastsnd:1 lastrcv:5969 lastack:1 pacing_rate 24000000bps/24000000bps delivery_rate 1544533328bps delivered:12375 busy:5969ms rcv_space:14480 rcv_ssthresh:64088 notsent:124528 minrtt:0.01 snd_wnd:77824 rcv_wnd:64512
+flow send: cc=cubic max_pacing_rate=24Mbit 30077857 bytes acked in 10.0 s = 24.01 Mbit/s, total_retrans=0, rows=993
+-- tc -s qdisc show dev s0 after the run
+qdisc fq_codel 81e1: root refcnt 17 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+ Sent 31589462 bytes 20869 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  maxpacket 0 drop_overlimit 0 new_flow_count 0 ecn_mark 0
+  new_flows_len 0 old_flows_len 0
+-- gaps.py (capture at rtr:r0, seconds 2-10)
+16368 data packets after 2 s, 7.90 s; frame sizes [1514]
+average rate: 25.095 Mbit/s of frames, 24.001 Mbit/s of payload
+gap median 18 us, mean 483 us
+      <50us   8184 ##################################################
+   50-500us      0 
+    0.5-1ms   8176 ##################################################
+      1-2ms      7 
+      2-3ms      0 
+      3-5ms      0 
+     5-10ms      0 
+      >10ms      0 
+bursts (packets < 30 us apart): 8184 of 2 packets; median gap between bursts 964 us
+-- TCP_INFO, seconds 2-10: rtt median 0.016 ms (p10 0.015, p90 0.037), cwnd median 20.0, unacked median 0.0, wmem_alloc median 0.0 B
+
+== maxrate-nocap: snd:s0 root fq maxrate 24mbit; socket no SO_MAX_PACING_RATE
+-- ss -tin at 6 s
+ESTAB 0      385168      10.0.1.1:43464     10.0.2.1:5001
+	 cubic wscale:10,10 rto:208 rtt:7.076/0.005 mss:1448 pmtu:1500 rcvmss:536 advmss:1448 cwnd:45 ssthresh:44 bytes_sent:17161696 bytes_acked:17141425 segs_out:11854 segs_in:1810 data_segs_out:11852 send 73668739bps lastsnd:3 lastrcv:5973 lastack:3 pacing_rate 88400920bps delivery_rate 22927800bps delivered:11839 busy:5973ms unacked:14 rcv_space:14480 rcv_ssthresh:64088 notsent:364896 minrtt:0.03 snd_wnd:216064 rcv_wnd:64512
+flow send: cc=cubic 28747145 bytes acked in 10.0 s = 22.96 Mbit/s, total_retrans=0, rows=992
+-- tc -s qdisc show dev s0 after the run
+qdisc fq 81e7: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b maxrate 24Mbit low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 30356020 bytes 20054 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 2 (inactive 2 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 throttled 2948 latency 11.9us
+-- gaps.py (capture at rtr:r0, seconds 2-10)
+15906 data packets after 2 s, 8.03 s; frame sizes [1514]
+average rate: 24.003 Mbit/s of frames, 22.957 Mbit/s of payload
+gap median 1 us, mean 505 us
+      <50us  13591 ##################################################
+   50-500us      0 
+    0.5-1ms      0 
+      1-2ms      0 
+      2-3ms     24 
+      3-5ms   2290 ########
+     5-10ms      0 
+      >10ms      0 
+bursts (packets < 30 us apart): 2011 of 7 packets, 302 of 6 packets, 9 of 1 packets; median gap between bursts 3523 us
+-- TCP_INFO, seconds 2-10: rtt median 7.077 ms (p10 7.069, p90 7.575), cwnd median 45.0, unacked median 14.0, wmem_alloc median 22192.0 B

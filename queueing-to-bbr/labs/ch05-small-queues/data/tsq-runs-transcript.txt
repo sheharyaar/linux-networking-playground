@@ -1,0 +1,12 @@
+== tsq-default: s0 qdisc tbf 1: root refcnt 17 rate 10Mbit burst 1540b lat 2s  qdisc pfifo 10: parent 1:1 limit 10000p  | r1 qdisc netem 808e: root refcnt 17 limit 100000 delay 20ms seed 12131935426757694861 | lob 4194304
+flow send: cc=reno 23916617 bytes acked in 20.1 s = 9.52 Mbit/s, total_retrans=0, rows=1991
+ Sent 25559996 bytes 16894 pkt (dropped 0, overlimits 39423 requeues 0) 
+== tsq-4k: s0 qdisc tbf 1: root refcnt 17 rate 10Mbit burst 1540b lat 2s  qdisc pfifo 10: parent 1:1 limit 10000p  | r1 qdisc netem 8093: root refcnt 17 limit 100000 delay 20ms seed 5991356646588193685 | lob 4096
+flow send: cc=reno 23945577 bytes acked in 20.1 s = 9.52 Mbit/s, total_retrans=0, rows=1994
+ Sent 25491490 bytes 16849 pkt (dropped 0, overlimits 39311 requeues 0) 
+== tsq-64k: s0 qdisc tbf 1: root refcnt 17 rate 10Mbit burst 1540b lat 2s  qdisc pfifo 10: parent 1:1 limit 10000p  | r1 qdisc netem 8098: root refcnt 17 limit 100000 delay 20ms seed 16507542743151709484 | lob 65536
+flow send: cc=reno 23925305 bytes acked in 20.1 s = 9.52 Mbit/s, total_retrans=0, rows=1992
+ Sent 25559954 bytes 16893 pkt (dropped 0, overlimits 39417 requeues 0) 
+== orphan-netem: s0 qdisc netem 809e: root refcnt 17 limit 10000 rate 10Mbit seed 7895071970518222848  | r1 qdisc netem 809d: root refcnt 17 limit 100000 delay 20ms seed 16005019373122043861 | lob 4194304
+flow send: cc=reno 28987313 bytes acked in 24.3 s = 9.53 Mbit/s, total_retrans=0, rows=2413
+ Sent 32755274 bytes 21653 pkt (dropped 0, overlimits 0 requeues 0) 

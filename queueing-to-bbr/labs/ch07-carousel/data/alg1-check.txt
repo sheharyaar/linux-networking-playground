@@ -1,0 +1,9 @@
+# 2026-10-02T14:54:04+05:30 7.2.6-arch2-1; Algorithm 1 (p. 410) ported line by line (Alg1Literal in wheel_starter.py), then with each slip fixed
+flows 100, 1 us slots, 20000 releases wanted; error = poll time - release time
+                           variant poll  released             error (us)
+                        as printed    1     11627       -0.6 .. +381824.0
+                        as printed    3        53       -0.3 .. +152999.9
+         front += 1 (slip b fixed)    1     20001       -1.0 ..    +764.9
+         front += 1 (slip b fixed)    3       109       -1.0 ..    +764.9
+  sweep TW[front] too (both fixed)    1     20001       -1.0 ..      +0.9
+  sweep TW[front] too (both fixed)    3     20003       -1.0 ..      +2.9

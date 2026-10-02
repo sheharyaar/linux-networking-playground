@@ -1,0 +1,153 @@
+    <section id="ch17" class="chapter">
+      <span class="chnum">Chapter 17</span>
+      <h2>Serving many users: vLLM</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag LLM">LLM</span> — The last chapter ended with a tension. Batching raises throughput, but every request in a step waits for the slowest work in it, and the KV cache fills memory. vLLM is a server built around managing that tension, step by step, for hundreds of requests at once. This chapter reads its V1 engine, at commit ccda909: the processes, the scheduler, the paged cache, preemption, CUDA graphs and the metrics, and ends with the sentence this whole document was written to make readable.</p>
+      <p class="readfirst">This chapter skips multi-GPU serving (tensor and pipeline parallelism), speculative decoding, LoRA adapters, multimodal inputs, and splitting prefill and decode onto different machines. All are real; none changes the single-GPU picture that observation starts from.</p>
+
+      <h3>Three processes and one loop</h3>
+      <p>A vLLM server is several processes. The <b>API server</b> speaks HTTP, turns text into tokens and back, and streams results to clients. The <b>engine core</b> is a separate process that owns the scheduler and the KV-cache bookkeeping and runs a loop. One or more <b>workers</b> own the GPUs; each runs a <b>model runner</b> that prepares inputs, runs the model and samples tokens. The engine core's loop is short enough to read whole:</p>
+<pre><code>scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+future = self.model_executor.execute_model(scheduler_output, non_block=True)
+grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+with (…):
+    model_output = future.result()
+    if model_output is None:
+        model_output = self.model_executor.sample_tokens(grammar_output)
+…
+engine_core_outputs = self.scheduler.update_from_output(
+    scheduler_output, model_output
+)</code></pre>
+      <p class="lcap">Listing 17.1 — <code>vllm/v1/engine/core.py:640–656</code>, from <code>EngineCore.step</code>. Schedule, execute, sample, update: one step of the model for every request in the batch.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  cl(["clients"]) <-->|"HTTP"| api["API server process:<br/>tokenize, detokenize, stream results"]
+  api <-->|"requests in, tokens out"| ec["engine core process:<br/>scheduler, KV-cache manager, the step loop"]
+  ec <-->|"scheduler output, model output"| wk["GPU worker process:<br/>model runner, CUDA graphs"]
+  wk --> gpu[("GPU")]
+  style ec fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 17.1 — vLLM V1's processes.</b> Notice that the scheduler is in its own process, away from HTTP handling and away from the GPU. Every decision about who runs in the next step is made there, once per step, and every token a user receives comes back through it.</figcaption>
+      </figure>
+
+      <h3>The scheduler: a token budget, no phases</h3>
+      <p>The scheduler's own comment is the best summary of its design: "There's no 'decoding phase' nor 'prefill phase' in the scheduler. Each request just has the num_computed_tokens and num_tokens_with_spec." (<code>vllm/v1/core/sched/scheduler.py:565–568</code>). A request has some tokens whose keys and values are already in the cache and some that are not yet. Each step, the scheduler gives requests a number of new tokens to process so that they catch up, within a <b>token budget</b> for the whole step.</p>
+      <p>It serves the running requests first, then the waiting ones (<code>scheduler.py:629</code> and <code>873</code>). A running request in decode needs one token. A new request needs its whole prompt, and if that does not fit in what is left of the budget, it gets a piece of it. That is <b>chunked prefill</b>, on by default in V1. A long prompt is prefilled over several steps while the decodes continue in each of them (<code>scheduler.py:1111–1125</code>). Requests join the batch the step after they arrive and leave the step after they finish, which is called <b>continuous batching</b>. The defaults depend on the GPU: for the API server, an H100 gets a budget of 8,192 tokens and up to 1,024 requests per step, and other GPUs, such as the laptop's, 2,048 tokens and 256 requests (<code>vllm/engine/arg_utils.py:2866–2895</code>).</p>
+
+      <figure class="dia">
+        @@SVG:budget@@
+        <figcaption><b>Diagram 17.2 — Six steps under a 2,048-token budget.</b> Notice the thin green strip that never goes away: 40 requests get their next token in every step, even while a 5,000-token prompt is being prefilled. Without chunking, step 2 would have been one 5,040-token step, and all 40 users would have waited for it.</figcaption>
+      </figure>
+
+      <p>Diagram 17.2 is the last chapter's tension handled. A step's time is set by its total work, so the budget bounds every step and therefore ITL. The price is paid by the long prompt, whose TTFT now spans three steps. The two knobs that move the balance are the budget, <code>--max-num-batched-tokens</code>, and the number of requests per step, <code>--max-num-seqs</code>.</p>
+
+      <h3>PagedAttention: the cache in blocks</h3>
+      <p>At start-up, vLLM loads the weights, measures how much memory a step needs, and claims most of the rest for the KV cache: by default, everything up to 92% of the GPU's memory (<code>vllm/config/cache.py:101</code>). It divides that space into <b>blocks</b> of 16 tokens' keys and values, for every layer (<code>cache.py:71</code>). A request does not get one contiguous region sized for its longest possible length. It gets blocks one at a time as it grows, from a pool (<code>vllm/v1/core/block_pool.py:136</code>, <code>get_new_blocks</code> at line 669), through the KV-cache manager's <code>allocate_slots</code> (<code>vllm/v1/core/kv_cache_manager.py:371</code>). Each request has a <b>block table</b> that maps its logical blocks, in order, to physical blocks anywhere in the pool. The attention kernels follow the block table when they read the cache. This is <b>PagedAttention</b>: the cache is managed like virtual memory, with blocks for pages.</p>
+
+      <figure class="dia">
+        @@SVG:blocktable@@
+        <figcaption><b>Diagram 17.3 — Block tables into one pool.</b> Notice that each request's blocks are scattered, and that the only wasted space is the unused end of each request's last block. Notice also block 2, used by both requests: two requests that start with the same 16 tokens can share the block that holds them.</figcaption>
+      </figure>
+
+      <p>Paging is what lets the cache hold many requests without reserving each one's maximum length in advance, and it is what makes the next two mechanisms cheap: sharing blocks between requests, and taking them away.</p>
+
+      <h3>Prefix caching: computing a prompt's start once</h3>
+      <p>Many requests to a server begin the same way: a system prompt, a long document, the earlier turns of a conversation. vLLM gives every full block a hash computed from the previous block's hash and the tokens in this block, so that equal hashes mean equal prefixes (the vLLM documentation on automatic prefix caching). When a request arrives, <code>get_computed_blocks</code> looks for the longest run of its blocks that are already in the cache and starts the request after them (<code>kv_cache_manager.py:264–300</code>). If the whole prompt is cached, its last token is computed again, because the next token needs its logits, and since allocation works in whole blocks that can mean the whole last block (lines 289–295). When a request finishes, its blocks go onto a free queue with their contents and hashes intact. They stay findable until a new allocation takes them, least recently used first, with each request's last blocks queued ahead of its first ones, because a longer prefix is less likely to be shared. Prefix caching is on by default (<code>cache.py:140</code>), and a hit removes those tokens from prefill, so it shortens TTFT directly.</p>
+
+      <h3>Preemption: when the blocks run out</h3>
+      <p>Requests grow by a block every 16 tokens, and the pool is finite. When a running request needs a block and none is free, the scheduler <b>preempts</b> another running request, by default the most recently admitted one. It frees all of that request's blocks, sets the request's count of computed tokens back to zero, and puts it at the front of the waiting queue (<code>scheduler.py:748–810</code>, victim chosen at line 803, and <code>_preempt_request</code> at 1540–1582). When it is scheduled again, its prompt and the tokens it had already generated are prefilled again, with help from prefix caching if its blocks have not been reused. To the user, a preempted request shows up as a long pause, and as a TTFT or end-to-end latency far out in the tail. To the operator it shows up as the counter <code>vllm:num_preemptions</code>.</p>
+
+      <h3>The model runner and its CUDA graphs</h3>
+      <p>On the GPU side, <code>execute_model</code> (<code>vllm/v1/worker/gpu_model_runner.py:4117</code>) turns the scheduler's decisions into one batch. <code>_prepare_inputs</code> (line 1935) lays all the requests' new tokens end to end with their positions, and builds the block tables and the cache slots each new token's key and value will be written to. Then it runs the model once over the whole batch, and <code>sample_tokens</code> (line 4498) picks the next token for each request that needs one.</p>
+      <p>Decode steps launch many small kernels, which is the host-side chapter's case for CUDA graphs (chapter 8). At start-up, <code>capture_model</code> (line 6740) records graphs for a set of batch sizes, and at each step the dispatcher picks one that fits (<code>vllm/v1/cudagraph_dispatcher.py:233</code>). By default it captures two kinds. A <b>full</b> graph covers a whole step and is used for batches that are pure decode. <b>Piecewise</b> graphs cover everything except attention, for mixed batches, with attention launched normally in between (<code>docs/design/cuda_graphs.md:43–48</code>). Two facts from the host-side chapter and the attach-pipeline chapter (chapter 13) now apply. Kernels inside a graph do not pass through the launch functions, and a graph captured before a probe attached keeps the original kernels.</p>
+
+      <h3>What vLLM reports</h3>
+      <table class="gen">
+        <caption>vLLM's latency and capacity metrics, and the mechanism behind each; every name starts with <code>vllm:</code></caption>
+        <tr><th>Metric</th><th>What it measures</th><th>Moved by</th></tr>
+        <tr><td><code>time_to_first_token_seconds</code></td><td>arrival in the API server to first token</td><td>queueing, prefill, chunking, prefix-cache hits</td></tr>
+        <tr><td><code>inter_token_latency_seconds</code></td><td>time between a request's tokens</td><td>step time: batch size, context length, budget</td></tr>
+        <tr><td><code>request_queue_time_seconds</code></td><td>time waiting before first scheduled</td><td>load, request limit, cache capacity</td></tr>
+        <tr><td><code>request_prefill_time_seconds</code>, <code>request_decode_time_seconds</code></td><td>time in each phase</td><td>prompt length, output length</td></tr>
+        <tr><td><code>kv_cache_usage_perc</code></td><td>share of cache blocks in use</td><td>concurrency × context length</td></tr>
+        <tr><td><code>num_requests_running</code>, <code>num_requests_waiting</code></td><td>the scheduler's two queues</td><td>load, cache capacity</td></tr>
+        <tr><td><code>num_preemptions</code></td><td>requests preempted for cache space</td><td>a full cache</td></tr>
+        <tr><td><code>prefix_cache_hits</code>, <code>prefix_cache_queries</code></td><td>tokens found in the prefix cache</td><td>shared prompt starts</td></tr>
+      </table>
+      <p>The names are defined in <code>vllm/v1/metrics/loggers.py:509–905</code> at this commit, and counters appear with a <code>_total</code> suffix on the <code>/metrics</code> endpoint. TTFT starts from the timestamp the API server puts on a request as it arrives (<code>vllm/v1/engine/input_processor.py:370</code>, used at <code>vllm/v1/metrics/stats.py:473</code>), so it includes tokenizing and the trip to the engine core as well as queueing and prefill.</p>
+
+      <h3>The sentence</h3>
+      <p>Every word of it now has a meaning, so here is the sentence this document exists to make readable:</p>
+      <p><b>In vLLM, each step is one run of the model over a token budget: a CUDA-graph replay of the model's weight multiplies, shared by every request in the batch, plus attention that reads each request's paged KV blocks. TTFT is queueing plus chunked prefill, ITL is one such step, and both are set by memory bandwidth and KV-cache capacity long before the GPU runs out of arithmetic.</b></p>
+      <p>The next two chapters use it. The llama.cpp chapter shows the same model run with a different design for a single machine, and the observing chapter turns each clause into something you can probe.</p>
+
+      <table class="gen">
+        <caption>vLLM on the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Runs vLLM?</td><td>no: vLLM needs compute capability 7.5</td><td>yes</td><td>yes, its main target</td></tr>
+        <tr><td>Default budget, API server</td><td>n/a</td><td>2,048 tokens, 256 requests</td><td>8,192 tokens, 1,024 requests</td></tr>
+        <tr><td>Room for the KV cache</td><td>n/a</td><td>a few GB of the 6</td><td>tens of GB of the 80</td></tr>
+        <tr><td>Attention backend</td><td>n/a</td><td>chosen at start-up and logged</td><td>chosen at start-up; FlashAttention 3, which can run mixed batches inside full CUDA graphs (<code>cuda_graphs.md:182</code>), needs Hopper</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>With vLLM installed in a virtual environment (Before you start) and the dGPU in Hybrid mode, start a server for the document's model. Then, in a second terminal, read its start-up log before sending anything:</p>
+<pre><code>vllm serve Qwen/Qwen2.5-0.5B-Instruct --max-model-len 4096 \
+    2&gt;&amp;1 | tee /tmp/vllm.log
+grep -E 'KV cache size|Graph capturing|backend' /tmp/vllm.log</code></pre>
+        <p>The cache line has the form "GPU KV cache size: N tokens, Maximum concurrency for 4,096 tokens per request: X.XXx" (<code>vllm/v1/core/kv_cache_utils.py:2480–2487</code>). Predict N first, from the first question below. The "Graph capturing finished in … secs, took … GiB" line (<code>vllm/v1/worker/gpu_model_runner.py:6840</code>) gives one of the costs that question asks you to guess. Then send a few requests with <code>curl</code> to <code>/v1/completions</code> and watch <code>curl -s localhost:8000/metrics | grep -E 'time_to_first|inter_token|kv_cache_usage'</code> change.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>vLLM V1 runs an API server, an engine core and GPU workers, and the engine core loops: schedule, execute, sample, update. The scheduler has no phases: it gives each request new tokens within a per-step token budget, running requests first, chunking long prompts, and lets requests join and leave every step. The KV cache is a pool of 16-token blocks claimed at start-up up to 92% of GPU memory, and block tables map each request's blocks: prefix caching finds a prompt's already-computed blocks by hash, and preemption frees a request's blocks and recomputes it later. The model runner replays full CUDA graphs for pure decode and piecewise graphs, with attention outside, for mixed batches, and each metric maps to one of these mechanisms.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>API server, engine core, worker</dt><dd>vLLM's HTTP process, its scheduling process, and its GPU processes.</dd>
+          <dt>model runner</dt><dd>The worker code that prepares a batch, runs the model and samples tokens.</dd>
+          <dt>token budget</dt><dd>The most new tokens processed in one step, across all requests.</dd>
+          <dt>chunked prefill</dt><dd>Prefilling a long prompt over several steps, beside running decodes.</dd>
+          <dt>continuous batching</dt><dd>Requests joining and leaving the batch at every step.</dd>
+          <dt>block, block table</dt><dd>A fixed slice of the KV cache, 16 tokens here; a request's map from its blocks to physical ones.</dd>
+          <dt>PagedAttention</dt><dd>Attention over a cache stored in blocks and found through block tables.</dd>
+          <dt>prefix caching</dt><dd>Reusing cached blocks for the shared start of different requests' prompts.</dd>
+          <dt>preemption (of a request)</dt><dd>Freeing a running request's cache blocks and recomputing it later.</dd>
+          <dt>full and piecewise CUDA graphs</dt><dd>A graph for a whole step, or graphs for everything except attention.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: on the laptop's 6 GB, vLLM serves Qwen2.5-0.5B-Instruct in BF16 with the default 92% memory share and <code>--max-model-len 4096</code>. Assume about 1 GB for weights and about 1 GB for activations and CUDA graphs. Roughly what N does the "GPU KV cache size" line show, and what concurrency?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 280,000 tokens, and a concurrency of about 70×. 92% of 6 GB is about 5.5 GB; minus 2 GB leaves about 3.5 GB for the cache. At 12,288 bytes per token that is 3.5 GB / 12,288 B ≈ 285,000 tokens, about 17,800 blocks of 16. Divided by 4,096 tokens per request, about 70 requests could each hold a full-length context at once.</p>
+          <p>The printed number will differ by however wrong the two 1 GB guesses are, which is the point of predicting first: the difference tells you what start-up used. The near-miss is to forget that the 6 GB is shared with the weights and the step's working memory.</p>
+        </details>
+        <p>2. A dashboard shows <code>vllm:num_preemptions_total</code> climbing, the 99th percentile of TTFT jumping, and ITL steady. What is happening, and name two changes that would help.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The KV cache is full. Running requests need new blocks, the scheduler frees others' blocks to provide them, and the preempted requests go back to waiting and must be prefilled again, which lands in the tail of TTFT and end-to-end latency. The requests that keep running are unaffected, so ITL stays steady.</p>
+          <p>Fewer concurrent requests (<code>--max-num-seqs</code>), a shorter maximum context (<code>--max-model-len</code>), more memory for the cache (a larger memory share, or a smaller weight format), or a smaller cache format such as an 8-bit KV cache all help. Prefix caching softens the cost of each recomputation. The near-miss is to treat it as a compute problem and add batch. That makes it worse.</p>
+        </details>
+        <p>3. Why does chunked prefill protect ITL, what does it cost, and who pays?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>A step's duration is set by the work in it, and every running request waits for the whole step to get its next token. Without chunking, a 5,000-token prompt makes one step about two and a half times larger than the budget allows, and 40 users' next tokens wait for it. With chunking, no step exceeds the budget, so ITL has a ceiling (diagram 17.2).</p>
+          <p>The cost falls on the long prompt itself. Its prefill spans several steps, each shared with the decodes, so its TTFT is longer than if it had run alone. The near-miss is "chunking makes prefill faster". It makes prefill fairer, and slightly slower for the request being chunked.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/2309.06180">Kwon et al., Efficient Memory Management for Large Language Model Serving with PagedAttention</a> (SOSP 2023). The paper behind vLLM's block-based cache.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://vllm.ai/blog/2025-01-27-v1-alpha-release">vLLM V1: A Major Upgrade to vLLM's Core Architecture</a> (vLLM blog, 2025), and <a href="https://vllm.ai/blog/2025-09-05-anatomy-of-vllm">Inside vLLM: Anatomy of a High-Throughput LLM Inference System</a> (Aleksa Gordić, 2025), a code-level walk through the same files.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://docs.vllm.ai/en/latest/design/arch_overview/">vLLM architecture overview</a>, <a href="https://docs.vllm.ai/en/latest/design/prefix_caching/">automatic prefix caching</a>, <a href="https://docs.vllm.ai/en/latest/design/cuda_graphs/">CUDA graphs</a> and <a href="https://docs.vllm.ai/en/latest/design/metrics/">metrics</a>. The design notes for each section of this chapter.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://www.usenix.org/conference/osdi22/presentation/yu">Yu et al., Orca</a> (OSDI 2022), for continuous batching, and <a href="https://www.usenix.org/conference/osdi24/presentation/agrawal">Agrawal et al., Sarathi-Serve</a> (OSDI 2024), for chunked prefill and the latency trade-off of diagram 17.2.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://github.com/vllm-project/vllm">vLLM on GitHub</a>, pinned here at commit ccda909.</li>
+        </ul>
+      </div>
+    </section>

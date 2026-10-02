@@ -1,0 +1,3 @@
+htb-snd: backlog pkts median 32.0 max 32; bytes median 96896.0 max 96896; out 8.007 Mbit/s; drops 0; wmem med 7712.0 max 7712; rtt med 137 min 132 max 138
+fq-snd: backlog pkts median 32.0 max 32; bytes median 96896.0 max 96896; out 7.990 Mbit/s; drops 0; wmem med 7712.0 max 8672; rtt med 137 min 126 max 137
+htb-rtr: backlog pkts median 926 max 1600; bytes median 1401964 max 2422400; out 8.002 Mbit/s; drops 420; wmem med 0.0 max 0; rtt med 1743 min 1236 max 2471

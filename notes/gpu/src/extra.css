@@ -1,0 +1,30 @@
+/* additions for this dossier: zoomable figures, hand-drawn SVG, listings */
+figure.dia{position:relative;padding-top:2.2rem}
+figure.dia .zoombtn{position:absolute;top:.45rem;right:.55rem;font:inherit;font-size:.7rem;letter-spacing:.04em;cursor:zoom-in;border:1px solid var(--line);background:#fff;color:var(--ink-soft);border-radius:999px;padding:.1rem .55rem;opacity:.8}
+figure.dia .zoombtn:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
+figure.dia svg.hand{display:block;margin:0 auto;max-width:100%;height:auto;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+#zoomlayer{position:fixed;inset:0;z-index:50;background:rgba(13,27,42,.88);display:none}
+#zoomlayer.on{display:block}
+#zoomlayer .zl-stage{position:absolute;inset:3.1rem .9rem .9rem;overflow:hidden;background:#fff;border-radius:12px;cursor:grab;touch-action:none}
+#zoomlayer .zl-stage.drag{cursor:grabbing}
+#zoomlayer .zl-inner{transform-origin:0 0;position:absolute;left:0;top:0}
+#zoomlayer .zl-inner svg{display:block;max-width:none!important}
+#zoomlayer .zl-bar{position:absolute;top:.6rem;left:.9rem;right:.9rem;display:flex;gap:.4rem;align-items:center;color:#cfe0f3;font-size:.82rem}
+#zoomlayer .zl-bar button{font:inherit;cursor:pointer;border:1px solid #3d5a78;background:#12304d;color:#eaf2fb;border-radius:999px;padding:.18rem .75rem}
+#zoomlayer .zl-bar .zl-cap{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-left:.6rem}
+.lcap{font-size:.8rem;color:var(--ink-soft);margin:-.55rem 0 1.3rem}
+.readfirst{font-size:.85rem;background:var(--accent-soft);border-radius:8px;padding:.55rem .85rem;margin:0 0 1.3rem}
+.gen{font-size:.84rem}
+.gen caption{caption-side:top;text-align:left;font-size:.78rem;color:var(--ink-soft);padding-bottom:.35rem}
+.part{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-soft);margin:2.6rem 0 .8rem;padding-left:.2rem}
+#toc li.toc-part{font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);margin:.9rem 0 .2rem .5rem}
+@media print{#zoomlayer,.zoombtn{display:none!important}}
+
+/* inserted lines in listings */
+pre b{color:#7ee787;font-weight:700}
+.glossdl{margin:0 0 1.4rem;display:grid;grid-template-columns:auto 1fr;gap:.35rem .9rem;font-size:.92rem}
+@media(max-width:640px){.glossdl{grid-template-columns:1fr}.glossdl dd{margin-bottom:.5rem}}
+.glossdl dt{font-weight:700;white-space:nowrap}
+.glossdl dd{margin:0;color:var(--ink-soft)}
+#references ul{list-style:none;padding-left:0}
+#references li.ref{padding:.5rem 0;border-top:1px solid var(--line)}

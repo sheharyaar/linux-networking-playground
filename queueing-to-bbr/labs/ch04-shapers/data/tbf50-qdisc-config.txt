@@ -1,0 +1,2 @@
+qdisc tbf 1: root refcnt 17 rate 10Mbit burst 32Kb lat 50ms 
+qdisc bfifo 0: parent 1:1 limit 95268b

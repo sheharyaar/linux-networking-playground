@@ -1,0 +1,6 @@
+      <table class="gen">
+        <tr><th>Bench</th><th>GPU</th><th>Generation, compute capability</th><th>Memory</th><th>What runs there</th><th>Toolchain and driver</th></tr>
+        <tr><td>This laptop (ASUS TUF A14, FA401UU)</td><td>GeForce RTX 4050 Laptop GPU</td><td>Ada, 8.9 (<code>sm_89</code>)</td><td>6 GB GDDR6, 96-bit bus</td><td>every lab: kernels, profilers, bpftime, and vLLM and llama.cpp with a 0.5-billion-parameter model</td><td>CUDA 13.4; driver 615 with the open kernel modules</td></tr>
+        <tr><td>Later</td><td>H100 SXM5</td><td>Hopper, 9.0 (<code>sm_90</code>)</td><td>80 GB HBM3</td><td>vLLM with real models; the Hopper-only kernels</td><td>CUDA 13.x. Its machine code can already be compiled, and read, on the laptop</td></tr>
+        <tr><td>A customer</td><td>Quadro P5000</td><td>Pascal, 6.1 (<code>sm_61</code>)</td><td>16 GB GDDR5X, 256-bit bus</td><td>llama.cpp, bpftime, NVBit, <code>nvprof</code>. vLLM does not run on it</td><td>CUDA 12.x at most. A driver branch that still supports Pascal: NVIDIA announced the 580 series as the last. The proprietary kernel modules, because the open ones need Turing or later</td></tr>
+      </table>

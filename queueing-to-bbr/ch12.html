@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pods with a speed limit · chapter 12 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 12 of 14</p>
+    <h1>Pods with a speed limit</h1>
+    <p class="sub">After this chapter you can say what a tenant should be promised and why the promise is kept at the sender, follow a pod's departure time across its veth into the host's fq on kernel 7.2, read Cilium's EDT limiter line by line, and predict what it does to a pod that sends faster than its limit.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The readings</h2>
+    <ol><li><a href="#book">EyeQ pp. 299–305, a cover letter, the docs, edt.h</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-tenant-timescale">A tenant's share, over milliseconds</a></li>
+        <li><a href="#s-receiver-detects">Detect at the receiver, enforce at the sender</a></li>
+        <li><a href="#s-rate-loop">One rate per receiver, in milliseconds</a></li>
+        <li><a href="#s-stamp-crosses">The stamp crosses the veth</a></li>
+        <li><a href="#s-edt-limiter">A pod's limit written as a time</a></li>
+        <li><a href="#s-bbr-for-pods">BBR for pods needs the socket too</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 12 · before you read</span>
+      <h2>Pods with a speed limit</h2>
+      <p class="chmeta">~7 min before · EyeQ pp. 299–305 of 297–311, a cover letter, one docs page and 50 lines of Cilium's BPF (~1.5 h) · ~22 min after · <span class="tag HOST">HOST</span><br>
+        <span class="spine">One packet from a pod annotated <code>kubernetes.io/egress-bandwidth: "10M"</code>, the bench's 10 Mbit/s: TCP writes its departure time inside the pod, the time crosses the pod's veth into the host, Cilium's BPF program at the host's network card moves it later when the pod is over its rate, and fq on the card holds the packet until then.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>At Linux Plumbers 2021, Daniel Borkmann and Martynas Pumputis showed four netperf runs from one pod whose TCP socket was <a href="index.html#g-pacing">paced</a> at 4 Gbit/s: 656, 1,275, 1,519 and 850 Mbit/s (slide 22). Then they patched the kernel so that it stopped zeroing <a href="index.html#g-skb-tstamp"><code>skb->tstamp</code></a> when a packet left the pod's network namespace, and ran again: 3,976, 3,961, 3,958 and 3,977 Mbit/s (slide 23). The pod and the rate were the same. The <a href="index.html#g-edt">departure time</a> TCP writes into every skb, the field the departure-time chapter followed into fq, was being thrown away at the pod's veth.</p>
+      <p>That loss matters most on a shared node. A Kubernetes node runs the pods of many <b>tenants</b>, the customers who share a cluster, and TCP shares a link per flow, so a tenant with more flows, or with UDP, takes more. Kubernetes lets you write a cap on a pod as an annotation, <code>kubernetes.io/egress-bandwidth</code>. Cilium enforces that cap by writing a departure time into the same field, from a BPF program on the host's network card. So one field has two writers, TCP inside the pod and Cilium on the host, and one reader, fq on the card, with a namespace hop between them that used to erase it.</p>
+      <p>The readings come in three parts. EyeQ (NSDI 2013) asks what a tenant should be promised and where the promise must be enforced. Martin KaFai Lau's 2022 patch series lets the stamp cross the hop. Cilium's Bandwidth Manager, read in its docs and in your fork, is the system that needs both.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-tenant">tenant</dt><dd>A customer of a shared cluster, owning some of its VMs or pods. The shapers chapter said "customers" for the same thing. EyeQ promises bandwidth per tenant endpoint; TCP knows nothing about tenants (p. 298).</dd>
+        <dt id="w-hose-model">hose model</dt><dd>A guarantee written per endpoint: a rate in and a rate out, whoever the endpoint talks to, as if all of a tenant's endpoints hung on one private switch (p. 299, footnote 1). Its rival, the "pipe" model, needs a rate for every pair of endpoints (p. 308).</dd>
+        <dt id="w-admissible-traffic">admissible traffic</dt><dd>Traffic whose senders never send one receiver, in total, more than the <a href="index.html#g-bottleneck">bottleneck</a> on the way can carry (p. 300). TCP keeps traffic admissible by backing off; EyeQ makes every transport keep it.</dd>
+        <dt id="w-eyeq">EyeQ</dt><dd>The paper's system: on every server a sender module (SEM) of rate limiters and a receiver module (REM) of rate meters, joined by small feedback packets, so that each tenant endpoint gets a minimum and a maximum rate (pp. 298, 301).</dd>
+        <dt id="w-rcp">RCP (rate control protocol)</dt><dd>A congestion control in which a meter computes one explicit rate and tells the senders to use it, so they need not probe by losing packets (refs [27, 29]). EyeQ runs a variant per receiving endpoint (p. 302).</dd>
+        <dt id="w-mono-delivery-time">mono delivery time (<code>skb->tstamp_type</code>)</dt><dd>A mark on an skb saying that <code>skb->tstamp</code> holds a departure time on <code>CLOCK_MONOTONIC</code>, so the kernel may keep it when it forwards the packet. One bit in Linux 5.18 (2022); since 6.11 a two-bit field that also names realtime and <a href="index.html#g-clock-tai">TAI</a>.</dd>
+        <dt id="w-edt-rate-limiter">EDT rate limiter</dt><dd>A rate limit enforced by moving each packet's departure time: a packet may leave no earlier than its length over the rate after the previous packet of the same group. Cilium's runs in BPF at the host's network card (<code>bpf/lib/edt.h</code>).</dd>
+        <dt id="w-bandwidth-manager">Bandwidth Manager</dt><dd>Cilium's feature that holds each pod to its <code>kubernetes.io/egress-bandwidth</code> with the EDT rate limiter, puts fq on the host's network cards, and can make <a href="index.html#g-bbr">BBR</a> the pods' congestion control. It is off by default.</dd>
+        <dt id="w-bbr-for-pods">BBR for pods</dt><dd>The Bandwidth Manager's option (<code>bandwidthManager.bbr=true</code>) that makes BBR the default congestion control for new pods. It needs Linux 5.18, so the departure time crosses the veth, and BPF host routing, so the packet keeps its socket.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  subgraph POD["Pod network namespace"]
+    T["TCP in the pod<br/>writes its departure time<br/>into the skb"]
+  end
+  subgraph HOST["Host network namespace"]
+    V["veth hop<br/>before 5.18: time zeroed<br/>since 5.18: kept, if marked<br/>as a mono delivery time"]
+    B["Cilium BPF at eth0<br/>EDT rate limiter:<br/>the later of TCP's time<br/>and the pod's next slot"]
+    F["fq on eth0<br/>holds the skb<br/>until its time"]
+  end
+  T ==>|"skb with a time"| V
+  V ==> B
+  B ==>|"skb with a later time"| F
+  F ==> W["Wire"]
+  style V fill:#fdeef1,stroke:#be123c,stroke-width:2px
+  style F fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 12.1 — One pod packet's departure time, from TCP to the wire.</b> Notice the red box. Before Linux 5.18 the kernel could not tell a departure time from a receive time, so it zeroed the field at every forwarding hop, and the pod's own pacing never reached fq. The BPF box is the second writer: it keeps TCP's time when the pod is under its limit and writes a later one when it is over.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Reading, part</th><th>Where</th><th>How</th><th>Look for</th></tr>
+        <tr><td>EyeQ, Abstract, §1 and Fig. 1</td><td>pp. 297–298</td><td><span class="how skim">skim</span></td><td>TCP shares per flow and knows no tenants. Fig. 1's example: guarantees of 2 and 8 Gb/s, and flow F1 falling from 10 Gb/s to 2.</td></tr>
+        <tr><td>§2.1–§2.2, Fig. 2</td><td>pp. 299–300</td><td><span class="how close">close</span></td><td>The hose constraint (footnote 1), and why a UDP tenant averaging 2.5 Gb/s still ruins its neighbour's latency.</td></tr>
+        <tr><td>§2.3, Figs 3–4</td><td>p. 300</td><td><span class="how close">close</span></td><td>The last paragraph: three conditions under which congestion stays on the servers' own links. Skim the measurements; the routing scheme it names returns in the load-balancing chapter.</td></tr>
+        <tr><td>§3.1–§3.3, Fig. 5</td><td>pp. 300–302</td><td><span class="how close">close</span></td><td>Why the receiver detects and the sender enforces; what a feedback packet carries; when a per-destination limiter is created.</td></tr>
+        <tr><td>§3.4 Rate control loop</td><td>pp. 302–303</td><td><span class="how close">close</span></td><td>The update rule, why it needs no count of senders, and the range of its gain \(\alpha\). The after half derives the stability claim in a toggle.</td></tr>
+        <tr><td>§3.5, §4, §4.1</td><td>pp. 303–304</td><td><span class="how skim">skim</span></td><td>The admission rules, the qdisc module, the 200 µs meter.</td></tr>
+        <tr><td>§4.2 Sender module</td><td>p. 304</td><td><span class="how close">close</span></td><td><a href="index.html#g-token-bucket">Token buckets</a> split per CPU, one 50 µs timer, and the arithmetic of a 64 kB TSO chunk. Cilium answers each of these differently.</td></tr>
+        <tr><td>§5 setup, §5.1, Figs 6–7</td><td>pp. 304–305</td><td><span class="how close">close</span></td><td>Convergence within 5 ms against 14 UDP senders; CPU and latency against <a href="index.html#g-htb-class">HTB</a>. PDF page 9 has no text layer, so read p. 305 on screen.</td></tr>
+        <tr><td>§5.1 end, §5.2, Table 1</td><td>pp. 306–307</td><td><span class="how later">later</span></td><td>Only Table 1, memcached's tail latency, is used later.</td></tr>
+        <tr><td>§5.3, §6, §7</td><td>pp. 307–308</td><td><span class="how skim">skim</span></td><td>In §6, the paragraph on Seawall and Oktopus: sharing per source VM, and a control loop that takes 2 s.</td></tr>
+        <tr><td>Lau, "Preserve mono delivery time (EDT) in skb->tstamp", cover letter (merge <code>01e2d1579682</code>)</td><td>¶1–¶5</td><td><span class="how close">close</span></td><td>The two meanings of <code>skb->tstamp</code>, why forwarding had to zero it, and what the series keeps.</td></tr>
+        <tr><td>Cover letter, changelog</td><td>v3–v6</td><td><span class="how skim">skim</span></td><td>v3: one bit on the skb. v4: the clearing moves to local delivery. Skip netfilter, IOAM and af_packet.</td></tr>
+        <tr><td>Cilium 1.20 docs, Bandwidth Manager: the introduction, "BBR for Pods", "Limitations"</td><td>one page</td><td><span class="how close">close</span></td><td>Egress by EDT, ingress by a token bucket; why BBR needs 5.18 and BPF host routing; why kind cannot run it. Skim the Helm commands.</td></tr>
+        <tr><td>Cilium fork: <code>bpf/lib/edt.h</code></td><td>lines 64–115</td><td><span class="how close">close</span></td><td>The whole limiter: 50 lines, one division, one comparison with the <a href="index.html#g-horizon">horizon</a>.</td></tr>
+      </table>
+      <p class="note">EyeQ's own sections are written §3.4. The cover letter has no numbers, so this page counts its opening paragraphs ¶1–¶5 and names the changelog by version. LWN 886698 carries the same v6 text. Cilium is cited by file:line in your fork (v1.19.6-vpc, HEAD <code>8ab00248bc</code>), the kernel by file:line in v7.2.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the readings</h4><ol>
+        <li>EyeQ's UDP tenant averages 2.5 Gb/s, under its 3 Gb/s share, yet its TCP neighbour waits ten times longer. What does a 100 ms average miss, and how often does EyeQ measure?</li>
+        <li>EyeQ detects excess traffic at the receiver but slows it at the sender. Why not drop the excess at the receiver, which sees it first?</li>
+        <li>Before Linux 5.18 a pod's TCP stamped every packet, and fq on the host never saw the stamps. Where were they lost, and what did the kernel need to know before it could keep them?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="tenant-timescale">A tenant's share, over milliseconds</li>
+          <li data-strand="receiver-detects">Detect at the receiver, enforce at the sender</li>
+          <li data-strand="rate-loop">One rate per receiver, in milliseconds</li>
+          <li data-strand="stamp-crosses">The stamp crosses the veth</li>
+          <li data-strand="edt-limiter">A pod's limit written as a time</li>
+          <li data-strand="bbr-for-pods">BBR for pods needs the socket too</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 12 "Pods with a speed limit" (V. Jeyakumar et al., "EyeQ: Practical Network Performance Isolation at the Edge", NSDI '13, printed pp. 297–311, selected pp. 299–305; M. KaFai Lau, "Preserve mono delivery time (EDT) in skb->tstamp", cover letter of merge 01e2d1579682, net-next 2022, first in v5.18; Cilium 1.20 docs, "Bandwidth Manager"; Cilium fork v1.19.6-vpc bpf/lib/edt.h and pkg/datapath/linux/bandwidth/), cited by printed page, cover-letter paragraph ¶1–¶5 and file:line.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: tenant-timescale (A tenant's share, over milliseconds), receiver-detects (Detect at the receiver, enforce at the sender), rate-loop (One rate per receiver, in milliseconds), stamp-crosses (The stamp crosses the veth), edt-limiter (A pod's limit written as a time), bbr-for-pods (BBR for pods needs the socket too).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch12.md.
+End with a reading plan: for each row of the reading guide in ch12.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read</h2>
+      <p>EyeQ pages 299–305 (<code>09-eyeq.pdf</code>, PDF pages 3–9; read PDF page 9 on screen, it has no text layer), skimming pp. 297–298 and 306–308. Then the cover letter (<code>web/11-mono-delivery-time-cover-letter.from-merge-01e2d1579682.txt</code>, which ends with the 13 commits), the Bandwidth Manager page of the Cilium 1.20 docs (<code>extra/cilium-docs/network_kubernetes_bandwidth-manager_.html</code>), and <code>bpf/lib/edt.h:64–115</code> in your fork. About an hour and a half. Keep the three questions in mind and note the page, paragraph or line where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 12 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. EyeQ's UDP tenant averages 2.5 Gb/s, under its 3 Gb/s share, yet its TCP neighbour waits ten times longer. What does a 100 ms average miss, and how often does EyeQ measure? <span class="pageref">pp. 299–302</span></p>
+        <details class="ans"><summary>Answer</summary><p>It misses 5 ms bursts at line rate. 10 Gb/s for 5 ms in every 20 averages \(10 \times 5/20 = 2.5\) Gb/s, while each burst fills the receiver's switch port and the TCP tenant's requests queue behind it (Fig. 2, pp. 299–300). A 1 MB buffer fills in 800 µs, so EyeQ meters every 200 µs (p. 301). Near miss: TCP timeouts; the Fig. 2 caption says there were none.</p></details>
+        <p>2. EyeQ detects excess traffic at the receiver but slows it at the sender. Why not drop the excess at the receiver, which sees it first? <span class="pageref">pp. 301–302</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because a drop at the receiver slows only senders that react to drops. UDP keeps sending, and its packets have already crossed the switch port where the tenants collide (p. 301). So the receiver measures and sends back a rate, and the sender enforces it per destination (pp. 301–302). Cilium's <code>ingress-bandwidth</code> is the rejected design: a token bucket at delivery to the pod, with no feedback (<code>token_bucket.h:16–52</code>).</p></details>
+        <p>3. Before Linux 5.18 a pod's TCP stamped every packet, and fq on the host never saw the stamps. Where were they lost, and what did the kernel need to know before it could keep them? <span class="pageref">cover letter ¶1–¶5</span></p>
+        <details class="ans"><summary>Answer</summary><p>At the veth into the host, and at any routing hop. The field held a receive time on the way in and a departure time on the way out, and nothing said which, so forwarding zeroed it (¶1–¶3). The kernel needed to know which kind it held: one bit now marks a monotonic departure time, kept when forwarding (<code>skbuff.h:4507–4513</code>) and cleared at local delivery (<code>ip_input.c:237</code>).</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p><b>EyeQ.</b> TCP shares bandwidth per flow, blind to tenants (p. 298). EyeQ promises each tenant endpoint a minimum and a maximum rate in the hose model (p. 299), over milliseconds: a UDP tenant averaging 2.5 Gb/s in 5 ms bursts raises its neighbour's latency more than tenfold (Fig. 2, pp. 299–300). Lasting congestion stays on the servers' own links, so per-tenant state can live in the servers (p. 300). A receiver cannot slow UDP, so EyeQ meters at the receiver every 200 µs and enforces at the sender, with per-destination limiters set by feedback (pp. 301–302). The rate comes from an RCP-style rule, \(R \leftarrow R\,(1 - \alpha (y - C)/C)\), stable for \(0 &lt; \alpha &lt; 2\) (pp. 302–303), and settles within 5 ms against 14 UDP senders (p. 305).</p>
+      <p><b>The cover letter.</b> <code>skb->tstamp</code> meant a receive time or a departure time, and nothing said which, so every forwarding hop zeroed it (¶1–¶4). Lau's series marks a monotonic departure time with one bit, keeps marked times when forwarding, and clears them at local delivery (¶5, v3, v4). Since v6.11 the bit is <code>skb->tstamp_type</code>.</p>
+      <p><b>Cilium.</b> The Bandwidth Manager enforces <code>kubernetes.io/egress-bandwidth</code> with an EDT rate limiter in BPF on the host's devices, over mq and fq, and <code>ingress-bandwidth</code> with a token bucket. BBR for pods needs kernel 5.18 and BPF host routing, and none of it runs in kind (docs). In <code>edt.h</code> the limit is one addition per packet, \(t_\text{last} + \text{len}/\text{rate}\), and a drop beyond a 2 s horizon (lines 89–107).</p>
+
+      <h3 class="strand" id="s-tenant-timescale">A tenant's share, over milliseconds</h3>
+      <p>A tenant's guarantee is written per endpoint, and it has to hold over a few milliseconds. TCP gives each flow an equal share, so a tenant gets more by opening more flows, and a UDP tenant takes whatever it sends (p. 298).</p>
+      <p>The hose model says what is promised. If \(N\) VMs with 1 Gb/s links all send to one 1 Gb/s receiver, EyeQ promises the receiver 1 Gb/s in total, drops the excess at the senders, and splits it among them max-min (p. 299): the shapers chapter's <a href="index.html#g-max-min-fairness">max-min fairness</a>. In Fig. 1 (p. 298), tenant A's flow runs at 10 Gb/s alone and falls to A's minimum of 2 when tenant B's flow arrives.</p>
+      <p>Fig. 2 (pp. 299–300) is why "over milliseconds". Of the receiver's 9 Gb/s, TCP gets 6 and UDP 3. The UDP tenant sends 10 Gb/s for 5 ms, then nothing for 15 ms: \(10 \times 5/(5+15) = 2.5\) Gb/s on average, inside its share. One burst is \(10^{10} \times 0.005 / 8 = 6.25\) MB, against 2 MB of switch buffer (p. 305). The TCP tenant's latency rises more than tenfold, and a 100 ms average sees nothing (p. 300).</p>
+      <p>With high bisection bandwidth, randomized routing and admissible traffic, lasting congestion appears only on the access links (§2.3, p. 300), so per-tenant state belongs in the host. Cilium puts its limiter there.</p>
+      <p>On the spine, <code>"10M"</code> is a hose-model maximum on the way out; Kubernetes has no annotation for a minimum. Your fork's <code>bandwidth.cilium.io/priority</code> picks one of fq's three bands, served in weighted turns (<code>bandwidth.go:34, 45–56</code>), which is still no minimum rate.</p>
+
+      <h3 class="strand" id="s-receiver-detects">Detect at the receiver, enforce at the sender</h3>
+      <p>Contention at a receiver happens inside the switch, where neither server can see it, and a receiver that drops excess traffic slows only senders that back off. So EyeQ measures at the receiver and enforces at the sender: "receiver-side detection, sender-side reaction" (p. 301).</p>
+      <p>The timescale comes from the switch. Two ports sending at 10 Gb/s into one have 10 Gb/s of excess, so a 1 MB shared buffer fills in \(8 \times 10^6 / 10^{10} = 800\) µs (p. 301). The receiver's rate meter is a byte counter read every 200 µs, four readings per fill. It splits the receive link among the endpoints that are receiving, \(C_i = B_i \, C / \sum_{j \in A} B_j\), so an idle tenant's share goes to the others (p. 302).</p>
+      <p>Feedback is cheap: one 64-byte host-ACK (HACK) per 10 kB received, a 16-bit rate in the IP ID field, at most 64 Mb/s on a 10 Gb/s link whatever the number of senders (p. 302). A sender creates a limiter for a destination only when feedback from it arrives.</p>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  subgraph EQ["EyeQ, after Fig. 5 (p. 301)"]
+    direction LR
+    S1["Sender module<br/>root limiter per endpoint,<br/>one limiter per destination"] ==>|"packets"| W1["Switch port<br/>shared buffer"]
+    W1 ==> R1["Receiver module<br/>rate meter every 200 µs"]
+    R1 -.->|"HACK: one rate,<br/>64 bytes per 10 kB"| S1
+  end
+  subgraph CB["Cilium Bandwidth Manager"]
+    direction LR
+    S2["Sending node<br/>egress-bandwidth:<br/>EDT rate limiter, fq"] ==>|"packets"| W2["Fabric"]
+    W2 ==> R2["Receiving node<br/>ingress-bandwidth:<br/>token bucket, drops"]
+  end
+  EQ ~~~ CB
+  style S2 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style R2 fill:#fdeef1,stroke:#be123c,stroke-width:2px
+</div><figcaption><b>Diagram 12.2 — Where each system measures and where it enforces.</b> Notice the dotted arrow, which only EyeQ has. Cilium enforces egress at the sender, as EyeQ does (green), and ingress at the receiver with no feedback (red), the design §3.1 rejects for transports that ignore drops (p. 301).</figcaption></figure>
+      <p>Cilium enforces egress at the sending node, EyeQ's place, and ingress with a token bucket at the receiving node: <code>accept()</code> refills tokens at the rate, caps them at one second's worth, and drops the packet when they run short, just before delivery to the pod (<code>token_bucket.h:35–52</code>, called at <code>local_delivery.h:155</code>). That is a <a href="index.html#g-policer">policer</a> with a one-second bucket and no feedback. TCP backs off from it (2,471 retransmissions in the docs' 10 s test); a UDP sender would not.</p>
+
+      <h3 class="strand" id="s-rate-loop">One rate per receiver, in milliseconds</h3>
+      <p>The receiver computes one rate \(R_i\) for every flow sent to endpoint \(i\), from its measured receive rate \(y_i\) and its share \(C_i\), and it needs no count of senders (p. 302):</p>
+      <p>\[ R_i \leftarrow R_i \left(1 - \alpha \cdot \frac{y_i - C_i}{C_i}\right). \]</p>
+      <p>Too little traffic raises \(R_i\), too much lowers it. This is a variant of RCP with one difference the authors stress: RCP divides each link among its flows max-min, so it inherits TCP's per-flow sharing, while EyeQ runs the rule once per receiving endpoint, inside that endpoint's share (p. 302). With \(N\) long flows the rule settles at \(R^* = C/N\). It is stable for \(0 &lt; \alpha &lt; 2\), and near \(R^*\) each step multiplies the error by \(1 - \alpha\) (pp. 302–303).</p>
+      <details class="deriv"><summary>Derivation · the logistic map and the stability range</summary>
+        <p>Take one link of unit capacity and \(N\) senders at rate \(R\), so \(y = NR\) and the rule is \(R[n+1] = R[n]\,(1 + \alpha - \alpha N R[n])\). Put \(b = 1 + \alpha\) and \(z = (\alpha/b)\,N R\), which is the paper's \(z = \frac{b-1}{b}\frac{R}{R^*}\) with \(R^* = 1/N\). Then \(z[n+1] = \frac{\alpha N}{b} R[n]\,(b - \alpha N R[n]) = b\,z[n]\,(1 - z[n])\), the logistic map (footnote 2, p. 302).</p>
+        <p>Its fixed point \(z^* = 1 - 1/b\) is \(R = 1/N\). The slope there is \(f'(z^*) = b(1 - 2z^*) = 2 - b = 1 - \alpha\), and a fixed point is stable when \(|f'| &lt; 1\), that is \(0 &lt; \alpha &lt; 2\), the paper's \(1 &lt; b &lt; 3\). Near it the error shrinks by \(|1-\alpha|\) per step, so \(\alpha = 1\) is fastest in this model, which has no feedback delay. The authors saw oscillations at high \(\alpha\) in practice and chose 0.5 (p. 303).</p>
+      </details>
+      <p>Put numbers on the paper's test (p. 305): 14 UDP senders whose limiters all start at line rate. The first reading is \(y = 14\,C\), and the factor is \(1 - 0.5 \times 13 = -5.5\): the rule would make the rate negative, so it is clamped, "taking care to keep \(R_i\) positive" (p. 302). From there the rate grows at most by \(1 + \alpha = 1.5\) per step. Run with a 1 Mb/s floor on 10 Gb/s, the rule needs 31 steps to come within 0.01% of \(R^*\), and \(31 \times 200\) µs is 6.2 ms: the paper's "about 30 iterations" and "6ms" (p. 303). The linear part alone needs \(\ln 10^{-4} / \ln 0.5 = 13.3\) steps; the rest is the climb from the floor. Fig. 6 settles in about 5 ms (p. 305).</p>
+      <p>Cilium has no loop: a pod's rate is its annotation. It keeps EyeQ's per-endpoint root limiter and drops the per-destination limiters and the feedback that sets them.</p>
+
+      <h3 class="strand" id="s-stamp-crosses">The stamp crosses the veth</h3>
+      <p>Since Linux 5.18 the kernel keeps a departure time when it forwards a packet, because the skb now says what its <code>tstamp</code> holds, and clears it only at delivery to a local socket. So a pod's TCP stamps reach the host's fq.</p>
+      <p>The cover letter tells the history in four short paragraphs. <code>skb->tstamp</code> was first a receive time for <code>SO_TIMESTAMP</code> (¶1), then also a departure time read by fq (¶2). Nothing told them apart, so forwarding zeroed the field (¶3). That is right for a receive time, which fq would misread, and costs throughput for a departure time on its way to "fq@phy-dev" (¶4): the talk's 0.66–1.52 against 3.96–3.98 Gbit/s.</p>
+      <p>The fix is one bit (v3), now the 2-bit <code>skb->tstamp_type</code> (<code>skbuff.h:728–733, 984</code>). TCP sets it with every stamp (<code>tcp_output.c:1555</code>), a UDP socket with <a href="index.html#g-so-txtime"><code>SO_TXTIME</code></a> from its clock (<code>ip_output.c:1474</code>). <code>skb_clear_tstamp()</code> zeroes the field only when no type is set (<code>skbuff.h:4507–4513</code>), and every forwarding path calls it: the veth's <code>skb_scrub_packet()</code> (<code>skbuff.c:6298</code>), <code>ip_forward_finish()</code> (<code>ip_forward.c:79</code>), the BPF redirects (<code>filter.c:2153, 2227, 2331</code>). The real clearing moved to local delivery (v4, <code>ip_input.c:237</code>).</p>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  A["TCP in the pod<br/>stamp typed MONOTONIC<br/>tcp_output.c:1555"] ==> B["veth into the host<br/>skb_scrub_packet calls skb_clear_tstamp:<br/>a typed stamp is kept"]
+  U["UDP with SO_TXTIME<br/>type from the socket's clock<br/>ip_output.c:1474"] ==> B
+  B ==> C{"where is the<br/>packet going?"}
+  C ==>|"forwarded or redirected"| D["ip_forward_finish or a BPF redirect<br/>skb_clear_tstamp again: kept"]
+  C -->|"to a local socket"| E["ip_local_deliver_finish<br/>skb_clear_delivery_time: cleared"]
+  D ==> F["fq on eth0<br/>converts the stamp to monotonic,<br/>holds the skb until then"]
+  B -.->|"stamp typed REALTIME,<br/>like a receive time: zeroed"| Z["fq sees no time,<br/>sends at once"]
+  style F fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style Z fill:#fdeef1,stroke:#be123c,stroke-width:2px
+</div><figcaption><b>Diagram 12.3 — Where a departure time is kept and where it is cleared in v7.2.</b> Notice that every forwarding path calls the same helper, which keeps any stamp whose type is set, and that only delivery to a local socket clears a typed stamp. A realtime stamp has type 0, the same as a receive time, so the first hop zeroes it (red).</figcaption></figure>
+      <p>The stamps lab tests it on your kernel: 1,000 UDP datagrams stamped 1 ms apart, each handed down 5 ms early, nothing on <code>s0</code> that reads stamps, plain fq on the router's <code>r1</code>. Median lateness, captured minus stamped:</p>
+      <table>
+        <tr><th>sender</th><th>arriving at <code>rtr:r0</code></th><th>leaving <code>rtr:r1</code></th></tr>
+        <tr><td>no <code>SO_TXTIME</code></td><td>−4,939 µs</td><td>−4,935 µs</td></tr>
+        <tr><td><code>CLOCK_MONOTONIC</code></td><td>−4,939 µs</td><td>+12.4 µs</td></tr>
+        <tr><td><code>CLOCK_TAI</code></td><td>−4,937 µs</td><td>+12.7 µs</td></tr>
+        <tr><td><code>CLOCK_REALTIME</code></td><td>−4,935 µs</td><td>−4,931 µs</td></tr>
+        <tr><td>50 monotonic stamps handed down at once</td><td>4.5 µs apart</td><td>1,000 µs apart, +13.0 µs</td></tr>
+      </table>
+      <p>Monotonic and TAI stamps are honoured one hop away; a realtime stamp is cleared like a receive time. EyeQ never met this problem: its sender module sat in the hypervisor's virtual switch, below every guest's stack (§4, p. 303).</p>
+      <p class="since"><b>Since the cover letter.</b> In 5.18 only TCP set the bit; UDP wrote <code>skb->tstamp</code> bare (v5.18 <code>ip_output.c:1550</code>), so a pod's <code>SO_TXTIME</code> stamps were still zeroed. v6.11 renamed the bit <code>tstamp_type</code> (<code>4d25ca2d6801</code>) and made it follow the socket's clock (<code>1693c5db6ab8</code>, May 2024). The letter's helper shipped as <code>bpf_skb_set_tstamp()</code>.</p>
+      <p class="erratum"><b>The talk's slip.</b> Slide 24 explains the old reset with "Ingress is CLOCK_TAI, egress is CLOCK_MONOTONIC". The receive stamp is <code>CLOCK_REALTIME</code>: <code>__net_timestamp()</code> calls <code>ktime_get_real()</code> (<code>skbuff.h:4448–4451</code>; the same in v5.15). The argument stands: realtime runs about 56 years ahead of monotonic.</p>
+
+      <h3 class="strand" id="s-edt-limiter">A pod's limit written as a time</h3>
+      <p>Cilium holds a pod to its rate by giving each of its packets a departure time no earlier than the pod's previous one plus this packet's wire length over the rate. If TCP's own time is later, it stays. fq on the card does all the waiting (<code>edt.h:89–107</code>).</p>
+      <p>The program meets the packet twice. Leaving the pod, <code>cil_from_container</code> writes the pod's endpoint id into <code>skb->queue_mapping</code> (<code>bpf_lxc.c:2435, 2442</code>). At the host's card, <code>cil_to_netdev</code> calls <code>edt_sched_departure()</code> (<code>bpf_host.c:1666</code>), which reads the id back (<code>edt.h:52–62</code>) and looks up the pod's rate and last departure time, <code>t_last</code>, in the <code>cilium_throttle</code> map:</p>
+      <pre><code>t = max(skb->tstamp, now)                   /* TCP's departure time, if it is later */
+delay  = wire_len * NSEC_PER_SEC / bps      /* bps is bytes per second */
+t_next = t_last + delay
+if t_next &lt;= t:            t_last = t        /* under the rate: the packet keeps its time */
+elif t_next - now &gt;= 2 s:  drop              /* DROP_EDT_HORIZON; t_last unchanged */
+else:                      t_last = t_next; skb->tstamp = t_next</code></pre>
+      <p>On the spine, <code>"10M"</code> becomes \(10{,}000{,}000 / 8 = 1{,}250{,}000\) bytes per second (<code>GetBytesPerSec()</code>, <code>bandwidth.go:158–164</code>). A 1,514-byte frame costs \(1514 \times 10^9 / 1{,}250{,}000 = 1{,}211.2\) µs, so a busy pod's frames leave 1.21 ms apart: 825.6 per second, 10.0 Mbit/s on the wire and \(10 \times 1448/1514 = 9.56\) Mbit/s of TCP payload, the bench's bottleneck rate from the congestion-avoidance chapter. A pod that was idle gets one skb out at once, through the first branch, and the next waits its own length; idle time builds no credit.</p>
+      <p>This is the Carousel chapter's stamper. The pod is a <a href="index.html#g-flow-aggregate">flow aggregate</a>, <code>t_last</code> is its last stamp, and keeping the later of TCP's time and the pod's is Carousel's "keep the largest stamp". It even has the \(\max(\text{now}, \cdot)\) that chapter asked for. fq replaces the timing wheel, and the drop at the <a href="index.html#g-horizon">horizon</a> is one of Carousel's two choices.</p>
+      <p>Set it beside EyeQ's limiter (p. 304): a token bucket per endpoint, its FIFO split per CPU, tokens borrowed from a shared pool under a lock, one 50 µs timer per CPU. Cilium has no queue, timer or lock of its own: one <code>t_last</code> per pod, read and written with <code>READ_ONCE()</code> and <code>WRITE_ONCE()</code> (<code>edt.h:94–106</code>), so two CPUs can race and let one extra packet through. The queues are fq, one per transmit queue (<code>ops.go:98–150</code>).</p>
+
+      <h3 class="strand" id="s-bbr-for-pods">BBR for pods needs the socket too</h3>
+      <p>For BBR to pace a pod, two things must reach the host's fq with the packet: TCP's departure time, which needs 5.18, and the packet's socket, which needs BPF host routing (docs, "BBR for Pods"). The socket matters for UDP pods too: it is what slows them when the limiter holds their packets.</p>
+      <p>The fork checks both. It probes for the <code>bpf_skb_set_tstamp</code> helper, the 5.18 marker (<code>bandwidth.go:176–186</code>), and refuses legacy host routing because "going via host stack will orphan skb->sk" (lines 192–196). Then it sets <code>default_qdisc</code> to fq and <code>tcp_congestion_control</code> to bbr (lines 255–271). A new network namespace copies the host's congestion control when it is created (<code>tcp_ipv4.c:3528–3534</code>), hence the docs' "newly spawned Pods".</p>
+      <p>Why the socket? fq marks a socket it sees as fq-paced (<code>sch_fq.c:399–401, 450–453</code>), and then TCP's own pacing timer stays off (<code>tcp_output.c:2819</code>). Before 5.18, with host routing, the socket arrived and the time did not, so fq derived gaps from the socket's rate (<code>sch_fq.c:801–812</code>), the departure-time chapter's 2013 model: slide 22. Without host routing, <code>ip_rcv</code> drops the socket (<code>ip_input.c:580–583</code>), and <a href="index.html#g-tsq">TSQ</a> stops counting at the host, as netem's orphaning hid the queue from TSQ in the small-queues chapter.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch12-overload-->
+<svg viewBox="0 0 720 544" role="img" aria-label="Delivered rate and one-way delay of a UDP pod offering 20 Mbit/s against a 10 Mbit/s EDT limit, four settings" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="200.0" y2="200.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="204.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="171.7" y2="171.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="175.7" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="570" y1="143.3" y2="143.3" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="147.3" text-anchor="end" fill="#898781">4</text>
+<line x1="58" x2="570" y1="115.0" y2="115.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="119.0" text-anchor="end" fill="#898781">6</text>
+<line x1="58" x2="570" y1="86.7" y2="86.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="90.7" text-anchor="end" fill="#898781">8</text>
+<line x1="58" x2="570" y1="58.3" y2="58.3" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="62.3" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">12</text>
+<line x1="58" x2="570" y1="200.0" y2="200.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="115.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 115.0)">delivered (Mbit/s)</text>
+<line x1="58" x2="570" y1="58.3" y2="58.3" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="62.3" fill="#898781">limit &quot;10M&quot;</text>
+<polyline points="64.4,57.6 70.8,57.6 77.2,59.3 83.6,57.6 90.0,59.3 96.4,57.6 102.8,59.3 109.2,57.6 115.6,57.6 122.0,59.3 128.4,57.6 134.8,59.3 141.2,57.6 147.6,59.3 154.0,57.6 160.4,57.6 166.8,59.3 173.2,57.6 179.6,59.3 186.0,57.6 192.4,59.3 198.8,57.6 205.2,57.6 211.6,59.3 218.0,57.6 224.4,59.3 230.8,57.6 237.2,59.3 243.6,57.6 250.0,59.3 256.4,57.6 262.8,57.6 269.2,59.3 275.6,57.6 282.0,59.3 288.4,57.6 294.8,59.3 301.2,57.6 307.6,57.6 314.0,59.3 320.4,57.6 326.8,59.3 333.2,57.6 339.6,59.3 346.0,57.6 352.4,59.3 358.8,57.6 365.2,57.6 371.6,59.3 378.0,57.6 384.4,59.3 390.8,57.6 397.2,59.3 403.6,57.6 410.0,59.3 416.4,57.6 422.8,57.6 429.2,59.3 435.6,57.6 442.0,59.3 448.4,57.6 454.8,59.3 461.2,57.6 467.6,57.6 474.0,59.3 480.4,57.6 486.8,59.3 493.2,57.6 499.6,59.3 506.0,57.6 512.4,57.6 518.8,59.3 525.2,57.6 531.6,59.3 538.0,57.6 544.4,59.3 550.8,57.6 557.2,59.3 563.6,57.6 570.0,57.6" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="64.4,57.6 70.8,57.6 77.2,59.3 83.6,57.6 90.0,59.3 96.4,57.6 102.8,59.3 109.2,57.6 115.6,57.6 122.0,59.3 128.4,57.6 134.8,59.3 141.2,57.6 147.6,59.3 154.0,57.6 160.4,57.6 166.8,59.3 173.2,57.6 179.6,59.3 186.0,57.6 192.4,59.3 198.8,57.6 205.2,59.3 211.6,57.6 218.0,57.6 224.4,59.3 230.8,57.6 237.2,59.3 243.6,57.6 250.0,59.3 256.4,57.6 262.8,57.6 269.2,59.3 275.6,57.6 282.0,59.3 288.4,57.6 294.8,59.3 301.2,57.6 307.6,59.3 314.0,57.6 320.4,57.6 326.8,59.3 333.2,57.6 339.6,59.3 346.0,57.6 352.4,59.3 358.8,57.6 365.2,57.6 371.6,59.3 378.0,57.6 384.4,59.3 390.8,57.6 397.2,59.3 403.6,57.6 410.0,57.6 416.4,59.3 422.8,57.6 429.2,59.3 435.6,57.6 442.0,59.3 448.4,57.6 454.8,59.3 461.2,57.6 467.6,57.6 474.0,59.3 480.4,57.6 486.8,59.3 493.2,57.6 499.6,59.3 506.0,57.6 512.4,57.6 518.8,59.3 525.2,57.6 531.6,59.3 538.0,57.6 544.4,59.3 550.8,57.6 557.2,59.3 563.6,57.6 570.0,57.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="64.4,57.6 70.8,57.6 77.2,59.3 83.6,57.6 90.0,59.3 96.4,57.6 102.8,59.3 109.2,57.6 115.6,57.6 122.0,59.3 128.4,57.6 134.8,59.3 141.2,57.6 147.6,59.3 154.0,57.6 160.4,57.6 166.8,59.3 173.2,57.6 179.6,59.3 186.0,57.6 192.4,59.3 198.8,57.6 205.2,57.6 211.6,59.3 218.0,57.6 224.4,59.3 230.8,57.6 237.2,59.3 243.6,57.6 250.0,59.3 256.4,57.6 262.8,57.6 269.2,59.3 275.6,57.6 282.0,59.3 288.4,57.6 294.8,59.3 301.2,57.6 307.6,57.6 314.0,59.3 320.4,57.6 326.8,59.3 333.2,57.6 339.6,59.3 346.0,57.6 352.4,59.3 358.8,57.6 365.2,57.6 371.6,59.3 378.0,57.6 384.4,59.3 390.8,57.6 397.2,59.3 403.6,57.6 410.0,57.6 416.4,59.3 422.8,57.6 429.2,59.3 435.6,57.6 442.0,59.3 448.4,57.6 454.8,59.3 461.2,57.6 467.6,57.6 474.0,59.3 480.4,57.6 486.8,59.3 493.2,57.6 499.6,59.3 506.0,57.6 512.4,59.3 518.8,57.6 525.2,57.6 531.6,59.3 538.0,57.6 544.4,59.3 550.8,57.6 557.2,59.3 563.6,57.6 570.0,57.6" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<polyline points="64.4,57.6 70.8,57.6 77.2,100.5 83.6,129.6 90.0,134.8 96.4,164.0 102.8,164.0 109.2,165.7 115.6,164.0 122.0,170.8 128.4,182.8 134.8,181.1 141.2,182.8 147.6,181.1 154.0,184.6 160.4,181.1 166.8,182.8 173.2,181.1 179.6,182.8 186.0,188.0 192.4,191.4 198.8,191.4 205.2,191.4 211.6,189.7 218.0,191.4 224.4,191.4 230.8,191.4 237.2,189.7 243.6,193.1 250.0,191.4 256.4,189.7 262.8,191.4 269.2,191.4 275.6,191.4 282.0,191.4 288.4,189.7 294.8,191.4 301.2,191.4 307.6,193.1 314.0,194.9 320.4,191.4 326.8,191.4 333.2,191.4 339.6,189.7 346.0,191.4 352.4,191.4 358.8,191.4 365.2,189.7 371.6,193.1 378.0,191.4 384.4,191.4 390.8,189.7 397.2,191.4 403.6,191.4 410.0,191.4 416.4,189.7 422.8,191.4 429.2,191.4 435.6,193.1 442.0,194.9 448.4,191.4 454.8,191.4 461.2,191.4 467.6,189.7 474.0,191.4 480.4,191.4 486.8,191.4 493.2,189.7 499.6,193.1 506.0,191.4 512.4,191.4 518.8,189.7 525.2,191.4 531.6,191.4 538.0,191.4 544.4,189.7 550.8,191.4 557.2,191.4 563.6,193.1 570.0,194.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="191.5" y2="191.5" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="195.5" fill="#1b1f24">0.6 Mbit/s</text>
+<text x="314.0" y="45.6" fill="#4a5560" text-anchor="start">three runs on the limit, 10.0 Mbit/s</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">socket lost, 2 s horizon</text>
+<line x1="260" x2="274" y1="18" y2="18" stroke="#eda100" stroke-width="2"/>
+<text x="279" y="22" fill="#1b1f24">same, flow_limit 2000</text>
+<line x1="433" x2="447" y1="18" y2="18" stroke="#1baf7a" stroke-width="2"/>
+<text x="452" y="22" fill="#1b1f24">100 ms horizon</text>
+<line x1="557" x2="571" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="576" y="22" fill="#1b1f24">socket kept</text>
+<line x1="58" x2="570" y1="366.0" y2="366.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="370.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="338.7" y2="338.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="342.7" text-anchor="end" fill="#898781">500</text>
+<line x1="58" x2="570" y1="311.5" y2="311.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="315.5" text-anchor="end" fill="#898781">1000</text>
+<line x1="58" x2="570" y1="284.2" y2="284.2" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="288.2" text-anchor="end" fill="#898781">1500</text>
+<line x1="58" x2="570" y1="256.9" y2="256.9" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="260.9" text-anchor="end" fill="#898781">2000</text>
+<line x1="58" x2="570" y1="366.0" y2="366.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="306.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 306.0)">delay (ms)</text>
+<polyline points="64.4,364.6 70.8,361.9 77.2,359.6 83.6,356.5 90.0,353.9 96.4,351.0 102.8,348.2 109.2,345.5 115.6,342.8 122.0,340.3 128.4,337.4 134.8,334.6 141.2,331.8 147.6,329.0 154.0,326.5 160.4,323.7 166.8,321.0 173.2,318.2 179.6,315.5 186.0,313.2 192.4,310.0 198.8,307.4 205.2,304.7 211.6,301.8 218.0,298.9 224.4,296.3 230.8,293.7 237.2,291.0 243.6,288.2 250.0,286.0 256.4,282.8 262.8,279.9 269.2,277.3 275.6,274.6 282.0,272.0 288.4,269.2 294.8,266.1 301.2,263.5 307.6,261.3 314.0,258.2 320.4,256.9 326.8,256.9 333.2,256.9 339.6,256.9 346.0,256.9 352.4,256.9 358.8,256.9 365.2,256.9 371.6,256.9 378.0,256.9 384.4,256.9 390.8,256.9 397.2,256.9 403.6,256.9 410.0,256.9 416.4,256.9 422.8,256.9 429.2,256.9 435.6,256.9 442.0,256.9 448.4,256.9 454.8,256.9 461.2,256.9 467.6,256.9 474.0,256.9 480.4,256.9 486.8,256.9 493.2,256.9 499.6,256.9 506.0,256.9 512.4,256.9 518.8,256.9 525.2,256.9 531.6,256.9 538.0,256.9 544.4,256.9 550.8,256.9 557.2,256.9 563.6,256.9 570.0,256.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="256.9" y2="256.9" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="260.9" fill="#1b1f24">both 2 s</text>
+<polyline points="64.4,364.6 70.8,361.9 77.2,359.2 83.6,356.5 90.0,353.7 96.4,351.0 102.8,348.3 109.2,345.6 115.6,342.8 122.0,340.1 128.4,337.4 134.8,334.6 141.2,331.9 147.6,329.2 154.0,326.5 160.4,323.7 166.8,321.0 173.2,318.3 179.6,315.5 186.0,312.8 192.4,310.1 198.8,307.4 205.2,304.6 211.6,301.9 218.0,299.2 224.4,296.4 230.8,293.7 237.2,291.0 243.6,288.3 250.0,285.5 256.4,282.8 262.8,280.1 269.2,277.4 275.6,274.6 282.0,271.9 288.4,269.2 294.8,266.5 301.2,263.7 307.6,261.0 314.0,258.3 320.4,256.9 326.8,256.9 333.2,256.9 339.6,256.9 346.0,256.9 352.4,256.9 358.8,256.9 365.2,256.9 371.6,256.9 378.0,256.9 384.4,256.9 390.8,256.9 397.2,256.9 403.6,256.9 410.0,256.9 416.4,256.9 422.8,256.9 429.2,256.9 435.6,256.9 442.0,256.9 448.4,256.9 454.8,256.9 461.2,256.9 467.6,256.9 474.0,256.9 480.4,256.9 486.8,256.9 493.2,256.9 499.6,256.9 506.0,256.9 512.4,256.9 518.8,256.9 525.2,256.9 531.6,256.9 538.0,256.9 544.4,256.9 550.8,256.9 557.2,256.9 563.6,256.9 570.0,256.9" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<text x="224.4" y="333.3" fill="#4a5560" text-anchor="start">both reach the 2 s horizon</text>
+<line x1="58" x2="570" y1="502.0" y2="502.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="506.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="472.0" y2="472.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="476.0" text-anchor="end" fill="#898781">50</text>
+<line x1="58" x2="570" y1="442.0" y2="442.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="446.0" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="412.0" y2="412.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="416.0" text-anchor="end" fill="#898781">150</text>
+<line x1="58" x2="570" y1="502.0" y2="502.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="457.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 457.0)">delay (ms)</text>
+<polyline points="64.4,487.1 70.8,456.9 77.2,442.0 83.6,442.1 90.0,442.0 96.4,442.0 102.8,442.0 109.2,442.0 115.6,442.0 122.0,442.0 128.4,442.0 134.8,442.0 141.2,442.0 147.6,442.0 154.0,442.0 160.4,442.0 166.8,442.0 173.2,442.1 179.6,442.0 186.0,442.1 192.4,442.0 198.8,442.1 205.2,442.0 211.6,442.0 218.0,442.0 224.4,442.0 230.8,442.0 237.2,442.0 243.6,442.0 250.0,442.0 256.4,442.0 262.8,442.1 269.2,442.0 275.6,442.0 282.0,442.0 288.4,442.0 294.8,442.1 301.2,442.1 307.6,442.0 314.0,442.1 320.4,442.0 326.8,442.1 333.2,442.0 339.6,442.1 346.0,442.0 352.4,442.0 358.8,442.0 365.2,442.0 371.6,442.0 378.0,442.0 384.4,442.0 390.8,442.0 397.2,442.0 403.6,442.0 410.0,442.1 416.4,442.0 422.8,442.0 429.2,442.0 435.6,442.0 442.0,442.0 448.4,442.1 454.8,442.1 461.2,442.1 467.6,442.1 474.0,442.1 480.4,442.0 486.8,442.0 493.2,442.0 499.6,442.0 506.0,442.0 512.4,442.0 518.8,442.1 525.2,442.0 531.6,442.0 538.0,442.0 544.4,442.0 550.8,442.1 557.2,442.1 563.6,442.1 570.0,442.0" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="434.8" y2="434.8" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="438.8" fill="#1b1f24">100 ms</text>
+<polyline points="64.4,487.1 70.8,456.9 77.2,447.9 83.6,448.4 90.0,451.6 96.4,452.7 102.8,448.7 109.2,448.4 115.6,451.2 122.0,452.7 128.4,449.8 134.8,448.3 141.2,450.5 147.6,452.7 154.0,450.5 160.4,448.4 166.8,450.2 173.2,452.7 179.6,451.6 186.0,448.3 192.4,449.8 198.8,452.7 205.2,452.7 211.6,448.4 218.0,449.1 224.4,452.7 230.8,452.6 237.2,448.3 243.6,449.0 250.0,452.7 256.4,452.7 262.8,448.4 269.2,448.3 275.6,452.7 282.0,452.7 288.4,448.4 294.8,448.3 301.2,452.0 307.6,452.7 314.0,448.3 320.4,448.4 326.8,451.6 333.2,452.7 339.6,448.7 346.0,448.4 352.4,451.2 358.8,452.7 365.2,449.8 371.6,448.4 378.0,450.5 384.4,452.7 390.8,450.5 397.2,448.4 403.6,450.5 410.0,452.7 416.4,451.2 422.8,448.4 429.2,449.8 435.6,452.7 442.0,452.3 448.4,448.4 454.8,449.4 461.2,452.7 467.6,452.7 474.0,448.4 480.4,449.1 486.8,452.7 493.2,452.7 499.6,448.3 506.0,448.4 512.4,452.7 518.8,452.7 525.2,448.4 531.6,448.4 538.0,452.0 544.4,452.7 550.8,448.4 557.2,448.4 563.6,452.0 570.0,452.7" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="456.4" y2="456.4" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="460.4" fill="#1b1f24">86 ms</text>
+<text x="58.0" y="518.0" text-anchor="middle" fill="#898781">0</text>
+<text x="122.0" y="518.0" text-anchor="middle" fill="#898781">1</text>
+<text x="186.0" y="518.0" text-anchor="middle" fill="#898781">2</text>
+<text x="250.0" y="518.0" text-anchor="middle" fill="#898781">3</text>
+<text x="314.0" y="518.0" text-anchor="middle" fill="#898781">4</text>
+<text x="378.0" y="518.0" text-anchor="middle" fill="#898781">5</text>
+<text x="442.0" y="518.0" text-anchor="middle" fill="#898781">6</text>
+<text x="506.0" y="518.0" text-anchor="middle" fill="#898781">7</text>
+<text x="570.0" y="518.0" text-anchor="middle" fill="#898781">8</text>
+<text x="314.0" y="536.0" text-anchor="middle" fill="#4a5560">seconds since the first datagram arrived</text>
+<g class="hit"><title>t = 0.5 s · socket lost, 2 s horizon, flow_limit 100: 4.60 Mbit/s, 223 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 84 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 225 ms</title><rect x="58.0" y="30" width="48.0" height="472.0" fill="transparent"/><line x1="90.0" x2="90.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.0 s · socket lost, 2 s horizon, flow_limit 100: 2.06 Mbit/s, 472 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 82 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 475 ms</title><rect x="106.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="122.0" x2="122.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.5 s · socket lost, 2 s horizon, flow_limit 100: 1.09 Mbit/s, 725 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 86 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 725 ms</title><rect x="138.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="154.0" x2="154.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.0 s · socket lost, 2 s horizon, flow_limit 100: 0.85 Mbit/s, 968 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 90 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 975 ms</title><rect x="170.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="186.0" x2="186.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 1230 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 88 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 1225 ms</title><rect x="202.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="218.0" x2="218.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.0 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 1466 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 82 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 1475 ms</title><rect x="234.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="250.0" x2="250.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 1724 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 82 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 1725 ms</title><rect x="266.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="282.0" x2="282.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.0 s · socket lost, 2 s horizon, flow_limit 100: 0.36 Mbit/s, 1976 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 90 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 1975 ms</title><rect x="298.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="314.0" x2="314.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 89 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="330.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="346.0" x2="346.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.0 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 86 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="362.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="378.0" x2="378.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 82 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="394.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="410.0" x2="410.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.0 s · socket lost, 2 s horizon, flow_limit 100: 0.36 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 83 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 2000 ms</title><rect x="426.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="442.0" x2="442.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 9.93 Mbit/s, 89 ms · socket lost, 100 ms horizon, flow_limit 100: 9.93 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 9.93 Mbit/s, 2000 ms</title><rect x="458.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="474.0" x2="474.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 7.0 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 89 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="490.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="506.0" x2="506.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 7.5 s · socket lost, 2 s horizon, flow_limit 100: 0.61 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 83 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="522.0" y="30" width="32.0" height="472.0" fill="transparent"/><line x1="538.0" x2="538.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 8.0 s · socket lost, 2 s horizon, flow_limit 100: 0.36 Mbit/s, 2000 ms · socket kept, 2 s horizon, flow_limit 100: 10.05 Mbit/s, 82 ms · socket lost, 100 ms horizon, flow_limit 100: 10.05 Mbit/s, 100 ms · socket lost, 2 s horizon, flow_limit 2000: 10.05 Mbit/s, 2000 ms</title><rect x="554.0" y="30" width="16.0" height="472.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="502.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch12-overload--></div>
+        <figcaption><b>Diagram 12.4 — A UDP pod offering 20 Mbit/s against a 10 Mbit/s EDT limit, four settings, measured.</b> Notice the orange line: its rate falls to 0.6 Mbit/s as its delay climbs to the 2 s horizon. The others sit on 10.0 Mbit/s; the dashed one shares the 2 s delay. Rootless bench, kernel 7.2.6, <code>podedt.py</code>, 100 ms bins, 2 October 2026. Data: <a href="labs/ch12-pods/data/edt-over-rx.csv">edt-over-rx.csv</a>, <a href="labs/ch12-pods/data/edt-bigfq-rx.csv">edt-bigfq-rx.csv</a>, <a href="labs/ch12-pods/data/edt-short-rx.csv">edt-short-rx.csv</a>, <a href="labs/ch12-pods/data/edt-kept-rx.csv">edt-kept-rx.csv</a>. Hover for values.</figcaption></figure>
+      <p>The bench shows what a UDP pod loses with its socket. A sender runs <code>edt.h</code>'s arithmetic at 10M and offers 20 Mbit/s; the router drops the socket, as the host stack would; fq on <code>r1</code> has Cilium's settings. The limiter charges <code>t_last</code> for every packet it stamps, including the 7,354 that fq drops, so its clock runs to the 2 s horizon. fq holds at most 100 of the pod's packets, each for 2 s: by <a href="index.html#g-littles-law">Little's law</a>, \(100 / 2\ \text{s} = 50\) packets per second, 0.6 Mbit/s, as measured. With the socket kept and the default 212,992-byte buffer, the sender blocks before fq fills: 10.0 Mbit/s at 86 ms. That is <a href="index.html#g-backpressure">backpressure</a>, the Carousel chapter's <a href="index.html#g-deferred-completion">deferred completion</a>; an 8 MB buffer collapses again. A 100 ms horizon also cures it; a 2,000-packet flow limit keeps the rate behind a 2 s <a href="index.html#g-standing-queue">standing queue</a>.</p>
+      <p class="note">These runs use <code>edt.h</code>'s arithmetic in a user-space sender; none ran on a Cilium node.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system" id="sys-cilium-bwm" data-system="cilium-bwm">
+        <h4>Meet the system · Cilium's Bandwidth Manager</h4>
+        <p><b>What it is.</b> A feature of Cilium, the BPF-based Kubernetes network plugin, that holds each pod to its <code>kubernetes.io/egress-bandwidth</code> by stamping departure times in BPF on the host's network devices, with fq there to honour them. It also polices <code>ingress-bandwidth</code> and can make BBR the pods' congestion control.</p>
+        <p><b>Why it exists.</b> The older bandwidth CNI plugin shapes with TBF, which the docs advise against "due to scalability concerns in particular for multi-queue network interfaces". Daniel Borkmann added the EDT version in August 2020 (<code>29f4654035</code>).</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li>The annotation, parsed into bytes per second (<code>pkg/endpoint/events.go:197–244</code>, <code>bandwidth.go:158–164</code>) and kept in the <code>cilium_throttle</code> map by endpoint id and direction (<code>bpf/lib/edt.h:14–39</code>).</li>
+          <li>The BPF: <code>cil_from_container</code> tags each packet with its pod (<code>bpf_lxc.c:2435</code>), <code>cil_to_netdev</code> runs <code>edt_sched_departure()</code> (<code>bpf_host.c:1666</code>), <code>accept()</code> polices ingress (<code>local_delivery.h:155</code>).</li>
+          <li>The qdisc reconciler: <code>mq</code> with fq leaves, horizon 2 s, \(2^{15}\) buckets (<code>ops.go:94–150</code>).</li>
+          <li>The sysctls: <code>default_qdisc=fq</code> and <code>tcp_congestion_control</code> cubic or bbr (<code>bandwidth.go:220–277</code>).</li>
+        </ul>
+        <p class="here"><b>Where this chapter lives inside it.</b> The tenant learning is the annotation, a hose-model maximum per pod on egress. Detect-at-the-receiver is the split between <code>edt_sched_departure()</code> at the sender and <code>accept()</code> at the receiver; the rate loop is absent. The stamp crossing the veth is <code>t = ctx->tstamp</code> (<code>edt.h:90</code>), real only since 5.18. The limiter is <code>edt.h:89–107</code> over the fq leaves. BBR for pods is the sysctl write and the checks at <code>bandwidth.go:183, 192–196</code>.</p>
+        <p><b>Try it</b> (~5 min, no sudo, no cluster):</p>
+        <pre><code>cat /proc/sys/net/core/default_qdisc                       # the host
+unshare -Urn cat /proc/sys/net/core/default_qdisc           # any other netns, such as a kind node
+unshare -Urn cat /proc/sys/net/ipv4/tcp_congestion_control  # copied from the host at creation
+cd ~/workspace/neverinstall/cilium
+grep -n 'default_qdisc\|could not read procfs' pkg/datapath/linux/bandwidth/bandwidth.go</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026 (<code>labs/ch12-pods/data/system-card-try-it.txt</code>):</p>
+        <pre><code>fq_codel
+cat: /proc/sys/net/core/default_qdisc: No such file or directory
+cubic
+172:	if _, err := m.params.Sysctl.Read([]string{"net", "core", "default_qdisc"}); err != nil {
+173:		m.params.Log.Warn("BPF bandwidth manager could not read procfs. Disabling the feature.", logfields.Error, err)
+261:		{Name: []string{"net", "core", "default_qdisc"}, Val: "fq"},</code></pre>
+        <p><code>default_qdisc</code> exists only in the first network namespace (<code>net/core/sysctl_net_core.c:592, 845</code>). A kind node has its own, so the probe at line 172 fails and the feature turns itself off (<code>pkg/client/client.go:480–489</code> then prints <code>Disabled</code>).</p>
+        <p><b>Clean up.</b> Nothing to clean: each <code>unshare</code> namespace goes away with its command.</p>
+        <p class="drift">Stable: the EDT arithmetic, the annotation names, the 5.18 requirement for BBR. Drifting (as of October 2026, fork v1.19.6-vpc, docs 1.20): the ingress token bucket (2025), the priority annotation, the fq parameters, the Helm keys.</p>
+      </div>
+
+      <div class="system back" id="sys-so-txtime-back" data-system="so-txtime">
+        <h4>Back to <code>SO_TXTIME</code> and the ETF qdisc</h4>
+        <p>The departure-time chapter watched fq honour these stamps on the sender. Here they cross a router: since v6.11 the socket's clock becomes the skb's <code>tstamp_type</code> (<code>ip_output.c:1474</code>), so fq one hop later honours <code>CLOCK_MONOTONIC</code> and <code>CLOCK_TAI</code> stamps, and the hop zeroes <code>CLOCK_REALTIME</code> ones. The rest is in <a href="ch08.html#sys-so-txtime">the full card in the departure-time chapter</a>.</p>
+      </div>
+
+      <div class="system back" id="sys-sch-fq-back" data-system="sch-fq">
+        <h4>Back to <code>sch_fq</code></h4>
+        <p>Cilium runs fq with <code>horizon 2s buckets 32768</code> and leaves <code>flow_limit</code> at 100 (<code>ops.go:144–145</code>): a socketless pod's whole queue, with <code>flows_plimit</code> counting what the limiter stamped and fq dropped. A BPF write to <code>skb->tstamp</code> leaves the type at 0; since v7.2 fq reads such a value as monotonic, with a warning (<code>sch_fq.c:577–581</code>). The rest is in <a href="ch05.html#sys-sch-fq">the full card in the small-queues chapter</a>.</p>
+      </div>
+
+      <div class="system back" id="sys-tcp-bbr-back" data-system="tcp-bbr">
+        <h4>Back to Linux <code>tcp_bbr</code></h4>
+        <p>BBR for pods is this module made the default in each new pod's namespace, where <code>ss -ti</code> would print <code>bbr</code> on every line. On this laptop <code>tcp_available_congestion_control</code> lists <code>reno cubic</code> until <code>sudo modprobe tcp_bbr</code>. The rest is in <a href="ch10.html#sys-tcp-bbr">the full card in the BBR chapter</a>.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing; the others use the rootless bench and <code>labs/ch12-pods/</code>, and part (b) of the overload lab needs sudo. Commands paste into fish or bash.</p>
+
+      <div class="lab" id="lab-edt-by-hand">
+        <h4>Hands-on · Run <code>edt.h</code> by hand</h4>
+        <p class="labmeta">~30 min · trace by hand · paper and pencil, then two CSVs to check against</p>
+        <p><b>Task.</b> A pod annotated <code>"10M"</code>, idle for 100 ms, sends 1,514-byte frames at \(t = 0\), 0.1, 0.2, 0.3 and 5.0 ms; the third carries a TCP departure time of 4.0 ms. (a) Write each frame's departure time and <code>t_last</code>. (b) How much leaves at once after idle? (c) The pod offers 20 Mbit/s of UDP and loses its socket before fq: predict how far ahead <code>t_last</code> runs, the delivered rate under fq's 100-packet flow limit, and the delay. (d) Redo (c) with a 100 ms horizon.</p>
+        <p><b>Done when.</b> Your table has five rows, and (c) and (d) are within 10% of the steady state in <code>labs/ch12-pods/data/edt-over-rx.csv</code> and <code>edt-short-rx.csv</code>.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Follow the six lines in the limiter learning in order. A frame compares the pod's next slot with the later of now and its own TCP time, and only one branch moves <code>t_last</code> to <code>t_next</code>.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>One frame costs \(1514 \times 10^9 / 1{,}250{,}000 = 1{,}211.2\) µs. For (c), the limiter charges every frame it stamps, whether or not fq keeps it, so <code>t_last</code> gains \(1{,}651 \times 1.2112\ \text{ms} - 1\ \text{s}\) per second at 20 Mbit/s. Then apply Little's law to fq's queue.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Frame 3: \(t = \max(4.0, 0.2) = 4.0\) and \(t_\text{next} = 1.2112 + 1.2112 = 2.4224 \le 4.0\), so it keeps its TCP time and <code>t_last</code> becomes 4.0. For (c), at the horizon fq holds 100 frames, each for 2 s.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>(a) times in ms, t_last = -100 before frame 1
+frame  sent  t (own time)  t_next = t_last + 1.2112  branch        leaves at  t_last after
+ 1     0.0   0.0           -98.789                   keep its time  0.0        0.0
+ 2     0.1   0.1             1.2112                  stamp          1.2112     1.2112
+ 3     0.2   4.0 (TCP)       2.4224                  keep its time  4.0        4.0
+ 4     0.3   0.3             5.2112                  stamp          5.2112     5.2112
+ 5     5.0   5.0             6.4224                  stamp          6.4224     6.4224
+(b) one skb of any size; the next waits its own length (no credit for idle time)
+(c) t_last gains 1651 x 1.2112 ms - 1 s = 1.0 s per second: the 2 s horizon after about 2 s
+    fq: 100 frames x 2 s each  ->  100 / 2 s = 50 frames/s = 50 x 1514 x 8 = 0.61 Mbit/s, delay 2 s
+    bench: 0.59-0.62 Mbit/s from second 2, delay 1999.7 ms
+(d) t_last at most 100 ms ahead: fq holds 0.1 s x 825.6/s = 83 frames, under 100, so none dropped
+    delivered 825.6/s = 10.0 Mbit/s, delay 100 ms; the limiter drops the other 825/s
+    bench: 10.005 Mbit/s, 100.0 ms, 6,523 horizon drops in 8 s</code></pre>
+          <p><b>Expected output.</b> The table above. Frame 4 was handed down at 0.3 ms and leaves at 5.21, after frame 3: frame 3's TCP time moved the pod's clock to 4.0.</p>
+          <p><b>What this shows.</b> The pod has one timeline. A frame whose own time is later sets <code>t_last</code> to that time (<code>edt.h:95–97</code>), so the pod's next frame, from any flow, queues behind it; Carousel's aggregate stamp only adds \(\text{len}/R\) (the limiter learning). Parts (c) and (d) are the learning on BBR for pods: the drop horizon is the pod's queue in time, and without backpressure the limiter pays for drops it cannot see.</p>
+          <p><b>Common wrong turn.</b> Writing \(t_\text{next} = \max(\text{now}, t_\text{last}) + \text{len}/\text{rate}\). That delays the first frame after idle by its own 1.21 ms; <code>edt.h</code> lets it go and charges its length to the next one.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-stamp-router">
+        <h4>Hands-on · Does a departure time still work one hop later?</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3 and tcpdump</p>
+        <p><b>Task.</b> With fq on the router's <code>r1</code> and nothing that reads stamps on <code>s0</code>, send 1,000 UDP datagrams stamped 1 ms apart, each handed down 5 ms early: no <code>SO_TXTIME</code>, then <code>CLOCK_MONOTONIC</code>, <code>CLOCK_TAI</code> and <code>CLOCK_REALTIME</code> stamps. Capture at <code>r0</code> and <code>r1</code>; predict each median lateness first.</p>
+        <pre><code>cd labs/ch12-pods                           # from the dossier folder
+../common/qnet.sh                           # opens a shell inside the lab
+tc -n snd qdisc del dev s0 root
+tc -n rtr qdisc del dev r1 root
+tc -n rtr qdisc add dev r1 root fq
+ip netns exec snd ping -c 1 -q 10.0.2.1
+ip netns exec rcv python3 txtime.py --listen --seconds 600 &
+ip netns exec rtr timeout 4 tcpdump -i r0 -n -s 96 --time-stamp-precision nano -w in.pcap udp &
+ip netns exec rtr timeout 4 tcpdump -i r1 -n -s 96 --time-stamp-precision nano -w out.pcap udp &
+sleep 0.7; ip netns exec snd python3 txtime.py --dst 10.0.2.1 --count 1000 --clock mono --csv m.csv
+sleep 3; python3 txgaps.py in.pcap m.csv; python3 txgaps.py out.pcap m.csv</code></pre>
+        <p><b>Done when.</b> You have four pairs of medians and can name, for each clock, the v7.2 line that kept or cleared its stamp.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Diagram 12.3: a stamp is kept across a hop when its type is set. Which clocks set a type?</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Rerun the last three lines with <code>--no-stamp</code>, <code>--clock tai</code> and <code>--clock real</code>, and new file names. <code>skb_set_delivery_type_by_clockid()</code> (<code>skbuff.h:4469–4489</code>) maps each clock to a type.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Realtime maps to type 0, the receive-time type, so <code>skb_scrub_packet()</code> zeroes it on the veth. At <code>r1</code> expect either about +12 µs (fq waited for the stamp) or about −4.9 ms (no stamp left). <code>run-stamps.sh</code> runs all four plus a burst.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026; <code>labs/ch12-pods/data/cross-transcript.txt</code>, per-packet CSVs <code>cross-*-r0.csv</code> and <code>cross-*-r1.csv</code>):</p>
+          <pre><code>sender                 arriving at r0     leaving r1 (after fq)
+no SO_TXTIME           median -4938.6 us   median -4935.3 us  (max +15106.9 us: see the wrong turn)
+CLOCK_MONOTONIC        median -4939.3 us   median    12.4 us, p99 17.3
+CLOCK_TAI              median -4937.2 us   median    12.7 us, p99 19.5
+CLOCK_REALTIME         median -4934.9 us   median -4930.9 us
+50 mono, all at once   gap 4.5 us          gap 1000.1 us, median 13.0 us late
+fq on r1: fastpath 2008 throttled 2050</code></pre>
+          <p><b>What this shows.</b> Monotonic and TAI stamps carry a type, so <code>skb_clear_tstamp()</code> keeps them at the veth and at <code>ip_forward_finish()</code>, and fq on the router waits for them; fq converts the TAI one (<code>sch_fq.c:571–572</code>). A realtime stamp has type 0 and is zeroed like a receive time (the learning on the stamp crossing the veth; cover letter ¶3–¶5). <code>throttled 2050</code> is 1,000 + 1,000 + 50: exactly the typed stamps.</p>
+          <p><b>Common wrong turn.</b> Skipping the <code>ping</code>. The first run's first 16 packets then wait about 20 ms at <code>r1</code> for ARP, because <code>rcv</code>'s reply crosses the 20 ms netem on <code>c0</code>: the +15.1 ms maximum above. A second one: leaving fq on <code>s0</code>. Then <code>s0</code> holds every packet until its stamp, <code>r1</code> sees only past stamps, and every clock looks honoured.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-overload">
+        <h4>Hands-on · Overload a pod's limit, then do it in BPF</h4>
+        <p class="labmeta">~50 min · break a real one · (a) no sudo, needs Python 3; (b) needs sudo and clang</p>
+        <p><b>Task.</b> (a) <code>podedt.py</code> is a UDP sender with <code>edt.h</code>'s arithmetic at 10M. Through fq on <code>r1</code> with Cilium's settings, offer 8, then 20 Mbit/s, then 20 with <code>flow_limit 2000</code> or <code>--horizon-ms 100</code>. Then move fq to <code>s0</code>, where the skb still belongs to its socket, with the default buffer and with <code>--sndbuf 4194304</code>. (b) Load <code>edt_lab.bpf.c</code>, the same arithmetic in tc BPF, on <code>r1</code>, Cilium's place, and offer 20 Mbit/s with no limit in the sender.</p>
+        <pre><code>cd labs/ch12-pods                           # from the dossier folder
+../common/qnet.sh
+tc -n snd qdisc del dev s0 root
+tc -n rtr qdisc del dev r1 root
+tc -n rtr qdisc add dev r1 root fq horizon 2s buckets 32768
+ip netns exec snd ping -c 1 -q 10.0.2.1
+ip netns exec rcv python3 rxcount.py --seconds 16 &
+sleep 0.3; ip netns exec snd python3 podedt.py --dst 10.0.2.1 --limit 10M --offer 20mbit
+sleep 9; tc -n rtr -s qdisc show dev r1</code></pre>
+        <p><b>Done when.</b> You have each run's rate and delay, can say which ones Little's law predicts, and for (b) can compare the counters and <code>dmesg</code> with your prediction.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Who learns that fq dropped a packet the limiter stamped? And who, in each run, makes the sender wait?</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>For each <code>r1</code> variant, delete and re-add r1's root. For <code>s0</code>: <code>tc -n rtr qdisc del dev r1 root</code>, then <code>tc -n snd qdisc add dev s0 root fq horizon 2s buckets 32768</code>. <code>./run-overload.sh</code>, started as <code>../common/qnet.sh -- ./run-overload.sh out</code>, runs all of (a).</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>For (b), in the lab shell run <code>ip netns exec rtr sh -c 'echo $$ > rtr.pid; exec sleep 3600' &amp;</code> and, as yourself, <code>clang -O2 -g -target bpf -DRATE_BPS=1250000 -c edt_lab.bpf.c -o edt_lab.o</code>. From another terminal in this folder: <code>sudo ./load-edt.sh</code>. Send with <code>--limit 100G</code>, then <code>sudo ./load-edt.sh --show</code> and <code>sudo dmesg | grep 'fq: likely'</code>.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output, part (a)</b> (the author's runs, 2 October 2026; <code>labs/ch12-pods/data/edt-transcript.txt</code> and <code>edt-*-rx.csv</code>):</p>
+          <pre><code>run       fq on  flow_limit horizon  sndbuf      delivered (s 4-7)  delay     fq flows_plimit
+under 8M  r1     100        2 s      -           7.99-8.01 Mbit/s   0.0 ms    0
+over 20M  r1     100        2 s      -           0.59-0.62 Mbit/s   1999.7 ms 7354
+bigfq     r1     2000       2 s      -           9.99-10.01         1999.7 ms 0
+short     r1     100        100 ms   -           9.99-10.01         100.0 ms  0
+kept      s0     100        2 s      212992      9.99-10.01         85.8 ms   0
+keptbig   s0     100        2 s      8388608     0.58-0.63          1999.8 ms 7354
+podedt, over 20M: offered 13211, passed 1, stamped 8256, horizon drops 4954; 903 delivered</code></pre>
+          <p><b>What this shows.</b> The limiter cannot see fq's drops, so without backpressure its clock runs to the horizon and fq's flow limit sets the rate: \(100 / 2\ \text{s} = 50\) frames per second. A socket that blocks (the default buffer holds about 71 frames, 86 ms at 1.21 ms each) never reaches the limit (the learning on BBR for pods; EyeQ's per-CPU FIFO back-pressured TCP the same way, p. 304).</p>
+          <p><b>Part (b), not executed: needs sudo.</b> Expected from <code>edt.h:89–107</code> and <code>sch_fq.c</code>: the same numbers as "over 20M", since the program stamps on <code>r1</code> exactly what <code>podedt.py</code> stamped on <code>snd</code>. <code>--show</code> should print about 8,256 stamped and 4,954 horizon drops, and fq about 7,354 <code>flows_plimit</code>. Because the program writes a monotonic time into a UDP skb of type 0, v7.2's fq should log "fq: likely mono tstamp with tstamp_type 0" (<code>sch_fq.c:577–581</code>). A TCP flow from <code>../common/flow.py</code> keeps its <code>CLOCK_MONOTONIC</code> type and should log nothing.</p>
+          <p><b>Common wrong turn.</b> Raising the flow limit and calling it fixed. The "bigfq" run gets 10.0 Mbit/s, behind a 2 s standing queue: the horizon is a queue limit in time, and 2 s of queue is bufferbloat at any rate.</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: a pod annotated <code>"20M"</code> is always backlogged with 1,514-byte frames. How far apart does <code>edt.h</code> stamp them, and how many can be stamped ahead before it starts dropping?</p>
+        <details class="ans"><summary>Answer</summary><p>605.6 µs apart, and about 3,302 frames. "20M" is 2,500,000 bytes per second (<code>bandwidth.go:158–164</code>), so the delay is \(1514 \times 10^9 / 2{,}500{,}000 = 605.6\) µs (<code>edt.h:93</code>), and drops start 2 s ahead (<code>edt.h:104</code>): \(2\ \text{s} / 605.6\ \mu\text{s} = 3{,}302\) frames, 5 MB. Near miss: without backpressure, fq's 100-frame flow limit binds first.</p></details>
+        <p>2. Predict the value: an endpoint's meter reads \(y = 1.2\,C\) while its senders all run at 300 Mb/s. What rate does the next HACK carry with \(\alpha = 0.5\), and what would \(\alpha = 2.5\) do?</p>
+        <details class="ans"><summary>Answer</summary><p>270 Mb/s: \(300 \times (1 - 0.5 \times 0.2) = 270\) (p. 302), against a fixed point of \(300/1.2 = 250\). With \(\alpha = 2.5\), \(b = 3.5\) lies outside \(1 &lt; b &lt; 3\) and \(|1 - \alpha| = 1.5\), so each step overshoots by more than the last and the rate never settles (pp. 302–303). Near miss: "more gain settles faster", true only up to \(\alpha = 1\).</p></details>
+        <p>3. Here is a symptom: on kind with <code>bandwidthManager.enabled=true</code>, egress annotations do nothing, and the agent logged "BPF bandwidth manager could not read procfs. Disabling the feature." What happened?</p>
+        <details class="ans"><summary>Answer</summary><p>The probe could not read <code>net.core.default_qdisc</code> (<code>bandwidth.go:172–175</code>), which exists only in the first network namespace (<code>sysctl_net_core.c:592, 845</code>). A kind node is a container with its own, as <code>unshare -Urn</code> showed on the system card, so the feature turns itself off without an error (docs, "Limitations"). Near miss: missing BPF support; the programs load fine.</p></details>
+        <p>4. Here is a symptom: a UDP video pod annotated <code>"10M"</code>, with a 4 MB send buffer, offers 15 Mbit/s. Viewers get 0.6 Mbit/s, two seconds late, and the node's fq shows <code>flows_plimit</code> climbing. What happened?</p>
+        <details class="ans"><summary>Answer</summary><p>The limiter charged the pod for packets fq dropped. With 4 MB of buffer the socket never blocks before fq's 100-packet flow limit, and <code>edt.h</code> charges every stamp (lines 94–107), so <code>t_last</code> runs to the 2 s horizon. 100 packets held 2 s each is 50 per second, by Little's law, as the bench's 8 MB run showed. Fix: the default buffer (10.0 Mbit/s at 86 ms), or pacing in the application.</p></details>
+        <p>5. Choose and defend: a tenant's pods suffer from a neighbour's bursty UDP pods on other nodes. Do you set <code>kubernetes.io/ingress-bandwidth</code> on the tenant's pods, or <code>egress-bandwidth</code> on the neighbour's?</p>
+        <details class="ans"><summary>Answer</summary><p>Egress, on the neighbour's pods. A limit at the receiver controls only flows that back off on drops (p. 301); UDP does not, and by the time Cilium's ingress bucket drops a packet at delivery (<code>token_bucket.h:35–52</code>) the burst has crossed both nodes' cards. Egress acts before the packets leave (<code>bpf_host.c:1666</code>). The cost: an annotation per noisy pod, with a fixed rate and no feedback loop like EyeQ's (p. 302).</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>A tenant's share must hold per endpoint and over milliseconds, because 5 ms UDP bursts hide inside a 100 ms average. Only a sender can stop UDP, so EyeQ meters at the receiver and limits at the sender with a rate rule that settles in about 6 ms. Cilium keeps the sender's limiter without the loop: <code>edt.h</code> stamps each pod packet at \(t_\text{last} + \text{len}/\text{rate}\), and fq on the host's card waits. TCP's own stamps reach that fq only since 5.18, which marks a monotonic departure time. BBR for pods also needs the socket, and so does a UDP pod above its limit.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> D. Borkmann, M. Pumputis, "BPF datapath extensions for K8s workloads", Linux Plumbers Conference 2021, <a href="https://linuxplumbersconf.org/event/11/contributions/953/attachments/867/1658/LPC_2021_BPF_Datapath_Extensions.pdf">slides</a>. The cover letter's reference [0]; slides 19–24 draw the pod pacing problem. Read after the learning on the stamp crossing the veth.</li>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> N. Dukkipati, N. McKeown, "Why flow-completion time is the right metric for congestion control", <i>CCR</i> 36(1), 2006, <a href="https://doi.org/10.1145/1111322.1111336">doi:10.1145/1111322.1111336</a>. RCP, the rule EyeQ adapts (its ref [27]); read after the rate-loop learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> H. Ballani, P. Costa, T. Karagiannis, A. Rowstron, "Towards Predictable Datacenter Networks" (Oktopus), SIGCOMM 2011, <a href="https://doi.org/10.1145/2018436.2018465">doi:10.1145/2018436.2018465</a>. Where the tenant hose abstraction comes from (EyeQ's ref [3]); EyeQ calls its allocator too slow (p. 308).</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="tenant-timescale">A tenant's share, over milliseconds</li>
+          <li data-strand="receiver-detects">Detect at the receiver, enforce at the sender</li>
+          <li data-strand="rate-loop">One rate per receiver, in milliseconds</li>
+          <li data-strand="stamp-crosses">The stamp crosses the veth</li>
+          <li data-strand="edt-limiter">A pod's limit written as a time</li>
+          <li data-strand="bbr-for-pods">BBR for pods needs the socket too</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 12 "Pods with a speed limit" (V. Jeyakumar et al., "EyeQ: Practical Network Performance Isolation at the Edge", NSDI '13, printed pp. 297–311, selected pp. 299–305; M. KaFai Lau, "Preserve mono delivery time (EDT) in skb->tstamp", cover letter of merge 01e2d1579682, net-next 2022, first in v5.18; Cilium 1.20 docs, "Bandwidth Manager"; Cilium fork v1.19.6-vpc bpf/lib/edt.h and pkg/datapath/linux/bandwidth/), cited by printed page, cover-letter paragraph ¶1–¶5 and file:line.
+I have read the chapter and the after half of ch12.html. Lock in.
+Strands: tenant-timescale (A tenant's share, over milliseconds), receiver-detects (Detect at the receiver, enforce at the sender), rate-loop (One rate per receiver, in milliseconds), stamp-crosses (The stamp crosses the veth), edt-limiter (A pod's limit written as a time), bbr-for-pods (BBR for pods needs the socket too).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch12.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch12.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch11.html">← Where BBR loses</a><a href="index.html">All chapters</a><a href="ch13.html">Maglev (side path) →</a></nav>
+<footer>From a full buffer to BBR · chapter 12 reads V. Jeyakumar, M. Alizadeh, D. Mazières, B. Prabhakar, C. Kim, A. Greenberg, "EyeQ: Practical Network Performance Isolation at the Edge", 10th USENIX NSDI, 2013 (printed pp. 297–311; selected pp. 299–305); M. KaFai Lau, "Preserve mono delivery time (EDT) in skb->tstamp", cover letter of merge 01e2d1579682 (net-next, 3 March 2022, first in v5.18), mirrored as LWN 886698; the Cilium 1.20 documentation, "Bandwidth Manager"; and the reader's Cilium fork (v1.19.6-vpc, HEAD 8ab00248bc) with Linux v7.2. EyeQ is cited by printed page and its own § numbers, the cover letter by paragraph (¶n) or version, code by file:line. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

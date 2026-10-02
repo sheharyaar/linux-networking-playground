@@ -1,0 +1,129 @@
+    <section id="ch11" class="chapter">
+      <span class="chnum">Chapter 11</span>
+      <h2>Three generations: Pascal, Ada, Hopper</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> <span class="tag ISA">ISA</span> — Every chapter so far has ended with a table across the three benches. This one puts them side by side on purpose: what stayed the same from 2016 to 2022, what the P5000 lacks, and what only the H100 has. It ends with the support matrix that decides which software runs where.</p>
+
+      <h3>What stayed the same</h3>
+      <p>Start with what did not change, because it is most of the machine. All three benches run warps of 32 threads. Each SM has 65,536 registers and 128 FP32 lanes. The P5000 and the laptop both have 20 SMs. The programming model, the grid, blocks, warps and shared memory, is the same, and so is the idea of PTX as a portable layer above each generation's SASS. Our three matvec kernels compile for all three from the same source. What changed is how much memory bandwidth feeds those lanes, what the SM can do besides FP32 arithmetic, and the tools and drivers that still support each one.</p>
+      <p>Diagram 11.1 puts the three benches on one roofline. From the P5000 to the H100, memory bandwidth grew 11.6 times, from 288 to 3,352 GB/s, and FP32 throughput 7.5 times. The tensor cores grew far more: the H100's dense FP16 matrix throughput is about 1,000 TFLOPS. Our matvec, at 0.5 FLOP per byte, sits on the sloped part of every roof, so on every bench its speed is set by bandwidth alone. The red point is a preview of the LLM chapters. Even 64 sequences decoding at once, which turns the matvec into a small matrix multiply with 64 FLOP per byte, leaves the H100 memory-bound.</p>
+
+      <figure class="dia">
+        @@SVG:roofline3@@
+        <figcaption><b>Diagram 11.1 — The three benches on one roofline, plus the H100's tensor cores.</b> Notice that the two GDDR machines are almost the same line, and that the H100's FP32 ridge, at 20 FLOP per byte, is lower than theirs: its bandwidth grew faster than its FP32 throughput. Only the tensor-core roof, with its ridge near 300, pushes the memory-bound region far to the right.</figcaption>
+      </figure>
+
+      <h3>Pascal: what the P5000 does not have</h3>
+      <p>Pascal predates three things the rest of this document takes for granted. First, independent thread scheduling. A Pascal warp has one program counter for all 32 lanes. After a divergent branch, the hardware runs one path to completion, then the other, with no interleaving. The SASS shows it as <code>SSY</code> and <code>SYNC</code> where Ada and Hopper have <code>BSSY</code> and <code>BSYNC</code>. Code that waits inside a divergent branch for another lane of its own warp can hang on Pascal and work on Volta and later.</p>
+      <p>Second, tensor cores, and with them any fast low-precision path. On the P5000's GP104, FP16 arithmetic runs at 1/64 of the FP32 rate. What Pascal does have, from compute capability 6.1, is <code>dp4a</code>, an instruction that multiplies four pairs of 8-bit integers and adds the four products to a 32-bit sum in one step. That is why llama.cpp keeps a Pascal path: its quantised weights are small integers, and <code>dp4a</code> gives four multiply-adds per instruction (the llama.cpp chapter). Its build adds Pascal's <code>61-virtual</code> only when the toolkit is older than CUDA 13 (<code>llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt:43–44</code>).</p>
+      <p>Third, current software. CUDA 13.0 removed offline compilation for Pascal, so the P5000 needs a 12.x toolkit. The open kernel modules start at Turing, so it needs the proprietary module, and the R580 branch is reported as the last driver branch with Pascal support. Nsight Compute dropped Pascal in 2020.1, and vLLM needs compute capability 7.5. The P5000 customer runs llama.cpp.</p>
+      <p>For bpftime, Pascal is the baseline. Its kprobe pass compiles every eBPF probe to PTX for <code>sm_61</code> (<code>bpftime/attach/nv_attach_impl/pass/ptxpass_kprobe_entry/main.cpp:55</code>), so the probe code itself uses nothing newer than Pascal. The final compile of the patched module is for the GPU it runs on. On the P5000 that compile needs a PTX compiler that still accepts <code>sm_61</code>, so expect to build bpftime against a CUDA 12.x toolkit there. That is untested here.</p>
+
+      <h3>Ada: the laptop</h3>
+      <p>The laptop's Ada SM is closest to the SM this document has been describing all along, so it needs the least new vocabulary. Compared with Pascal it has independent thread scheduling, a uniform datapath for values that are the same in every lane, and fourth-generation tensor cores that accept FP8 as well as FP16, BF16 and INT8. It also has <code>cp.async</code>, from the Ampere generation. A warp issues an asynchronous copy from global to shared memory and keeps working until it needs the data, instead of loading into registers and storing to shared memory itself. Its limits are lower than the other two in one place: 48 resident warps per SM against 64, as the scheduling chapter's occupancy sums showed.</p>
+      <p>What Ada lacks is everything in the next section. Code compiled for <code>sm_90</code> or <code>sm_90a</code> does not run on it, because compute capability 8.9 is older than 9.0.</p>
+
+      <h3>Hopper: what only the H100 has</h3>
+      <p>Hopper adds a level to the scheduling hierarchy and two new ways to move data. A <b>thread block cluster</b> is a group of blocks that the work distributor guarantees to run at the same time on one <b>GPC</b>, a group of neighbouring SMs. The portable maximum is 8 blocks per cluster, and the H100 allows 16 if the kernel opts in. Blocks of one cluster can load, store and do atomics on each other's shared memory. That is <b>distributed shared memory</b>, faster than a round trip through global memory, and it gives blocks a way to cooperate that the scheduling chapter's blocks never had.</p>
+      <p>The <b>Tensor Memory Accelerator</b> (TMA) is an asynchronous copy unit. One thread describes a tile of a tensor of 1 to 5 dimensions. The TMA moves the tile between global and shared memory, or between the shared memories of a cluster, and counts the arriving bytes on an <b>mbarrier</b>, a barrier object in shared memory that warps wait on. The warps compute no addresses and issue no loads. A kernel can dedicate a few warps to issuing TMA copies and leave the rest to compute.</p>
+      <p>The compute side is <b><code>wgmma</code></b>, warpgroup matrix multiply-accumulate. A <b>warpgroup</b> is four contiguous warps whose first warp's rank is a multiple of 4. Together they issue one asynchronous matrix multiply on the tensor cores, reading its operands from shared memory, where the TMA left them; one operand may come from registers instead. Hopper's tensor cores also take FP8.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  gm[("global memory, HBM3: W as a tensor")]
+  subgraph CL["one cluster: blocks that run at the same time, on one GPC"]
+    direction LR
+    subgraph B0["block 0, on one SM"]
+      direction TB
+      s0["shared memory:<br/>a tile of W, and an mbarrier"] --> wg["warpgroup, 4 warps:<br/>wgmma multiplies from the tile"]
+    end
+    subgraph B1["block 1, on another SM"]
+      direction TB
+      s1["shared memory"]
+    end
+  end
+  gm ==>|"TMA: one thread asks for a tile;<br/>the mbarrier counts the bytes"| s0
+  s0 <-.->|"distributed shared memory:<br/>load, store, atomics"| s1
+  style wg fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 11.2 — Hopper's additions on one picture.</b> Notice that no warp computes an address or issues a load for the tile: the TMA moves it, the mbarrier says when it has arrived, and the warpgroup reads it straight from shared memory. Each feature also has its own PTX: <code>cp.async.bulk.tensor</code>, <code>mbarrier</code>, <code>wgmma.mma_async</code>, and special registers like <code>%clusterid</code>.</figcaption>
+      </figure>
+
+      <p>There is a catch in the target name. <code>wgmma</code> needs the target <code>sm_90a</code>, with a letter on the end. The PTX manual explains the suffix: generations normally follow an "onion layer model" in which code for one target runs on all later ones, and targets ending in <code>a</code> are the exception. PTX or SASS for <code>sm_90a</code> runs on compute capability 9.0 and nothing else, ever. A library shipped with only <code>sm_90a</code> code needs a rebuild for the next generation.</p>
+      <p>It matters for bpftime in a specific way. bpftime picks the target for its final compile from the device's compute capability, which on an H100 gives the string <code>sm_90</code> (<code>bpftime/attach/nv_attach_impl/nv_attach_utils.cpp:94–160</code>). An application whose PTX uses <code>wgmma</code> cannot be compiled for <code>sm_90</code>. The environment variable <code>BPFTIME_SM_ARCH</code> overrides the choice, so expect to set it to <code>sm_90a</code> for such applications. This is also untested here, and it is the first thing to try on the H100.</p>
+
+      <table class="gen">
+        <caption>The support matrix, as of October 2026</caption>
+        <tr><th></th><th>Pascal, P5000 (6.1)</th><th>Ada, laptop (8.9)</th><th>Hopper, H100 (9.0)</th></tr>
+        <tr><td>Newest toolkit that compiles for it</td><td>CUDA 12.x</td><td>CUDA 13.4</td><td>CUDA 13.4</td></tr>
+        <tr><td>Kernel module</td><td>proprietary; R580 reported as the last branch</td><td>open or proprietary; the laptop runs open 615</td><td>open or proprietary</td></tr>
+        <tr><td>Independent thread scheduling</td><td>no</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Fast low-precision path</td><td><code>dp4a</code>, 8-bit integer dot products</td><td>tensor cores, FP8 included</td><td>tensor cores, FP8, <code>wgmma</code> (<code>sm_90a</code>)</td></tr>
+        <tr><td>Asynchronous copies</td><td>no</td><td><code>cp.async</code></td><td><code>cp.async</code>, TMA</td></tr>
+        <tr><td>Clusters, distributed shared memory</td><td>no</td><td>no</td><td>yes</td></tr>
+        <tr><td>vLLM</td><td>no, needs 7.5</td><td>yes</td><td>yes</td></tr>
+        <tr><td>llama.cpp</td><td>yes, with a CUDA 12.x build</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Nsight Compute</td><td>no</td><td>yes</td><td>yes</td></tr>
+        <tr><td>bpftime final compile target</td><td><code>sm_61</code>; expect a CUDA 12.x build (untested)</td><td><code>sm_89</code>, auto-detected</td><td><code>sm_90</code>; set <code>sm_90a</code> by hand for <code>wgmma</code> code (untested)</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Repeat the scheduling chapter's occupancy sum for the H100 from real register counts, without an H100. Ask <code>ptxas</code> for the resource use of each kernel for <code>sm_90</code>:</p>
+<pre><code>cd lab/gpu
+nvcc -O3 -arch=sm_90 --resource-usage -c matvec.cu -o /dev/null 2>&amp;1 \
+    | grep -E 'entry function|registers'</code></pre>
+        <p>You should see 29, 32 and 44 registers, the SASS chapter's numbers. Round up to multiples of 8, multiply by 256 threads, divide into 65,536, and cap at 64 warps and 32 blocks. You should get 8, 8 and 5 blocks per SM. Then explain why the float4 kernel gets more warps per SM on the H100, 40 against the laptop's 32, and yet a slightly lower share of the maximum, 62.5% against 67%.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>All three benches share warps of 32, 65,536 registers and 128 FP32 lanes per SM, and the same programming model. From the P5000 to the H100, bandwidth grew 11.6 times and FP32 7.5 times, so our memory-bound matvec gains by bandwidth alone; even 64 decoding sequences stay memory-bound on the H100. Pascal lacks independent thread scheduling, tensor cores and current tools, has <code>dp4a</code>, and needs CUDA 12.x. Ada adds FP8 tensor cores and <code>cp.async</code>. Hopper adds clusters with distributed shared memory, the TMA with mbarriers, and <code>wgmma</code>, which needs the non-portable <code>sm_90a</code> target, a detail bpftime's automatic target choice does not handle.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt><code>dp4a</code></dt><dd>A Pascal-and-later instruction: four 8-bit multiply-adds into a 32-bit sum.</dd>
+          <dt><code>cp.async</code></dt><dd>An asynchronous copy from global to shared memory, from the Ampere generation.</dd>
+          <dt>thread block cluster</dt><dd>A group of blocks guaranteed to run at the same time on one GPC (Hopper).</dd>
+          <dt>GPC</dt><dd>Graphics processing cluster: a group of neighbouring SMs.</dd>
+          <dt>distributed shared memory</dt><dd>Loads, stores and atomics on the shared memory of another block in the cluster.</dd>
+          <dt>Tensor Memory Accelerator (TMA)</dt><dd>A per-SM unit that copies tensor tiles between global and shared memory.</dd>
+          <dt>mbarrier</dt><dd>A barrier object in shared memory that can count arriving bytes as well as threads.</dd>
+          <dt>warpgroup</dt><dd>Four contiguous warps that issue one <code>wgmma</code> together.</dd>
+          <dt><code>wgmma</code></dt><dd>Hopper's asynchronous warpgroup matrix multiply-accumulate, from shared memory.</dd>
+          <dt><code>sm_90a</code></dt><dd>An architecture-specific target: its code runs only on compute capability 9.0.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: when a language model generates a token, each sequence uses each FP16 weight (2 bytes) for one multiply-add (2 FLOP), so a batch of B sequences reads each weight once for B multiply-adds. About how large must B be before the H100's FP16 tensor cores become the limit on speed?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 300 sequences. The arithmetic intensity is 2B FLOP per 2 bytes, so B FLOP per byte. The tensor-core ridge is 1,000,000 GFLOPS / 3,352 GB/s ≈ 298 FLOP per byte (diagram 11.1). Below about 300 sequences, the weights take longer to read than to multiply.</p>
+          <p>It is an upper bound on the easy case. The cache of earlier tokens that the LLM chapters introduce adds bytes per sequence that are not shared across the batch, so in practice token generation stays memory-bound at even larger batches. The near-miss is to use the FP32 ridge of 20. Token generation runs on the tensor cores, whose roof is 15 times higher.</p>
+        </details>
+        <p>2. A team builds its kernels with <code>-gencode arch=compute_90a,code=sm_90a</code> only, and the library works on their H100s. What happens on a next-generation GPU with compute capability 10.0, and what would they need to ship to cover it?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It fails to load, with no kernel image for the device. The fatbin holds <code>sm_90a</code> SASS, which runs only on 9.0, and no PTX that the driver could compile for 10.0. Even <code>compute_90a</code> PTX would not help, because <code>a</code> targets are outside the onion layer model: their PTX cannot be compiled for later generations.</p>
+          <p>They need to add either SASS built for the new target, or plain <code>compute_90</code> PTX as a fallback, which the driver can compile for anything newer. That fallback cannot use <code>wgmma</code>, so it will be slower. The near-miss is to think "PTX is forward compatible" covers every PTX. It covers PTX for targets without the <code>a</code>.</p>
+        </details>
+        <p>3. The P5000 customer asks for GPU probes on their llama.cpp server. List what has to be different on their machine from the laptop's setup, layer by layer.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The driver is the proprietary module from a branch that still supports Pascal, R580 or older. The toolkit is CUDA 12.x, for llama.cpp's <code>61-virtual</code> build and for any <code>ptxas</code> or PTX compiler that must target <code>sm_61</code>. bpftime must be built against that toolkit, since its final compile targets the device's <code>sm_61</code>. For measuring, Nsight Systems 2025.3 or older and <code>nvprof</code> replace current Nsight tools.</p>
+          <p>What stays the same is the probe code. bpftime already compiles probes for <code>sm_61</code>, and helpers like <code>%globaltimer</code> and <code>%smid</code> exist on Pascal. The near-miss is to think the probe must change. The probe is fine; everything under it is older.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html">NVIDIA Hopper Tuning Guide</a>: clusters, distributed shared memory and the TMA in four short sections, with the cluster-size limits. Then <a href="https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/">NVIDIA Hopper Architecture In-Depth</a> (Andersch et al., NVIDIA blog, 2022), and the <a href="https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c">H100 whitepaper</a> for the numbers.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-instructions">PTX ISA: Asynchronous warpgroup-level matrix instructions</a>, with <a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk">bulk asynchronous copies</a> and <a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier">mbarrier</a>. The <code>sm_90a</code> rules are in the same manual's description of targets.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">NVIDIA Ada GPU Architecture</a> whitepaper, which describes the big Ada chips; the laptop's AD107 is a smaller member of the family.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.nvidia.com/cuda/pascal-tuning-guide/index.html">Pascal Tuning Guide</a> and the <a href="https://international.download.nvidia.com/geforce-com/international/pdfs/GeForce_GTX_1080_Whitepaper_FINAL.pdf">GP104 whitepaper</a>, for the P5000's chip.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://arxiv.org/abs/2402.13499">Luo et al., Benchmarking and Dissecting the Nvidia Hopper GPU Architecture</a> (2024). Measured latencies and throughputs for the H100, including the TMA and <code>wgmma</code>.</li>
+        </ul>
+      </div>
+    </section>

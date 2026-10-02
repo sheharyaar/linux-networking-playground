@@ -1,0 +1,90 @@
+<svg viewBox="0 0 720 438" role="img" aria-label="Measured goodput of two HTB customers and the packets class A sent on its own rate or borrowed" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="224.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="172.5" y2="172.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="176.5" text-anchor="end" fill="#898781">2.5</text>
+<line x1="58" x2="570" y1="125.0" y2="125.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="129.0" text-anchor="end" fill="#898781">5</text>
+<line x1="58" x2="570" y1="77.5" y2="77.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="81.5" text-anchor="end" fill="#898781">7.5</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="570" y1="220.0" y2="220.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="125.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 125.0)">goodput (Mbit/s)</text>
+<line x1="58" x2="570" y1="129.2" y2="129.2" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="133.2" fill="#898781">rate 5, minus headers</text>
+<polyline points="64.4,53.4 77.2,38.9 90.0,38.6 102.8,44.6 115.6,30.9 128.4,38.6 141.2,38.2 154.0,38.9 166.8,38.4 179.6,39.1 192.4,125.4 205.2,129.3 218.0,129.5 230.8,129.3 243.6,128.4 256.4,129.1 269.2,129.1 282.0,129.3 294.8,129.1 307.6,129.5 320.4,128.9 333.2,129.3 346.0,136.4 358.8,121.4 371.6,129.1 384.4,129.5 397.2,129.3 410.0,129.5 422.8,129.1 435.6,128.4 448.4,128.9 461.2,85.1 474.0,38.6 486.8,38.4 499.6,38.4 512.4,38.4 525.2,38.6 538.0,38.2 550.8,38.2 563.6,38.6" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="56.6" y2="56.6" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="60.6" fill="#1b1f24">customer A</text>
+<polyline points="64.4,220.0 77.2,220.0 90.0,220.0 102.8,220.0 115.6,220.0 128.4,220.0 141.2,220.0 154.0,220.0 166.8,220.0 179.6,220.0 192.4,131.3 205.2,129.1 218.0,129.3 230.8,128.9 243.6,129.1 256.4,129.1 269.2,129.1 282.0,129.1 294.8,130.0 307.6,129.3 320.4,128.9 333.2,129.3 346.0,128.9 358.8,141.6 371.6,116.1 384.4,129.3 397.2,129.1 410.0,129.3 422.8,129.5 435.6,128.2 448.4,205.7 461.2,220.0 474.0,220.0 486.8,220.0 499.6,220.0 512.4,220.0 525.2,220.0 538.0,220.0 550.8,220.0 563.6,220.0" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="201.0" y2="201.0" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="205.0" fill="#1b1f24">customer B</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">customer A</text>
+<line x1="162" x2="176" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="181" y="22" fill="#1b1f24">customer B</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="400.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="331.0" y2="331.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="335.0" text-anchor="end" fill="#898781">250</text>
+<line x1="58" x2="570" y1="266.0" y2="266.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="270.0" text-anchor="end" fill="#898781">500</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="331.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 331.0)">class A pkt/s</text>
+<polyline points="64.4,299.7 77.2,288.7 90.0,288.5 102.8,288.7 115.6,288.7 128.4,288.5 141.2,288.9 154.0,288.7 166.8,288.5 179.6,288.7 192.4,288.5 205.2,288.9 218.0,288.4 230.8,288.7 243.6,288.7 256.4,288.7 269.2,288.6 282.0,288.7 294.8,288.5 307.6,288.7 320.4,288.9 333.2,288.6 346.0,288.7 358.8,288.5 371.6,288.7 384.4,288.7 397.2,288.5 410.0,288.7 422.8,288.9 435.6,288.5 448.4,288.7 461.2,288.6 474.0,288.7 486.8,288.5 499.6,288.9 512.4,288.7 525.2,288.5 538.0,288.7 550.8,288.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="284.2" y2="284.2" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="288.2" fill="#1b1f24">own rate (lended)</text>
+<polyline points="64.4,301.3 77.2,288.5 90.0,288.7 102.8,288.7 115.6,288.5 128.4,288.7 141.2,288.9 154.0,288.5 166.8,288.7 179.6,313.3 192.4,396.0 205.2,396.0 218.0,396.0 230.8,396.0 243.6,396.0 256.4,396.0 269.2,396.0 282.0,396.0 294.8,396.0 307.6,396.0 320.4,396.0 333.2,396.0 346.0,396.0 358.8,396.0 371.6,396.0 384.4,396.0 397.2,396.0 410.0,396.0 422.8,396.0 435.6,396.0 448.4,396.0 461.2,328.9 474.0,288.5 486.8,288.7 499.6,288.9 512.4,288.5 525.2,288.7 538.0,288.7 550.8,288.6" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="310.2" y2="310.2" stroke="#eda100" stroke-width="2"/>
+<text x="590" y="314.2" fill="#1b1f24">borrowed</text>
+<line x1="66" x2="80" y1="254" y2="254" stroke="#1baf7a" stroke-width="2"/>
+<text x="85" y="258" fill="#1b1f24">own rate (lended)</text>
+<line x1="211" x2="225" y1="254" y2="254" stroke="#eda100" stroke-width="2"/>
+<text x="230" y="258" fill="#1b1f24">borrowed from 1:1</text>
+<text x="58.0" y="412.0" text-anchor="middle" fill="#898781">0</text>
+<text x="186.0" y="412.0" text-anchor="middle" fill="#898781">10</text>
+<text x="314.0" y="412.0" text-anchor="middle" fill="#898781">20</text>
+<text x="442.0" y="412.0" text-anchor="middle" fill="#898781">30</text>
+<text x="570.0" y="412.0" text-anchor="middle" fill="#898781">40</text>
+<text x="314.0" y="430.0" text-anchor="middle" fill="#4a5560">seconds since customer A started</text>
+<g class="hit"><title>t = 0.5 s · A 8.77 Mbit/s · B 0.00 Mbit/s · class A: 370 pkt/s on its own rate, 364 pkt/s borrowed</title><rect x="58.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="64.4" x2="64.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.5 s · A 9.53 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 414 pkt/s borrowed</title><rect x="70.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="77.2" x2="77.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.5 s · A 9.54 Mbit/s · B 0.00 Mbit/s · class A: 414 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="83.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="90.0" x2="90.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.5 s · A 9.23 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="96.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="102.8" x2="102.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.5 s · A 9.95 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 414 pkt/s borrowed</title><rect x="109.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="115.6" x2="115.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.5 s · A 9.54 Mbit/s · B 0.00 Mbit/s · class A: 414 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="122.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="128.4" x2="128.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.5 s · A 9.57 Mbit/s · B 0.00 Mbit/s · class A: 412 pkt/s on its own rate, 412 pkt/s borrowed</title><rect x="134.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="141.2" x2="141.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 7.5 s · A 9.53 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 414 pkt/s borrowed</title><rect x="147.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="154.0" x2="154.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 8.5 s · A 9.56 Mbit/s · B 0.00 Mbit/s · class A: 414 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="160.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="166.8" x2="166.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 9.5 s · A 9.52 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 318 pkt/s borrowed</title><rect x="173.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="179.6" x2="179.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 10.5 s · A 4.98 Mbit/s · B 4.67 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="186.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="192.4" x2="192.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 11.5 s · A 4.77 Mbit/s · B 4.78 Mbit/s · class A: 412 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="198.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="205.2" x2="205.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 12.5 s · A 4.76 Mbit/s · B 4.77 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="211.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="218.0" x2="218.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 13.5 s · A 4.77 Mbit/s · B 4.80 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="224.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="230.8" x2="230.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 14.5 s · A 4.82 Mbit/s · B 4.78 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="237.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="243.6" x2="243.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 15.5 s · A 4.78 Mbit/s · B 4.78 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="250.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="256.4" x2="256.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 16.5 s · A 4.78 Mbit/s · B 4.78 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="262.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="269.2" x2="269.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 17.5 s · A 4.77 Mbit/s · B 4.78 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="275.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="282.0" x2="282.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 18.5 s · A 4.78 Mbit/s · B 4.74 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="288.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="294.8" x2="294.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 19.5 s · A 4.76 Mbit/s · B 4.77 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="301.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="307.6" x2="307.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 20.5 s · A 4.80 Mbit/s · B 4.80 Mbit/s · class A: 412 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="314.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="320.4" x2="320.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 21.5 s · A 4.77 Mbit/s · B 4.77 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="326.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="333.2" x2="333.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 22.5 s · A 4.40 Mbit/s · B 4.80 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="339.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="346.0" x2="346.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 23.5 s · A 5.19 Mbit/s · B 4.12 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="352.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="358.8" x2="358.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 24.5 s · A 4.78 Mbit/s · B 5.47 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="365.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="371.6" x2="371.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 25.5 s · A 4.76 Mbit/s · B 4.77 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="378.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="384.4" x2="384.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 26.5 s · A 4.77 Mbit/s · B 4.78 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="390.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="397.2" x2="397.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 27.5 s · A 4.76 Mbit/s · B 4.77 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="403.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="410.0" x2="410.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 28.5 s · A 4.78 Mbit/s · B 4.76 Mbit/s · class A: 412 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="416.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="422.8" x2="422.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 29.5 s · A 4.82 Mbit/s · B 4.83 Mbit/s · class A: 414 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="429.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="435.6" x2="435.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 30.5 s · A 4.80 Mbit/s · B 0.75 Mbit/s · class A: 413 pkt/s on its own rate, 0 pkt/s borrowed</title><rect x="442.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="448.4" x2="448.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 31.5 s · A 7.10 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 258 pkt/s borrowed</title><rect x="454.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="461.2" x2="461.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 32.5 s · A 9.54 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 414 pkt/s borrowed</title><rect x="467.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="474.0" x2="474.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 33.5 s · A 9.56 Mbit/s · B 0.00 Mbit/s · class A: 414 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="480.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="486.8" x2="486.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 34.5 s · A 9.56 Mbit/s · B 0.00 Mbit/s · class A: 412 pkt/s on its own rate, 412 pkt/s borrowed</title><rect x="493.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="499.6" x2="499.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 35.5 s · A 9.56 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 414 pkt/s borrowed</title><rect x="506.0" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="512.4" x2="512.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 36.5 s · A 9.54 Mbit/s · B 0.00 Mbit/s · class A: 414 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="518.8" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="525.2" x2="525.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 37.5 s · A 9.57 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="531.6" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="538.0" x2="538.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 38.5 s · A 9.57 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="544.4" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="550.8" x2="550.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 39.5 s · A 9.54 Mbit/s · B 0.00 Mbit/s · class A: 413 pkt/s on its own rate, 413 pkt/s borrowed</title><rect x="557.2" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="563.6" x2="563.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>

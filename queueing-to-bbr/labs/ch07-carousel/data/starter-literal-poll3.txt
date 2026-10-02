@@ -1,0 +1,6 @@
+# 2026-10-02T15:17:20+05:30 7.2.6-arch2-1
+$ python3 wheel_starter.py --literal --flows 100 --releases 20000 --poll 3
+g = 1 us, poll every 3 slot(s), 20000 releases per run, 12 Gbit/s in total
+   scheduler   flows  queued   horizon  released        error (us)  ops/pkt  ns/pkt
+        heap     100     200     0.8ms     20001      +0.0 .. +3.0      8.8     826
+alg1-literal     100     200     0.8ms        53 -0.3 .. +152999.9      0.0  611772

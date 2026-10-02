@@ -1,0 +1,8 @@
+pacing_rate 1345672bps/1000000000bps
+pacing_rate 2022744bps/1000000000bps
+pacing_rate 3057376bps
+pacing_rate 1207216bps
+pacing_rate 958424bps
+pacing_rate 1247688bps
+pacing_rate 1162392bps
+pacing_rate 945600bps

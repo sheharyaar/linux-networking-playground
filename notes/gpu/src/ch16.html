@@ -1,0 +1,115 @@
+    <section id="ch16" class="chapter">
+      <span class="chnum">Chapter 16</span>
+      <h2>Prefill, decode and the KV cache</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag LLM">LLM</span> — The last chapter ran the model for one new token. A real request runs it on a whole prompt first, then once per generated token, and the two runs have opposite characters: one is limited by arithmetic, the other by memory. This chapter names the two phases, introduces the cache that makes the second one affordable, and turns both into the latency numbers servers report: time to first token and time per token.</p>
+
+      <h3>Two phases with opposite characters</h3>
+      <p>A request arrives with a prompt of P tokens. The server first runs the model once over all P tokens together. This is <b>prefill</b>. Every weight matrix now multiplies a matrix with P columns, one per token, instead of a single vector: a matrix-matrix multiply, a <b>GEMM</b>. Each weight is read once and used P times, so in 16-bit the arithmetic intensity is about P FLOP per byte. A prompt of a few hundred tokens is already past the H100's tensor-core ridge, so prefill is compute-bound. Prefill leaves two results. Its logits for the last position give the first generated token. And every layer's key and value for every prompt position are kept, as the next section explains.</p>
+      <p>Then the server generates. Each step runs the model on one new token per sequence. This is <b>decode</b>, and for a single sequence it is exactly the last chapter's 169 matvecs: memory-bound, about 1 FLOP per byte. Decode repeats until the model emits an end-of-sequence token or reaches a length limit.</p>
+      <p>The two phases map onto the two numbers every LLM server reports. <b>Time to first token</b> (TTFT) is the time from the request's arrival to its first token: waiting in the queue, then prefill, then sampling. <b>Inter-token latency</b> (ITL), also called time per output token, is the time between later tokens, which is one decode step. vLLM measures TTFT from the moment the request arrived at the engine (<code>vllm/v1/metrics/stats.py:473</code>, with the arrival time set at <code>vllm/v1/engine/input_processor.py:370</code>), so queueing counts.</p>
+
+      <figure class="dia">
+        @@SVG:timeline@@
+        <figcaption><b>Diagram 16.1 — One request's life.</b> Notice that prefill produces the first token by itself, and every later token costs one decode step. A long prompt makes TTFT long; a large batch or a long context makes every decode step, and so ITL, long.</figcaption>
+      </figure>
+
+      <h3>The KV cache</h3>
+      <p>Diagram 15.2 showed that when a new token attends, the keys and values of the earlier tokens are exactly what they were when those tokens were new. So the server computes each token's key and value once, in every layer, and keeps them. The store is the <b>KV cache</b>. Each decode step writes one new key and value per layer and reads all the stored ones. Without the cache, step t would recompute keys and values for all t tokens so far, and generating n tokens would cost work growing with n².</p>
+      <p>The cache's size per token follows from the model's shape: a key and a value, in every layer, for every key-value head, of the head's length, in the cache's number format. For Qwen2.5-0.5B in 16-bit that is 2 × 24 layers × 2 heads × 64 × 2 bytes = 12,288 bytes per token. In llama.cpp the cache is two tensors per layer, one for keys and one for values, each with one row of 128 entries per token slot (<code>llama.cpp/src/llama-kv-cache.cpp:233–234</code>). It is F16 unless you choose otherwise (<code>llama.cpp/common/common.h:589</code>), and its size is printed at start-up (<code>llama-kv-cache.cpp:300–303</code>).</p>
+
+      <figure class="dia">
+        @@SVG:kvgrid@@
+        <figcaption><b>Diagram 16.2 — The KV cache, layers by tokens.</b> Notice the two different writes: prefill fills a whole block of columns in one pass, decode adds one column per step. And notice the orange arrow: every decode step reads the whole width, so the cost of attention grows with the length of the conversation.</figcaption>
+      </figure>
+
+      <table class="gen">
+        <caption>KV cache per token in 16-bit, from each model's config</caption>
+        <tr><th>Model</th><th>Layers × KV heads × head size</th><th>Per token</th><th>A 4,096-token sequence</th></tr>
+        <tr><td>Qwen2.5-0.5B</td><td>24 × 2 × 64</td><td>12,288 bytes</td><td>48 MiB</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>28 × 4 × 128</td><td>57,344 bytes</td><td>224 MiB</td></tr>
+        <tr><td>Llama-3.1-8B</td><td>32 × 8 × 128</td><td>131,072 bytes</td><td>512 MiB</td></tr>
+      </table>
+
+      <h3>What one decode step reads</h3>
+      <p>A server rarely decodes one sequence at a time. It runs a batch of B sequences in each step, and the weights are read once for the whole batch: every weight matrix multiplies a B-column matrix, and the intensity rises to about B FLOP per byte. The cache is different. Each sequence has its own keys and values, and each step reads all of them. So one decode step moves, at least, the weights once plus every cached token of every sequence in the batch.</p>
+      <p>Put numbers on it for Llama-3.1-8B in BF16 on an H100. The weights are about 16 GB. A token reads all of them except the embedding table, of which it reads one row, so about 15 GB, which take 4.5 ms to read at 3,352 GB/s. One sequence with 4,096 tokens of context adds 512 MiB of cache, another 0.16 ms. Sixty-four such sequences add 34 GB, 10.3 ms. So a step for 64 users takes at least about 15 ms instead of 5. Each user sees a token every 15 ms instead of every 5. The server makes 64 tokens per step instead of one, about 4,300 tokens per second instead of 200. Batching buys throughput with latency, and at long contexts the cache is most of what each step reads.</p>
+
+      <figure class="dia">
+        @@SVG:rooflinellm@@
+        <figcaption><b>Diagram 16.3 — Prefill and decode on the H100's tensor-core roofline.</b> Notice where the three points sit. One sequence decoding uses 0.3% of the tensor cores. Sixty-four still sit on the slope, and the cache reads, which the diagram leaves out, push them further left. A 4,096-token prefill is on the flat roof: for prefill the GPU's arithmetic is the limit.</figcaption>
+      </figure>
+
+      <p>Prefill on the same machine is the other extreme. A 4,096-token prompt for Llama-3.1-8B is about 2 × 8 billion × 4,096 ≈ 66 TFLOP for the matrices, plus attention. Attention's work grows with P², because each of P tokens attends to all those before it, about P²/2 pairs. At the H100's roof of about 1,000 TFLOPS that is some 70 ms at best, and real kernels reach a fraction of the roof. So one long prompt takes as long as about 14 decode steps of a single sequence, or several of a full batch of 64, and every sequence in the same batch waits for it. That is the tension the next chapter's scheduler has to manage.</p>
+
+      <h3>Where the time goes, for observation</h3>
+      <p>Put the last two sections together and you have the map the language-model part (Part V) has been building towards. TTFT is queue time plus prefill. Prefill time is large GEMMs, whose speed is set by the tensor cores, plus attention over P²/2 token pairs. ITL is one decode step for the whole batch. It is set by memory: the weights once, through GEMV-like kernels with B columns, and the cache of every sequence, through attention kernels whose time grows with context. A probe that times the GEMMs and the attention kernels separately, for each step, can tell you which of those is moving when latency changes. The observing chapter builds exactly that.</p>
+
+      <table class="gen">
+        <caption>How much cache fits, roughly, after the weights, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000, 16 GB)</th><th>Ada (laptop, 6 GB)</th><th>Hopper (H100, 80 GB)</th></tr>
+        <tr><td>Model and weight format</td><td>Qwen2.5-7B, a 4-bit llama.cpp file, about 4.7 GB</td><td>Qwen2.5-0.5B, Q8_0, 0.68 GB</td><td>Llama-3.1-8B, BF16, 16 GB</td></tr>
+        <tr><td>Left for cache, keeping about 1 GB spare</td><td>about 10 GB</td><td>about 4 GB</td><td>about 60 GB, before vLLM's own reserve</td></tr>
+        <tr><td>Tokens of 16-bit cache that fit</td><td>about 175,000</td><td>about 325,000</td><td>about 460,000</td></tr>
+        <tr><td>Decode step, one short sequence, at least</td><td>15 ms for the 4.4 GB a token reads, at 288 GB/s</td><td>2.4 ms</td><td>4.5 ms</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>llama.cpp's benchmark tool measures the two phases separately: <code>pp</code> is prompt processing, prefill, and <code>tg</code> is text generation, decode, both in tokens per second. With the dGPU in Hybrid mode, and before you run it, write down a prediction for <code>tg128</code> from the first question of the transformer chapter (chapter 15):</p>
+<pre><code>cd ~/workspace/repos/llama.cpp
+./build/bin/llama-bench -m qwen2.5-0.5b-instruct-q8_0.gguf \
+    -p 512 -n 128 -ngl 99
+./build/bin/llama-completion -m qwen2.5-0.5b-instruct-q8_0.gguf \
+    -c 4096 -n 8 -p hi -ngl 99 -no-cnv 2&gt;&amp;1 | grep llama_kv_cache</code></pre>
+        <p>The first line should show <code>pp512</code> many times larger than <code>tg128</code>: prefill uses each weight 512 times per read, decode once. The second shows the cache's size line; check it against the table before you look.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A request is a prefill over its whole prompt, matrix-matrix work that is usually compute-bound and produces the first token, then one decode step per further token, matrix-vector work that is memory-bound. TTFT is queueing plus prefill; ITL is one decode step. The KV cache keeps every layer's key and value for every token, 12,288 bytes per token for Qwen2.5-0.5B and 131,072 for Llama-3.1-8B, so decode never recomputes them. A decode step reads the weights once for the whole batch and every cached token of every sequence, so batching raises throughput, costs latency, and is limited by cache memory. Prefill's attention grows with the square of the prompt length.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>prefill</dt><dd>Running the model over the whole prompt in one pass; it fills the cache and yields the first token.</dd>
+          <dt>decode</dt><dd>One model step per new token per sequence, reading the cache.</dd>
+          <dt>GEMM</dt><dd>General matrix-matrix multiply; GEMV is the matrix-vector case.</dd>
+          <dt>time to first token (TTFT)</dt><dd>Arrival to first token: queueing, prefill and sampling.</dd>
+          <dt>inter-token latency (ITL)</dt><dd>Time between later tokens of one request: one decode step.</dd>
+          <dt>KV cache</dt><dd>The stored keys and values of every earlier token, in every layer.</dd>
+          <dt>batch</dt><dd>The set of sequences processed together in one step.</dd>
+          <dt>throughput</dt><dd>Tokens produced per second across all sequences.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: what size does llama.cpp print for the KV cache of Qwen2.5-0.5B with a 4,096-token context and the default cache type, and how is it split?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>48.00 MiB: 24 MiB of keys and 24 MiB of values. Each token slot holds 12,288 bytes across all layers, half keys and half values, and 4,096 × 12,288 bytes is 50,331,648 bytes, exactly 48 MiB.</p>
+          <p>The line also says 24 layers and F16 for both K and V. The near-miss is to use 14 heads. The cache stores the 2 key-value heads; the 14 query heads are computed each step and never stored.</p>
+        </details>
+        <p>2. On the H100, how many Llama-3.1-8B sequences of 4,096 tokens each can decode together in BF16 before the cache no longer fits, and what does that say about what limits a serving GPU?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Roughly 110. The weights take about 16 GB of the 80, and each sequence's cache takes 512 MiB, about 0.54 GB, so at most about 64 / 0.54 ≈ 119 fit before counting activations and the framework's own reserve. Batch 128 would need about 69 GB of cache: it does not fit.</p>
+          <p>Diagram 16.3 says a larger batch would still be under the tensor-core roof, so the GPU's arithmetic is not what stops it. Memory capacity for the cache is. That is why the next chapter's server spends so much effort managing cache memory, and why GQA's sevenfold saving matters. The near-miss is to answer with the roofline's ridge of about 300 sequences. The cache runs out first.</p>
+        </details>
+        <p>3. A user reports that TTFT for a 32,000-token document is far more than 8 times the TTFT for a 4,000-token one, while ITL afterwards is only somewhat worse. Explain both halves.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Prefill has two parts. The matrix part grows with the prompt length P, 8 times for 8 times the tokens. Attention compares each token with all those before it, about P²/2 pairs, so it grows 64 times. At 32,000 tokens attention is a large share of prefill, so TTFT grows much faster than 8 times.</p>
+          <p>Each decode step reads the weights once and the cache once. The cache is now 8 times larger, but the weights did not change, so the step grows by the cache's share only, and the user sees "somewhat worse". The near-miss is to call prefill purely compute-bound and linear. It is compute-bound, and its attention part is quadratic.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/2211.05102">Pope et al., Efficiently Scaling Transformer Inference</a> (2022). The cost model of prefill and decode, with batch size and memory as the axes. The source of this chapter's way of counting.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/1911.02150">Shazeer, Fast Transformer Decoding: One Write-Head is All You Need</a> (2019). The bandwidth argument for sharing key-value heads, the ancestor of GQA.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://developer.nvidia.com/blog/llm-benchmarking-fundamental-concepts">LLM Inference Benchmarking: Fundamental Concepts</a> (NVIDIA blog, 2025). TTFT, ITL and their measurement conventions.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://developer.nvidia.com/blog/mastering-llm-techniques-inference-optimization/">Mastering LLM Techniques: Inference Optimization</a> (NVIDIA blog, 2023). Prefill, decode, the KV cache and batching, as a practitioner's overview.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/2205.14135">Dao et al., FlashAttention</a> (2022). How attention's P² work is done without P² memory traffic.</li>
+        </ul>
+      </div>
+    </section>

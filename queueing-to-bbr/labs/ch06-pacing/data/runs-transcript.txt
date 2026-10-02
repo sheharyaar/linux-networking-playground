@@ -1,0 +1,450 @@
+flow send: none-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16641608 bytes acked in 16.23 s = 8.20 Mbit/s, Jain 0.978, total_retrans=551, rows=12792
+flow send: fq-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16345660 bytes acked in 15.51 s = 8.43 Mbit/s, Jain 0.989, total_retrans=538, rows=12232
+flow send: timer-1 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 16087332 bytes acked in 15.42 s = 8.35 Mbit/s, Jain 0.989, total_retrans=515, rows=12152
+flow send: fq100-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 15868300 bytes acked in 15.41 s = 8.24 Mbit/s, Jain 0.980, total_retrans=637, rows=12160
+flow send: none-nosack-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16298456 bytes acked in 15.81 s = 8.25 Mbit/s, Jain 0.988, total_retrans=555, rows=12464
+flow send: fq-nosack-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16112484 bytes acked in 15.59 s = 8.27 Mbit/s, Jain 0.978, total_retrans=496, rows=12296
+flow send: none-b85-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17304584 bytes acked in 15.73 s = 8.80 Mbit/s, Jain 0.988, total_retrans=390, rows=12400
+flow send: fq-b85-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17714664 bytes acked in 16.11 s = 8.80 Mbit/s, Jain 0.982, total_retrans=389, rows=12712
+flow send: none-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16106788 bytes acked in 15.56 s = 8.28 Mbit/s, Jain 0.986, total_retrans=528, rows=12272
+flow send: fq-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16539084 bytes acked in 15.77 s = 8.39 Mbit/s, Jain 0.993, total_retrans=548, rows=12432
+flow send: timer-2 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 16332556 bytes acked in 15.57 s = 8.39 Mbit/s, Jain 0.988, total_retrans=531, rows=12288
+flow send: fq100-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 15910220 bytes acked in 15.52 s = 8.20 Mbit/s, Jain 0.980, total_retrans=643, rows=12240
+flow send: none-nosack-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16115692 bytes acked in 15.79 s = 8.17 Mbit/s, Jain 0.997, total_retrans=552, rows=12456
+flow send: fq-nosack-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16235132 bytes acked in 15.67 s = 8.29 Mbit/s, Jain 0.974, total_retrans=483, rows=12352
+flow send: none-b85-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17450576 bytes acked in 15.86 s = 8.80 Mbit/s, Jain 0.986, total_retrans=382, rows=12496
+flow send: fq-b85-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17273668 bytes acked in 15.71 s = 8.80 Mbit/s, Jain 0.985, total_retrans=393, rows=12400
+flow send: none-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16403612 bytes acked in 16.05 s = 8.18 Mbit/s, Jain 0.980, total_retrans=534, rows=12648
+flow send: fq-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16754940 bytes acked in 15.95 s = 8.40 Mbit/s, Jain 0.985, total_retrans=559, rows=12576
+flow send: timer-3 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 16360504 bytes acked in 15.70 s = 8.34 Mbit/s, Jain 0.992, total_retrans=514, rows=12368
+flow send: fq100-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16062704 bytes acked in 15.59 s = 8.24 Mbit/s, Jain 0.996, total_retrans=631, rows=12288
+flow send: none-nosack-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16020024 bytes acked in 15.66 s = 8.18 Mbit/s, Jain 0.991, total_retrans=518, rows=12352
+flow send: fq-nosack-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16446484 bytes acked in 15.86 s = 8.29 Mbit/s, Jain 0.987, total_retrans=521, rows=12528
+flow send: none-b85-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16989136 bytes acked in 15.45 s = 8.80 Mbit/s, Jain 0.975, total_retrans=384, rows=12176
+flow send: fq-b85-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17413576 bytes acked in 15.85 s = 8.79 Mbit/s, Jain 0.992, total_retrans=400, rows=12504
+flow send: none-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16657568 bytes acked in 16.14 s = 8.26 Mbit/s, Jain 0.989, total_retrans=534, rows=12736
+flow send: fq-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16438412 bytes acked in 15.67 s = 8.39 Mbit/s, Jain 0.991, total_retrans=561, rows=12360
+flow send: timer-4 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 16274924 bytes acked in 15.51 s = 8.39 Mbit/s, Jain 0.988, total_retrans=516, rows=12248
+flow send: fq100-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 15918956 bytes acked in 15.59 s = 8.17 Mbit/s, Jain 0.993, total_retrans=643, rows=12296
+flow send: none-nosack-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16432412 bytes acked in 16.17 s = 8.13 Mbit/s, Jain 0.979, total_retrans=574, rows=12752
+flow send: fq-nosack-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16327324 bytes acked in 15.78 s = 8.28 Mbit/s, Jain 0.986, total_retrans=480, rows=12456
+flow send: none-b85-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17455632 bytes acked in 15.87 s = 8.80 Mbit/s, Jain 0.988, total_retrans=374, rows=12512
+flow send: fq-b85-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17380776 bytes acked in 15.80 s = 8.80 Mbit/s, Jain 0.995, total_retrans=387, rows=12472
+flow send: none-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16645836 bytes acked in 16.02 s = 8.31 Mbit/s, Jain 0.982, total_retrans=544, rows=12640
+flow send: fq-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16422168 bytes acked in 15.61 s = 8.42 Mbit/s, Jain 0.990, total_retrans=534, rows=12312
+flow send: timer-5 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 16633892 bytes acked in 15.79 s = 8.43 Mbit/s, Jain 0.989, total_retrans=535, rows=12464
+flow send: fq100-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 15997204 bytes acked in 15.56 s = 8.22 Mbit/s, Jain 0.995, total_retrans=642, rows=12264
+flow send: none-nosack-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16474668 bytes acked in 16.06 s = 8.21 Mbit/s, Jain 0.980, total_retrans=559, rows=12672
+flow send: fq-nosack-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 16260880 bytes acked in 15.66 s = 8.31 Mbit/s, Jain 0.989, total_retrans=491, rows=12344
+flow send: none-b85-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17433488 bytes acked in 15.85 s = 8.80 Mbit/s, Jain 0.988, total_retrans=390, rows=12496
+flow send: fq-b85-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 17701352 bytes acked in 16.10 s = 8.80 Mbit/s, Jain 0.973, total_retrans=396, rows=12704
+flow send: one-none-1 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9503789 bytes acked in 10.13 s = 7.50 Mbit/s, Jain 1.000, total_retrans=42, rows=1003
+flow send: one-fq-1 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9466121 bytes acked in 10.23 s = 7.40 Mbit/s, Jain 1.000, total_retrans=80, rows=1013
+flow send: one-none-2 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9422045 bytes acked in 10.05 s = 7.50 Mbit/s, Jain 1.000, total_retrans=41, rows=996
+flow send: one-fq-2 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9476601 bytes acked in 10.23 s = 7.41 Mbit/s, Jain 1.000, total_retrans=80, rows=1013
+flow send: one-none-3 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9422045 bytes acked in 10.05 s = 7.50 Mbit/s, Jain 1.000, total_retrans=41, rows=995
+flow send: one-fq-3 1 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 9214601 bytes acked in 10.02 s = 7.36 Mbit/s, Jain 1.000, total_retrans=77, rows=992
+flow send: mix300-k0-1 completion mean: paced nan s (0 flows), unpaced 1.224 s (8 flows), all 1.224 s
+flow send: mix300-k0-1 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=131, rows=1232
+flow send: mix300-k1-1 completion mean: paced 1.213 s (1 flows), unpaced 1.207 s (7 flows), all 1.208 s
+flow send: mix300-k1-1 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.61 s = 6.25 Mbit/s, Jain 1.000, total_retrans=122, rows=1272
+flow send: mix300-k2-1 completion mean: paced 1.403 s (2 flows), unpaced 1.195 s (6 flows), all 1.247 s
+flow send: mix300-k2-1 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.59 Mbit/s, Jain 1.000, total_retrans=120, rows=1208
+flow send: mix300-k4-1 completion mean: paced 1.254 s (4 flows), unpaced 1.055 s (4 flows), all 1.154 s
+flow send: mix300-k4-1 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.76 Mbit/s, Jain 1.000, total_retrans=90, rows=1176
+flow send: mix300-k6-1 completion mean: paced 1.181 s (6 flows), unpaced 1.483 s (2 flows), all 1.256 s
+flow send: mix300-k6-1 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.40 Mbit/s, Jain 1.000, total_retrans=91, rows=1240
+flow send: mix300-k7-1 completion mean: paced 1.327 s (7 flows), unpaced 1.067 s (1 flows), all 1.295 s
+flow send: mix300-k7-1 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.68 Mbit/s, Jain 1.000, total_retrans=99, rows=1192
+flow send: mix300-k8-1 completion mean: paced 1.261 s (8 flows), unpaced nan s (0 flows), all 1.261 s
+flow send: mix300-k8-1 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.40 s = 7.20 Mbit/s, Jain 1.000, total_retrans=105, rows=1104
+flow send: mix300r100-k4-1 completion mean: paced 1.367 s (4 flows), unpaced 1.144 s (4 flows), all 1.255 s
+flow send: mix300r100-k4-1 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.63 Mbit/s, Jain 1.000, total_retrans=102, rows=1200
+flow send: mix300-k0-2 completion mean: paced nan s (0 flows), unpaced 1.185 s (8 flows), all 1.185 s
+flow send: mix300-k0-2 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.68 Mbit/s, Jain 1.000, total_retrans=125, rows=1192
+flow send: mix300-k1-2 completion mean: paced 1.204 s (1 flows), unpaced 1.190 s (7 flows), all 1.192 s
+flow send: mix300-k1-2 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.68 s = 6.00 Mbit/s, Jain 1.000, total_retrans=118, rows=1328
+flow send: mix300-k2-2 completion mean: paced 1.295 s (2 flows), unpaced 1.263 s (6 flows), all 1.271 s
+flow send: mix300-k2-2 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.66 s = 6.05 Mbit/s, Jain 1.000, total_retrans=122, rows=1312
+flow send: mix300-k4-2 completion mean: paced 1.288 s (4 flows), unpaced 1.161 s (4 flows), all 1.225 s
+flow send: mix300-k4-2 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.38 Mbit/s, Jain 1.000, total_retrans=111, rows=1248
+flow send: mix300-k6-2 completion mean: paced 1.238 s (6 flows), unpaced 1.223 s (2 flows), all 1.234 s
+flow send: mix300-k6-2 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.41 s = 7.12 Mbit/s, Jain 1.000, total_retrans=86, rows=1120
+flow send: mix300-k7-2 completion mean: paced 1.220 s (7 flows), unpaced 1.525 s (1 flows), all 1.258 s
+flow send: mix300-k7-2 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.45 Mbit/s, Jain 1.000, total_retrans=93, rows=1232
+flow send: mix300-k8-2 completion mean: paced 1.334 s (8 flows), unpaced nan s (0 flows), all 1.334 s
+flow send: mix300-k8-2 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.58 Mbit/s, Jain 1.000, total_retrans=107, rows=1208
+flow send: mix300r100-k4-2 completion mean: paced 1.252 s (4 flows), unpaced 1.148 s (4 flows), all 1.200 s
+flow send: mix300r100-k4-2 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.38 Mbit/s, Jain 1.000, total_retrans=87, rows=1248
+flow send: mix300-k0-3 completion mean: paced nan s (0 flows), unpaced 1.267 s (8 flows), all 1.267 s
+flow send: mix300-k0-3 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=137, rows=1288
+flow send: mix300-k1-3 completion mean: paced 1.311 s (1 flows), unpaced 1.173 s (7 flows), all 1.191 s
+flow send: mix300-k1-3 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.68 s = 5.99 Mbit/s, Jain 1.000, total_retrans=120, rows=1328
+flow send: mix300-k2-3 completion mean: paced 1.481 s (2 flows), unpaced 1.165 s (6 flows), all 1.244 s
+flow send: mix300-k2-3 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.57 Mbit/s, Jain 1.000, total_retrans=123, rows=1216
+flow send: mix300-k4-3 completion mean: paced 1.360 s (4 flows), unpaced 1.111 s (4 flows), all 1.235 s
+flow send: mix300-k4-3 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.47 Mbit/s, Jain 1.000, total_retrans=116, rows=1232
+flow send: mix300-k6-3 completion mean: paced 1.279 s (6 flows), unpaced 1.231 s (2 flows), all 1.267 s
+flow send: mix300-k6-3 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.38 s = 7.28 Mbit/s, Jain 1.000, total_retrans=92, rows=1096
+flow send: mix300-k7-3 completion mean: paced 1.275 s (7 flows), unpaced 1.268 s (1 flows), all 1.274 s
+flow send: mix300-k7-3 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.45 Mbit/s, Jain 1.000, total_retrans=98, rows=1232
+flow send: mix300-k8-3 completion mean: paced 1.239 s (8 flows), unpaced nan s (0 flows), all 1.239 s
+flow send: mix300-k8-3 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=104, rows=1240
+flow send: mix300r100-k4-3 completion mean: paced 1.239 s (4 flows), unpaced 1.056 s (4 flows), all 1.147 s
+flow send: mix300r100-k4-3 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.77 Mbit/s, Jain 1.000, total_retrans=99, rows=1176
+flow send: mix300-k0-4 completion mean: paced nan s (0 flows), unpaced 1.212 s (8 flows), all 1.212 s
+flow send: mix300-k0-4 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.48 s = 6.80 Mbit/s, Jain 1.000, total_retrans=131, rows=1168
+flow send: mix300-k1-4 completion mean: paced 1.477 s (1 flows), unpaced 1.125 s (7 flows), all 1.169 s
+flow send: mix300-k1-4 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.76 Mbit/s, Jain 1.000, total_retrans=119, rows=1176
+flow send: mix300-k2-4 completion mean: paced 1.279 s (2 flows), unpaced 1.210 s (6 flows), all 1.227 s
+flow send: mix300-k2-4 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.40 Mbit/s, Jain 1.000, total_retrans=130, rows=1240
+flow send: mix300-k4-4 completion mean: paced 1.363 s (4 flows), unpaced 1.184 s (4 flows), all 1.273 s
+flow send: mix300-k4-4 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.37 Mbit/s, Jain 1.000, total_retrans=103, rows=1248
+flow send: mix300-k6-4 completion mean: paced 1.303 s (6 flows), unpaced 1.250 s (2 flows), all 1.290 s
+flow send: mix300-k6-4 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=97, rows=1232
+flow send: mix300-k7-4 completion mean: paced 1.302 s (7 flows), unpaced 1.220 s (1 flows), all 1.291 s
+flow send: mix300-k7-4 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.43 Mbit/s, Jain 1.000, total_retrans=100, rows=1240
+flow send: mix300-k8-4 completion mean: paced 1.301 s (8 flows), unpaced nan s (0 flows), all 1.301 s
+flow send: mix300-k8-4 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.46 s = 6.87 Mbit/s, Jain 1.000, total_retrans=105, rows=1160
+flow send: mix300r100-k4-4 completion mean: paced 1.224 s (4 flows), unpaced 1.244 s (4 flows), all 1.234 s
+flow send: mix300r100-k4-4 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.72 s = 5.84 Mbit/s, Jain 1.000, total_retrans=108, rows=1360
+flow send: mix300-k0-5 completion mean: paced nan s (0 flows), unpaced 1.265 s (8 flows), all 1.265 s
+flow send: mix300-k0-5 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.36 Mbit/s, Jain 1.000, total_retrans=128, rows=1248
+flow send: mix300-k1-5 completion mean: paced 1.228 s (1 flows), unpaced 1.191 s (7 flows), all 1.195 s
+flow send: mix300-k1-5 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.62 s = 6.21 Mbit/s, Jain 1.000, total_retrans=110, rows=1280
+flow send: mix300-k2-5 completion mean: paced 1.234 s (2 flows), unpaced 1.251 s (6 flows), all 1.247 s
+flow send: mix300-k2-5 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.59 Mbit/s, Jain 1.000, total_retrans=119, rows=1208
+flow send: mix300-k4-5 completion mean: paced 1.204 s (4 flows), unpaced 1.240 s (4 flows), all 1.222 s
+flow send: mix300-k4-5 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=80, rows=1280
+flow send: mix300-k6-5 completion mean: paced 1.231 s (6 flows), unpaced 1.297 s (2 flows), all 1.247 s
+flow send: mix300-k6-5 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.45 s = 6.96 Mbit/s, Jain 1.000, total_retrans=95, rows=1144
+flow send: mix300-k7-5 completion mean: paced 1.292 s (7 flows), unpaced 1.409 s (1 flows), all 1.306 s
+flow send: mix300-k7-5 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.47 s = 6.83 Mbit/s, Jain 1.000, total_retrans=99, rows=1168
+flow send: mix300-k8-5 completion mean: paced 1.294 s (8 flows), unpaced nan s (0 flows), all 1.294 s
+flow send: mix300-k8-5 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.53 Mbit/s, Jain 1.000, total_retrans=101, rows=1216
+flow send: mix300r100-k4-5 completion mean: paced 1.341 s (4 flows), unpaced 1.092 s (4 flows), all 1.217 s
+flow send: mix300r100-k4-5 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.29 Mbit/s, Jain 1.000, total_retrans=103, rows=1264
+flow send: mix300-k0-6 completion mean: paced nan s (0 flows), unpaced 1.184 s (8 flows), all 1.184 s
+flow send: mix300-k0-6 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.31 Mbit/s, Jain 1.000, total_retrans=123, rows=1256
+flow send: mix300-k1-6 completion mean: paced 1.023 s (1 flows), unpaced 1.313 s (7 flows), all 1.276 s
+flow send: mix300-k1-6 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.69 s = 5.96 Mbit/s, Jain 1.000, total_retrans=129, rows=1336
+flow send: mix300-k2-6 completion mean: paced 1.315 s (2 flows), unpaced 1.152 s (6 flows), all 1.193 s
+flow send: mix300-k2-6 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.68 Mbit/s, Jain 1.000, total_retrans=120, rows=1192
+flow send: mix300-k4-6 completion mean: paced 1.185 s (4 flows), unpaced 1.155 s (4 flows), all 1.170 s
+flow send: mix300-k4-6 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.50 s = 6.70 Mbit/s, Jain 1.000, total_retrans=112, rows=1184
+flow send: mix300-k6-6 completion mean: paced 1.350 s (6 flows), unpaced 1.314 s (2 flows), all 1.341 s
+flow send: mix300-k6-6 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.66 Mbit/s, Jain 1.000, total_retrans=83, rows=1192
+flow send: mix300-k7-6 completion mean: paced 1.231 s (7 flows), unpaced 1.708 s (1 flows), all 1.291 s
+flow send: mix300-k7-6 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.71 s = 5.89 Mbit/s, Jain 1.000, total_retrans=102, rows=1352
+flow send: mix300-k8-6 completion mean: paced 1.263 s (8 flows), unpaced nan s (0 flows), all 1.263 s
+flow send: mix300-k8-6 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.27 Mbit/s, Jain 1.000, total_retrans=106, rows=1264
+flow send: mix300r100-k4-6 completion mean: paced 1.280 s (4 flows), unpaced 1.160 s (4 flows), all 1.220 s
+flow send: mix300r100-k4-6 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.49 Mbit/s, Jain 1.000, total_retrans=92, rows=1224
+flow send: mix300-k0-7 completion mean: paced nan s (0 flows), unpaced 1.271 s (8 flows), all 1.271 s
+flow send: mix300-k0-7 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=134, rows=1288
+flow send: mix300-k1-7 completion mean: paced 1.376 s (1 flows), unpaced 1.233 s (7 flows), all 1.251 s
+flow send: mix300-k1-7 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.68 s = 6.00 Mbit/s, Jain 1.000, total_retrans=132, rows=1328
+flow send: mix300-k2-7 completion mean: paced 1.371 s (2 flows), unpaced 1.222 s (6 flows), all 1.259 s
+flow send: mix300-k2-7 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.67 s = 6.01 Mbit/s, Jain 1.000, total_retrans=123, rows=1328
+flow send: mix300-k4-7 completion mean: paced 1.188 s (4 flows), unpaced 1.396 s (4 flows), all 1.292 s
+flow send: mix300-k4-7 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.69 s = 5.94 Mbit/s, Jain 1.000, total_retrans=75, rows=1336
+flow send: mix300-k6-7 completion mean: paced 1.231 s (6 flows), unpaced 1.223 s (2 flows), all 1.229 s
+flow send: mix300-k6-7 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.52 Mbit/s, Jain 1.000, total_retrans=97, rows=1224
+flow send: mix300-k7-7 completion mean: paced 1.240 s (7 flows), unpaced 1.621 s (1 flows), all 1.288 s
+flow send: mix300-k7-7 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.62 s = 6.21 Mbit/s, Jain 1.000, total_retrans=97, rows=1280
+flow send: mix300-k8-7 completion mean: paced 1.335 s (8 flows), unpaced nan s (0 flows), all 1.335 s
+flow send: mix300-k8-7 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.53 Mbit/s, Jain 1.000, total_retrans=106, rows=1224
+flow send: mix300r100-k4-7 completion mean: paced 1.399 s (4 flows), unpaced 1.177 s (4 flows), all 1.288 s
+flow send: mix300r100-k4-7 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.64 s = 6.15 Mbit/s, Jain 1.000, total_retrans=82, rows=1296
+flow send: mix300-k0-8 completion mean: paced nan s (0 flows), unpaced 1.294 s (8 flows), all 1.294 s
+flow send: mix300-k0-8 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.39 Mbit/s, Jain 1.000, total_retrans=125, rows=1248
+flow send: mix300-k1-8 completion mean: paced 1.107 s (1 flows), unpaced 1.207 s (7 flows), all 1.194 s
+flow send: mix300-k1-8 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.76 Mbit/s, Jain 1.000, total_retrans=143, rows=1176
+flow send: mix300-k2-8 completion mean: paced 1.477 s (2 flows), unpaced 1.088 s (6 flows), all 1.185 s
+flow send: mix300-k2-8 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.63 Mbit/s, Jain 1.000, total_retrans=129, rows=1200
+flow send: mix300-k4-8 completion mean: paced 1.243 s (4 flows), unpaced 1.274 s (4 flows), all 1.259 s
+flow send: mix300-k4-8 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.32 Mbit/s, Jain 1.000, total_retrans=97, rows=1256
+flow send: mix300-k6-8 completion mean: paced 1.208 s (6 flows), unpaced 1.361 s (2 flows), all 1.246 s
+flow send: mix300-k6-8 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.39 Mbit/s, Jain 1.000, total_retrans=96, rows=1248
+flow send: mix300-k7-8 completion mean: paced 1.251 s (7 flows), unpaced 0.905 s (1 flows), all 1.207 s
+flow send: mix300-k7-8 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.64 s = 6.14 Mbit/s, Jain 1.000, total_retrans=104, rows=1296
+flow send: mix300-k8-8 completion mean: paced 1.261 s (8 flows), unpaced nan s (0 flows), all 1.261 s
+flow send: mix300-k8-8 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=106, rows=1232
+flow send: mix300r100-k4-8 completion mean: paced 1.302 s (4 flows), unpaced 1.157 s (4 flows), all 1.229 s
+flow send: mix300r100-k4-8 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.38 Mbit/s, Jain 1.000, total_retrans=118, rows=1248
+flow send: mixbulk-k4-1 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 16704992 bytes acked in 15.90 s = 8.41 Mbit/s, Jain 0.978, total_retrans=540, rows=12544
+flow send: mixbulk-k1-1 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 16806492 bytes acked in 16.20 s = 8.30 Mbit/s, Jain 0.991, total_retrans=536, rows=12784
+flow send: mixbulk-k4-2 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 16561928 bytes acked in 15.61 s = 8.49 Mbit/s, Jain 0.961, total_retrans=516, rows=12296
+flow send: mixbulk-k1-2 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 16876224 bytes acked in 16.17 s = 8.35 Mbit/s, Jain 0.986, total_retrans=545, rows=12728
+flow send: mixbulk-k4-3 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 16555788 bytes acked in 15.58 s = 8.50 Mbit/s, Jain 0.982, total_retrans=556, rows=12272
+flow send: mixbulk-k1-3 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 16881464 bytes acked in 16.25 s = 8.31 Mbit/s, Jain 0.989, total_retrans=554, rows=12800
+flow send: mixbulk-k4-4 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 16729584 bytes acked in 15.78 s = 8.48 Mbit/s, Jain 0.953, total_retrans=538, rows=12440
+flow send: mixbulk-k1-4 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 16746492 bytes acked in 15.91 s = 8.42 Mbit/s, Jain 0.976, total_retrans=579, rows=12552
+flow send: mix300-k0-9 completion mean: paced nan s (0 flows), unpaced 1.227 s (8 flows), all 1.227 s
+flow send: mix300-k0-9 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.61 s = 6.25 Mbit/s, Jain 1.000, total_retrans=133, rows=1272
+flow send: mix300-k1-9 completion mean: paced 1.372 s (1 flows), unpaced 1.173 s (7 flows), all 1.198 s
+flow send: mix300-k1-9 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.39 Mbit/s, Jain 1.000, total_retrans=138, rows=1248
+flow send: mix300-k2-9 completion mean: paced 1.275 s (2 flows), unpaced 1.096 s (6 flows), all 1.141 s
+flow send: mix300-k2-9 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.44 s = 6.99 Mbit/s, Jain 1.000, total_retrans=120, rows=1136
+flow send: mix300-k4-9 completion mean: paced 1.347 s (4 flows), unpaced 1.239 s (4 flows), all 1.293 s
+flow send: mix300-k4-9 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=77, rows=1288
+flow send: mix300-k6-9 completion mean: paced 1.385 s (6 flows), unpaced 1.057 s (2 flows), all 1.303 s
+flow send: mix300-k6-9 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.30 Mbit/s, Jain 1.000, total_retrans=94, rows=1264
+flow send: mix300-k7-9 completion mean: paced 1.262 s (7 flows), unpaced 1.484 s (1 flows), all 1.290 s
+flow send: mix300-k7-9 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.29 Mbit/s, Jain 1.000, total_retrans=96, rows=1264
+flow send: mix300-k8-9 completion mean: paced 1.282 s (8 flows), unpaced nan s (0 flows), all 1.282 s
+flow send: mix300-k8-9 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.37 Mbit/s, Jain 1.000, total_retrans=103, rows=1248
+flow send: mix300r100-k4-9 completion mean: paced 1.285 s (4 flows), unpaced 1.113 s (4 flows), all 1.199 s
+flow send: mix300r100-k4-9 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=110, rows=1232
+flow send: mix300-k0-10 completion mean: paced nan s (0 flows), unpaced 1.213 s (8 flows), all 1.213 s
+flow send: mix300-k0-10 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.53 Mbit/s, Jain 1.000, total_retrans=127, rows=1216
+flow send: mix300-k1-10 completion mean: paced 1.412 s (1 flows), unpaced 1.185 s (7 flows), all 1.214 s
+flow send: mix300-k1-10 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.33 Mbit/s, Jain 1.000, total_retrans=135, rows=1256
+flow send: mix300-k2-10 completion mean: paced 1.327 s (2 flows), unpaced 1.134 s (6 flows), all 1.182 s
+flow send: mix300-k2-10 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=131, rows=1232
+flow send: mix300-k4-10 completion mean: paced 1.229 s (4 flows), unpaced 1.173 s (4 flows), all 1.201 s
+flow send: mix300-k4-10 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=82, rows=1288
+flow send: mix300-k6-10 completion mean: paced 1.283 s (6 flows), unpaced 1.222 s (2 flows), all 1.267 s
+flow send: mix300-k6-10 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.40 Mbit/s, Jain 1.000, total_retrans=96, rows=1240
+flow send: mix300-k7-10 completion mean: paced 1.302 s (7 flows), unpaced 1.423 s (1 flows), all 1.317 s
+flow send: mix300-k7-10 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.63 Mbit/s, Jain 1.000, total_retrans=115, rows=1200
+flow send: mix300-k8-10 completion mean: paced 1.256 s (8 flows), unpaced nan s (0 flows), all 1.256 s
+flow send: mix300-k8-10 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.47 Mbit/s, Jain 1.000, total_retrans=102, rows=1232
+flow send: mix300r100-k4-10 completion mean: paced 1.237 s (4 flows), unpaced 1.177 s (4 flows), all 1.207 s
+flow send: mix300r100-k4-10 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=94, rows=1296
+flow send: mix300-k0-11 completion mean: paced nan s (0 flows), unpaced 1.179 s (8 flows), all 1.179 s
+flow send: mix300-k0-11 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.44 s = 6.98 Mbit/s, Jain 1.000, total_retrans=130, rows=1144
+flow send: mix300-k1-11 completion mean: paced 1.388 s (1 flows), unpaced 1.174 s (7 flows), all 1.200 s
+flow send: mix300-k1-11 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.64 s = 6.14 Mbit/s, Jain 1.000, total_retrans=124, rows=1296
+flow send: mix300-k2-11 completion mean: paced 1.428 s (2 flows), unpaced 1.036 s (6 flows), all 1.134 s
+flow send: mix300-k2-11 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.48 s = 6.80 Mbit/s, Jain 1.000, total_retrans=112, rows=1168
+flow send: mix300-k4-11 completion mean: paced 1.199 s (4 flows), unpaced 1.178 s (4 flows), all 1.189 s
+flow send: mix300-k4-11 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.50 s = 6.72 Mbit/s, Jain 1.000, total_retrans=131, rows=1184
+flow send: mix300-k6-11 completion mean: paced 1.350 s (6 flows), unpaced 0.939 s (2 flows), all 1.248 s
+flow send: mix300-k6-11 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.70 s = 5.92 Mbit/s, Jain 1.000, total_retrans=104, rows=1344
+flow send: mix300-k7-11 completion mean: paced 1.257 s (7 flows), unpaced 1.517 s (1 flows), all 1.289 s
+flow send: mix300-k7-11 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.54 Mbit/s, Jain 1.000, total_retrans=92, rows=1216
+flow send: mix300-k8-11 completion mean: paced 1.233 s (8 flows), unpaced nan s (0 flows), all 1.233 s
+flow send: mix300-k8-11 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.43 Mbit/s, Jain 1.000, total_retrans=104, rows=1240
+flow send: mix300r100-k4-11 completion mean: paced 1.313 s (4 flows), unpaced 1.223 s (4 flows), all 1.268 s
+flow send: mix300r100-k4-11 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=87, rows=1232
+flow send: mix300-k0-12 completion mean: paced nan s (0 flows), unpaced 1.205 s (8 flows), all 1.205 s
+flow send: mix300-k0-12 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.33 Mbit/s, Jain 1.000, total_retrans=128, rows=1256
+flow send: mix300-k1-12 completion mean: paced 1.357 s (1 flows), unpaced 1.175 s (7 flows), all 1.198 s
+flow send: mix300-k1-12 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.64 Mbit/s, Jain 1.000, total_retrans=126, rows=1200
+flow send: mix300-k2-12 completion mean: paced 1.349 s (2 flows), unpaced 1.138 s (6 flows), all 1.191 s
+flow send: mix300-k2-12 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.56 Mbit/s, Jain 1.000, total_retrans=129, rows=1216
+flow send: mix300-k4-12 completion mean: paced 1.345 s (4 flows), unpaced 1.125 s (4 flows), all 1.235 s
+flow send: mix300-k4-12 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.37 Mbit/s, Jain 1.000, total_retrans=106, rows=1248
+flow send: mix300-k6-12 completion mean: paced 1.305 s (6 flows), unpaced 1.172 s (2 flows), all 1.272 s
+flow send: mix300-k6-12 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.61 Mbit/s, Jain 1.000, total_retrans=88, rows=1200
+flow send: mix300-k7-12 completion mean: paced 1.327 s (7 flows), unpaced 1.320 s (1 flows), all 1.326 s
+flow send: mix300-k7-12 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.45 Mbit/s, Jain 1.000, total_retrans=100, rows=1232
+flow send: mix300-k8-12 completion mean: paced 1.256 s (8 flows), unpaced nan s (0 flows), all 1.256 s
+flow send: mix300-k8-12 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.37 s = 7.36 Mbit/s, Jain 1.000, total_retrans=96, rows=1080
+flow send: mix300r100-k4-12 completion mean: paced 1.197 s (4 flows), unpaced 1.225 s (4 flows), all 1.211 s
+flow send: mix300r100-k4-12 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.46 Mbit/s, Jain 1.000, total_retrans=83, rows=1232
+flow send: mix300-k0-13 completion mean: paced nan s (0 flows), unpaced 1.231 s (8 flows), all 1.231 s
+flow send: mix300-k0-13 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.50 s = 6.72 Mbit/s, Jain 1.000, total_retrans=131, rows=1184
+flow send: mix300-k1-13 completion mean: paced 1.238 s (1 flows), unpaced 1.185 s (7 flows), all 1.191 s
+flow send: mix300-k1-13 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=112, rows=1296
+flow send: mix300-k2-13 completion mean: paced 1.411 s (2 flows), unpaced 1.130 s (6 flows), all 1.200 s
+flow send: mix300-k2-13 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.67 Mbit/s, Jain 1.000, total_retrans=127, rows=1192
+flow send: mix300-k4-13 completion mean: paced 1.346 s (4 flows), unpaced 1.127 s (4 flows), all 1.236 s
+flow send: mix300-k4-13 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.40 Mbit/s, Jain 1.000, total_retrans=94, rows=1240
+flow send: mix300-k6-13 completion mean: paced 1.198 s (6 flows), unpaced 1.433 s (2 flows), all 1.257 s
+flow send: mix300-k6-13 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.47 s = 6.84 Mbit/s, Jain 1.000, total_retrans=92, rows=1160
+flow send: mix300-k7-13 completion mean: paced 1.329 s (7 flows), unpaced 1.114 s (1 flows), all 1.302 s
+flow send: mix300-k7-13 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.54 Mbit/s, Jain 1.000, total_retrans=97, rows=1216
+flow send: mix300-k8-13 completion mean: paced 1.278 s (8 flows), unpaced nan s (0 flows), all 1.278 s
+flow send: mix300-k8-13 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.50 s = 6.72 Mbit/s, Jain 1.000, total_retrans=102, rows=1184
+flow send: mix300r100-k4-13 completion mean: paced 1.283 s (4 flows), unpaced 1.218 s (4 flows), all 1.250 s
+flow send: mix300r100-k4-13 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=87, rows=1224
+flow send: mix300-k0-14 completion mean: paced nan s (0 flows), unpaced 1.233 s (8 flows), all 1.233 s
+flow send: mix300-k0-14 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.28 Mbit/s, Jain 1.000, total_retrans=132, rows=1264
+flow send: mix300-k1-14 completion mean: paced 1.407 s (1 flows), unpaced 1.173 s (7 flows), all 1.202 s
+flow send: mix300-k1-14 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.62 s = 6.20 Mbit/s, Jain 1.000, total_retrans=122, rows=1280
+flow send: mix300-k2-14 completion mean: paced 1.216 s (2 flows), unpaced 1.252 s (6 flows), all 1.243 s
+flow send: mix300-k2-14 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=134, rows=1240
+flow send: mix300-k4-14 completion mean: paced 1.296 s (4 flows), unpaced 1.089 s (4 flows), all 1.193 s
+flow send: mix300-k4-14 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=93, rows=1232
+flow send: mix300-k6-14 completion mean: paced 1.229 s (6 flows), unpaced 1.229 s (2 flows), all 1.229 s
+flow send: mix300-k6-14 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.44 s = 7.01 Mbit/s, Jain 1.000, total_retrans=91, rows=1136
+flow send: mix300-k7-14 completion mean: paced 1.213 s (7 flows), unpaced 1.628 s (1 flows), all 1.265 s
+flow send: mix300-k7-14 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=104, rows=1288
+flow send: mix300-k8-14 completion mean: paced 1.318 s (8 flows), unpaced nan s (0 flows), all 1.318 s
+flow send: mix300-k8-14 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.29 Mbit/s, Jain 1.000, total_retrans=108, rows=1264
+flow send: mix300r100-k4-14 completion mean: paced 1.252 s (4 flows), unpaced 1.317 s (4 flows), all 1.284 s
+flow send: mix300r100-k4-14 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.40 Mbit/s, Jain 1.000, total_retrans=87, rows=1240
+flow send: mix300-k0-15 completion mean: paced nan s (0 flows), unpaced 1.270 s (8 flows), all 1.270 s
+flow send: mix300-k0-15 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=135, rows=1288
+flow send: mix300-k1-15 completion mean: paced 1.401 s (1 flows), unpaced 1.203 s (7 flows), all 1.228 s
+flow send: mix300-k1-15 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.51 s = 6.65 Mbit/s, Jain 1.000, total_retrans=134, rows=1192
+flow send: mix300-k2-15 completion mean: paced 1.179 s (2 flows), unpaced 1.270 s (6 flows), all 1.247 s
+flow send: mix300-k2-15 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.41 Mbit/s, Jain 1.000, total_retrans=137, rows=1240
+flow send: mix300-k4-15 completion mean: paced 1.159 s (4 flows), unpaced 1.218 s (4 flows), all 1.189 s
+flow send: mix300-k4-15 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.45 s = 6.93 Mbit/s, Jain 1.000, total_retrans=64, rows=1144
+flow send: mix300-k6-15 completion mean: paced 1.277 s (6 flows), unpaced 1.197 s (2 flows), all 1.257 s
+flow send: mix300-k6-15 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.55 Mbit/s, Jain 1.000, total_retrans=110, rows=1216
+flow send: mix300-k7-15 completion mean: paced 1.260 s (7 flows), unpaced 1.210 s (1 flows), all 1.254 s
+flow send: mix300-k7-15 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.44 s = 6.97 Mbit/s, Jain 1.000, total_retrans=91, rows=1144
+flow send: mix300-k8-15 completion mean: paced 1.279 s (8 flows), unpaced nan s (0 flows), all 1.279 s
+flow send: mix300-k8-15 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.51 Mbit/s, Jain 1.000, total_retrans=100, rows=1216
+flow send: mix300r100-k4-15 completion mean: paced 1.298 s (4 flows), unpaced 1.196 s (4 flows), all 1.247 s
+flow send: mix300r100-k4-15 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.66 s = 6.05 Mbit/s, Jain 1.000, total_retrans=86, rows=1320
+flow send: mix300-k0-16 completion mean: paced nan s (0 flows), unpaced 1.200 s (8 flows), all 1.200 s
+flow send: mix300-k0-16 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=128, rows=1224
+flow send: mix300-k1-16 completion mean: paced 1.195 s (1 flows), unpaced 1.253 s (7 flows), all 1.246 s
+flow send: mix300-k1-16 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.52 Mbit/s, Jain 1.000, total_retrans=125, rows=1224
+flow send: mix300-k2-16 completion mean: paced 1.559 s (2 flows), unpaced 1.112 s (6 flows), all 1.223 s
+flow send: mix300-k2-16 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.15 Mbit/s, Jain 1.000, total_retrans=129, rows=1288
+flow send: mix300-k4-16 completion mean: paced 1.234 s (4 flows), unpaced 1.063 s (4 flows), all 1.149 s
+flow send: mix300-k4-16 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.41 s = 7.14 Mbit/s, Jain 1.000, total_retrans=83, rows=1112
+flow send: mix300-k6-16 completion mean: paced 1.304 s (6 flows), unpaced 1.236 s (2 flows), all 1.287 s
+flow send: mix300-k6-16 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.47 Mbit/s, Jain 1.000, total_retrans=85, rows=1232
+flow send: mix300-k7-16 completion mean: paced 1.202 s (7 flows), unpaced 1.745 s (1 flows), all 1.270 s
+flow send: mix300-k7-16 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.75 s = 5.76 Mbit/s, Jain 1.000, total_retrans=97, rows=1376
+flow send: mix300-k8-16 completion mean: paced 1.246 s (8 flows), unpaced nan s (0 flows), all 1.246 s
+flow send: mix300-k8-16 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.50 Mbit/s, Jain 1.000, total_retrans=105, rows=1224
+flow send: mix300r100-k4-16 completion mean: paced 1.313 s (4 flows), unpaced 1.258 s (4 flows), all 1.285 s
+flow send: mix300r100-k4-16 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.70 s = 5.90 Mbit/s, Jain 1.000, total_retrans=106, rows=1344
+flow send: mix300-k0-17 completion mean: paced nan s (0 flows), unpaced 1.203 s (8 flows), all 1.203 s
+flow send: mix300-k0-17 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.32 Mbit/s, Jain 1.000, total_retrans=125, rows=1256
+flow send: mix300-k1-17 completion mean: paced 1.199 s (1 flows), unpaced 1.229 s (7 flows), all 1.225 s
+flow send: mix300-k1-17 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.74 Mbit/s, Jain 1.000, total_retrans=126, rows=1184
+flow send: mix300-k2-17 completion mean: paced 1.472 s (2 flows), unpaced 1.154 s (6 flows), all 1.234 s
+flow send: mix300-k2-17 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.31 Mbit/s, Jain 1.000, total_retrans=126, rows=1256
+flow send: mix300-k4-17 completion mean: paced 1.382 s (4 flows), unpaced 1.103 s (4 flows), all 1.242 s
+flow send: mix300-k4-17 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.36 Mbit/s, Jain 1.000, total_retrans=101, rows=1248
+flow send: mix300-k6-17 completion mean: paced 1.280 s (6 flows), unpaced 1.319 s (2 flows), all 1.289 s
+flow send: mix300-k6-17 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.70 s = 5.92 Mbit/s, Jain 1.000, total_retrans=97, rows=1344
+flow send: mix300-k7-17 completion mean: paced 1.219 s (7 flows), unpaced 1.531 s (1 flows), all 1.258 s
+flow send: mix300-k7-17 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.57 Mbit/s, Jain 1.000, total_retrans=90, rows=1208
+flow send: mix300-k8-17 completion mean: paced 1.297 s (8 flows), unpaced nan s (0 flows), all 1.297 s
+flow send: mix300-k8-17 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=106, rows=1232
+flow send: mix300r100-k4-17 completion mean: paced 1.347 s (4 flows), unpaced 1.193 s (4 flows), all 1.270 s
+flow send: mix300r100-k4-17 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.36 Mbit/s, Jain 1.000, total_retrans=115, rows=1248
+flow send: mix300-k0-18 completion mean: paced nan s (0 flows), unpaced 1.219 s (8 flows), all 1.219 s
+flow send: mix300-k0-18 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.30 Mbit/s, Jain 1.000, total_retrans=128, rows=1264
+flow send: mix300-k1-18 completion mean: paced 1.256 s (1 flows), unpaced 1.259 s (7 flows), all 1.259 s
+flow send: mix300-k1-18 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.28 Mbit/s, Jain 1.000, total_retrans=122, rows=1264
+flow send: mix300-k2-18 completion mean: paced 1.207 s (2 flows), unpaced 1.211 s (6 flows), all 1.210 s
+flow send: mix300-k2-18 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.68 s = 6.00 Mbit/s, Jain 1.000, total_retrans=126, rows=1328
+flow send: mix300-k4-18 completion mean: paced 1.193 s (4 flows), unpaced 1.119 s (4 flows), all 1.156 s
+flow send: mix300-k4-18 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.46 s = 6.87 Mbit/s, Jain 1.000, total_retrans=113, rows=1152
+flow send: mix300-k6-18 completion mean: paced 1.346 s (6 flows), unpaced 1.063 s (2 flows), all 1.276 s
+flow send: mix300-k6-18 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.46 Mbit/s, Jain 1.000, total_retrans=96, rows=1232
+flow send: mix300-k7-18 completion mean: paced 1.225 s (7 flows), unpaced 1.422 s (1 flows), all 1.249 s
+flow send: mix300-k7-18 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.75 Mbit/s, Jain 1.000, total_retrans=100, rows=1176
+flow send: mix300-k8-18 completion mean: paced 1.306 s (8 flows), unpaced nan s (0 flows), all 1.306 s
+flow send: mix300-k8-18 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.76 Mbit/s, Jain 1.000, total_retrans=110, rows=1176
+flow send: mix300r100-k4-18 completion mean: paced 1.385 s (4 flows), unpaced 1.196 s (4 flows), all 1.291 s
+flow send: mix300r100-k4-18 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.27 Mbit/s, Jain 1.000, total_retrans=93, rows=1264
+flow send: mix300-k0-19 completion mean: paced nan s (0 flows), unpaced 1.212 s (8 flows), all 1.212 s
+flow send: mix300-k0-19 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.72 s = 5.86 Mbit/s, Jain 1.000, total_retrans=117, rows=1352
+flow send: mix300-k1-19 completion mean: paced 1.564 s (1 flows), unpaced 1.218 s (7 flows), all 1.262 s
+flow send: mix300-k1-19 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.73 s = 5.81 Mbit/s, Jain 1.000, total_retrans=137, rows=1368
+flow send: mix300-k2-19 completion mean: paced 1.222 s (2 flows), unpaced 1.236 s (6 flows), all 1.233 s
+flow send: mix300-k2-19 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.17 Mbit/s, Jain 1.000, total_retrans=128, rows=1288
+flow send: mix300-k4-19 completion mean: paced 1.298 s (4 flows), unpaced 1.354 s (4 flows), all 1.326 s
+flow send: mix300-k4-19 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.30 Mbit/s, Jain 1.000, total_retrans=77, rows=1264
+flow send: mix300-k6-19 completion mean: paced 1.280 s (6 flows), unpaced 1.258 s (2 flows), all 1.275 s
+flow send: mix300-k6-19 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.61 s = 6.25 Mbit/s, Jain 1.000, total_retrans=77, rows=1272
+flow send: mix300-k7-19 completion mean: paced 1.240 s (7 flows), unpaced 1.282 s (1 flows), all 1.245 s
+flow send: mix300-k7-19 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.58 Mbit/s, Jain 1.000, total_retrans=97, rows=1208
+flow send: mix300-k8-19 completion mean: paced 1.301 s (8 flows), unpaced nan s (0 flows), all 1.301 s
+flow send: mix300-k8-19 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.77 s = 5.69 Mbit/s, Jain 1.000, total_retrans=103, rows=1400
+flow send: mix300r100-k4-19 completion mean: paced 1.270 s (4 flows), unpaced 1.244 s (4 flows), all 1.257 s
+flow send: mix300r100-k4-19 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.52 s = 6.62 Mbit/s, Jain 1.000, total_retrans=116, rows=1200
+flow send: mix300-k0-20 completion mean: paced nan s (0 flows), unpaced 1.260 s (8 flows), all 1.260 s
+flow send: mix300-k0-20 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=127, rows=1288
+flow send: mix300-k1-20 completion mean: paced 1.133 s (1 flows), unpaced 1.238 s (7 flows), all 1.225 s
+flow send: mix300-k1-20 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.67 s = 6.04 Mbit/s, Jain 1.000, total_retrans=122, rows=1312
+flow send: mix300-k2-20 completion mean: paced 1.526 s (2 flows), unpaced 1.061 s (6 flows), all 1.178 s
+flow send: mix300-k2-20 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.43 Mbit/s, Jain 1.000, total_retrans=144, rows=1240
+flow send: mix300-k4-20 completion mean: paced 1.356 s (4 flows), unpaced 1.000 s (4 flows), all 1.178 s
+flow send: mix300-k4-20 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.52 Mbit/s, Jain 1.000, total_retrans=97, rows=1216
+flow send: mix300-k6-20 completion mean: paced 1.256 s (6 flows), unpaced 1.350 s (2 flows), all 1.279 s
+flow send: mix300-k6-20 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.49 Mbit/s, Jain 1.000, total_retrans=64, rows=1224
+flow send: mix300-k7-20 completion mean: paced 1.308 s (7 flows), unpaced 0.980 s (1 flows), all 1.267 s
+flow send: mix300-k7-20 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.33 Mbit/s, Jain 1.000, total_retrans=115, rows=1256
+flow send: mix300-k8-20 completion mean: paced 1.205 s (8 flows), unpaced nan s (0 flows), all 1.205 s
+flow send: mix300-k8-20 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.38 s = 7.31 Mbit/s, Jain 1.000, total_retrans=103, rows=1088
+flow send: mix300r100-k4-20 completion mean: paced 1.183 s (4 flows), unpaced 1.223 s (4 flows), all 1.203 s
+flow send: mix300r100-k4-20 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.48 Mbit/s, Jain 1.000, total_retrans=91, rows=1224
+flow send: mix300-k0-21 completion mean: paced nan s (0 flows), unpaced 1.207 s (8 flows), all 1.207 s
+flow send: mix300-k0-21 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.50 s = 6.72 Mbit/s, Jain 1.000, total_retrans=128, rows=1184
+flow send: mix300-k1-21 completion mean: paced 1.411 s (1 flows), unpaced 1.178 s (7 flows), all 1.207 s
+flow send: mix300-k1-21 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.44 Mbit/s, Jain 1.000, total_retrans=135, rows=1232
+flow send: mix300-k2-21 completion mean: paced 1.119 s (2 flows), unpaced 1.148 s (6 flows), all 1.141 s
+flow send: mix300-k2-21 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=128, rows=1288
+flow send: mix300-k4-21 completion mean: paced 1.414 s (4 flows), unpaced 1.167 s (4 flows), all 1.291 s
+flow send: mix300-k4-21 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.58 s = 6.38 Mbit/s, Jain 1.000, total_retrans=115, rows=1248
+flow send: mix300-k6-21 completion mean: paced 1.356 s (6 flows), unpaced 1.165 s (2 flows), all 1.308 s
+flow send: mix300-k6-21 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.64 s = 6.14 Mbit/s, Jain 1.000, total_retrans=118, rows=1296
+flow send: mix300-k7-21 completion mean: paced 1.297 s (7 flows), unpaced 1.703 s (1 flows), all 1.348 s
+flow send: mix300-k7-21 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.70 s = 5.91 Mbit/s, Jain 1.000, total_retrans=103, rows=1344
+flow send: mix300-k8-21 completion mean: paced 1.258 s (8 flows), unpaced nan s (0 flows), all 1.258 s
+flow send: mix300-k8-21 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.39 Mbit/s, Jain 1.000, total_retrans=100, rows=1240
+flow send: mix300r100-k4-21 completion mean: paced 1.228 s (4 flows), unpaced 1.184 s (4 flows), all 1.206 s
+flow send: mix300r100-k4-21 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.54 Mbit/s, Jain 1.000, total_retrans=122, rows=1216
+flow send: mix300-k0-22 completion mean: paced nan s (0 flows), unpaced 1.225 s (8 flows), all 1.225 s
+flow send: mix300-k0-22 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.64 s = 6.13 Mbit/s, Jain 1.000, total_retrans=124, rows=1296
+flow send: mix300-k1-22 completion mean: paced 1.685 s (1 flows), unpaced 1.213 s (7 flows), all 1.272 s
+flow send: mix300-k1-22 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.69 s = 5.97 Mbit/s, Jain 1.000, total_retrans=121, rows=1328
+flow send: mix300-k2-22 completion mean: paced 1.393 s (2 flows), unpaced 1.152 s (6 flows), all 1.212 s
+flow send: mix300-k2-22 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.47 s = 6.82 Mbit/s, Jain 1.000, total_retrans=100, rows=1160
+flow send: mix300-k4-22 completion mean: paced 1.281 s (4 flows), unpaced 1.075 s (4 flows), all 1.178 s
+flow send: mix300-k4-22 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.45 s = 6.94 Mbit/s, Jain 1.000, total_retrans=67, rows=1144
+flow send: mix300-k6-22 completion mean: paced 1.301 s (6 flows), unpaced 1.194 s (2 flows), all 1.274 s
+flow send: mix300-k6-22 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.41 s = 7.12 Mbit/s, Jain 1.000, total_retrans=78, rows=1112
+flow send: mix300-k7-22 completion mean: paced 1.292 s (7 flows), unpaced 1.322 s (1 flows), all 1.296 s
+flow send: mix300-k7-22 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.43 Mbit/s, Jain 1.000, total_retrans=97, rows=1232
+flow send: mix300-k8-22 completion mean: paced 1.283 s (8 flows), unpaced nan s (0 flows), all 1.283 s
+flow send: mix300-k8-22 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.57 s = 6.39 Mbit/s, Jain 1.000, total_retrans=104, rows=1240
+flow send: mix300r100-k4-22 completion mean: paced 1.399 s (4 flows), unpaced 1.096 s (4 flows), all 1.248 s
+flow send: mix300r100-k4-22 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.49 s = 6.76 Mbit/s, Jain 1.000, total_retrans=90, rows=1176
+flow send: mix300-k0-23 completion mean: paced nan s (0 flows), unpaced 1.189 s (8 flows), all 1.189 s
+flow send: mix300-k0-23 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.32 Mbit/s, Jain 1.000, total_retrans=124, rows=1256
+flow send: mix300-k1-23 completion mean: paced 1.320 s (1 flows), unpaced 1.266 s (7 flows), all 1.273 s
+flow send: mix300-k1-23 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.67 s = 6.03 Mbit/s, Jain 1.000, total_retrans=131, rows=1320
+flow send: mix300-k2-23 completion mean: paced 1.426 s (2 flows), unpaced 1.173 s (6 flows), all 1.236 s
+flow send: mix300-k2-23 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.16 Mbit/s, Jain 1.000, total_retrans=126, rows=1288
+flow send: mix300-k4-23 completion mean: paced 1.275 s (4 flows), unpaced 1.101 s (4 flows), all 1.188 s
+flow send: mix300-k4-23 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.53 s = 6.58 Mbit/s, Jain 1.000, total_retrans=82, rows=1208
+flow send: mix300-k6-23 completion mean: paced 1.285 s (6 flows), unpaced 1.276 s (2 flows), all 1.283 s
+flow send: mix300-k6-23 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.62 s = 6.22 Mbit/s, Jain 1.000, total_retrans=93, rows=1272
+flow send: mix300-k7-23 completion mean: paced 1.186 s (7 flows), unpaced 1.411 s (1 flows), all 1.214 s
+flow send: mix300-k7-23 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.41 s = 7.13 Mbit/s, Jain 1.000, total_retrans=92, rows=1112
+flow send: mix300-k8-23 completion mean: paced 1.225 s (8 flows), unpaced nan s (0 flows), all 1.225 s
+flow send: mix300-k8-23 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.50 Mbit/s, Jain 1.000, total_retrans=101, rows=1216
+flow send: mix300r100-k4-23 completion mean: paced 1.178 s (4 flows), unpaced 1.270 s (4 flows), all 1.224 s
+flow send: mix300r100-k4-23 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.59 s = 6.34 Mbit/s, Jain 1.000, total_retrans=84, rows=1256
+flow send: mix300-k0-24 completion mean: paced nan s (0 flows), unpaced 1.218 s (8 flows), all 1.218 s
+flow send: mix300-k0-24 8 flows, 0 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.60 s = 6.28 Mbit/s, Jain 1.000, total_retrans=127, rows=1264
+flow send: mix300-k1-24 completion mean: paced 1.372 s (1 flows), unpaced 1.218 s (7 flows), all 1.237 s
+flow send: mix300-k1-24 8 flows, 1 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.63 s = 6.18 Mbit/s, Jain 1.000, total_retrans=85, rows=1216
+flow send: mix300-k2-24 completion mean: paced 1.117 s (2 flows), unpaced 1.250 s (6 flows), all 1.217 s
+flow send: mix300-k2-24 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 2.02 s = 4.99 Mbit/s, Jain 1.000, total_retrans=81, rows=1560
+flow send: mix300-k4-24 completion mean: paced 1.229 s (4 flows), unpaced 1.279 s (4 flows), all 1.254 s
+flow send: mix300-k4-24 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.69 s = 5.94 Mbit/s, Jain 1.000, total_retrans=62, rows=1304
+flow send: mix300-k6-24 completion mean: paced 1.320 s (6 flows), unpaced 1.202 s (2 flows), all 1.290 s
+flow send: mix300-k6-24 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.51 Mbit/s, Jain 1.000, total_retrans=110, rows=1168
+flow send: mix300-k7-24 completion mean: paced 1.272 s (7 flows), unpaced 1.496 s (1 flows), all 1.300 s
+flow send: mix300-k7-24 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.56 s = 6.45 Mbit/s, Jain 1.000, total_retrans=96, rows=1184
+flow send: mix300-k8-24 completion mean: paced 1.256 s (8 flows), unpaced nan s (0 flows), all 1.256 s
+flow send: mix300-k8-24 8 flows, 8 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.54 s = 6.53 Mbit/s, Jain 1.000, total_retrans=99, rows=1160
+flow send: mix300r100-k4-24 completion mean: paced 1.333 s (4 flows), unpaced 1.067 s (4 flows), all 1.200 s
+flow send: mix300r100-k4-24 8 flows, 4 with SO_MAX_PACING_RATE, cc=reno: 1257616 bytes acked in 1.55 s = 6.50 Mbit/s, Jain 1.000, total_retrans=77, rows=1176
+flow send: mixbulk-k2-1 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 16496544 bytes acked in 15.88 s = 8.31 Mbit/s, Jain 0.979, total_retrans=560, rows=11888
+flow send: mixbulk-k6-1 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 16626444 bytes acked in 16.11 s = 8.26 Mbit/s, Jain 0.980, total_retrans=502, rows=12112
+flow send: mixbulk-k7-1 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 16725168 bytes acked in 15.88 s = 8.43 Mbit/s, Jain 0.984, total_retrans=532, rows=11944
+flow send: mixbulk-k2-2 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 16323832 bytes acked in 15.59 s = 8.37 Mbit/s, Jain 0.987, total_retrans=543, rows=12296
+flow send: mixbulk-k6-2 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 16338852 bytes acked in 15.47 s = 8.45 Mbit/s, Jain 0.961, total_retrans=513, rows=12208
+flow send: mixbulk-k7-2 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 16829212 bytes acked in 16.33 s = 8.24 Mbit/s, Jain 0.984, total_retrans=551, rows=12880
+flow send: mixbulk-k2-3 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 16692472 bytes acked in 16.14 s = 8.28 Mbit/s, Jain 0.984, total_retrans=541, rows=12720
+flow send: mixbulk-k6-3 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 16395440 bytes acked in 15.63 s = 8.39 Mbit/s, Jain 0.980, total_retrans=528, rows=12312
+flow send: mixbulk-k7-3 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 16722460 bytes acked in 15.82 s = 8.46 Mbit/s, Jain 0.964, total_retrans=538, rows=12480
+flow send: mixbulk-k2-4 8 flows, 2 with SO_MAX_PACING_RATE, cc=reno: 16153280 bytes acked in 15.51 s = 8.33 Mbit/s, Jain 0.973, total_retrans=537, rows=12232
+flow send: mixbulk-k6-4 8 flows, 6 with SO_MAX_PACING_RATE, cc=reno: 16227764 bytes acked in 15.48 s = 8.39 Mbit/s, Jain 0.984, total_retrans=517, rows=12208
+flow send: mixbulk-k7-4 8 flows, 7 with SO_MAX_PACING_RATE, cc=reno: 16251344 bytes acked in 15.45 s = 8.41 Mbit/s, Jain 0.987, total_retrans=536, rows=12184

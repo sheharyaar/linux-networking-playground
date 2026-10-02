@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where BBR loses · chapter 11 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 11 of 14</p>
+    <h1>Where BBR loses</h1>
+    <p class="sub">After this chapter you can predict, from the bottleneck buffer counted in BDPs and from the loss rate, whether BBRv1 or CUBIC gets more of a shared link, name the line of <code>tcp_bbr.c</code> behind each outcome, and say what BBRv3 changes.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The papers</h2>
+    <ol><li><a href="#book">pp. 130–136 and 137–143</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-buffer-decides">The buffer picks the winner</a></li>
+        <li><a href="#s-shallow-retransmits">The price of a shallow buffer</a></li>
+        <li><a href="#s-inflight-cap">The cap sets the share</a></li>
+        <li><a href="#s-loss-cliff">Flat, then a cliff</a></li>
+        <li><a href="#s-policer-mode">The policer detector sits at the cliff</a></li>
+        <li><a href="#s-bbrv3">What BBRv3 changes</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 11 · before you read</span>
+      <h2>Where BBR loses</h2>
+      <p class="chmeta">~6 min before · Cao et al. pp. 130–136 and Ware et al. pp. 137–143 (~1.5 h) · ~22 min after · <span class="tag CC">CC</span><br>
+        <span class="spine">The bench's 10 Mbit/s, 40 ms path, a pipe of 33 packets, which is also Ware et al.'s testbed (p. 138). One BBR flow and one CUBIC flow share its bottleneck, first behind a 17-packet buffer (half a BDP), then behind a 330-packet buffer (ten BDPs).</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>The BBR chapter built a sender that keeps a model of the path. On the spine it learns a <a href="index.html#g-btlbw">BtlBw</a> of 10 Mbit/s and an <a href="index.html#g-rtprop">RTprop</a> of 40 ms, paces at a <a href="index.html#g-pacing-gain">pacing gain</a> times BtlBw, and caps what it has in flight at a <a href="index.html#g-cwnd-gain">cwnd gain</a> of 2 times BtlBw times RTprop. Loss is not an input to that model. Other flows show up only through the rate and the round-trip time BBR measures.</p>
+      <p>Now give the path a neighbour that plays by the old rules: CUBIC, Linux's default, which grows its window until the buffer overflows and cuts it by 30% on each loss. Cao et al. ran 640 bandwidth, RTT and buffer combinations and found <a href="index.html#g-bbr">BBR</a> up to 115% ahead of CUBIC in a 100 KB buffer, CUBIC up to 34% ahead in a 10 MB one, BBR losing ten times as many packets, and a loss rate near 20% where BBR's goodput falls off a cliff (pp. 131–134). Ware et al. saw one BBR flow take a fixed 35–40% of the link against as many as 16 CUBIC flows (p. 137).</p>
+      <p>So the question is: what decides who wins, the buffer, the loss rate or the neighbour? And each time, which part of BBRv1 is responsible?</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-shallow-deep-buffer">shallow and deep buffer</dt><dd>A bottleneck buffer smaller, or larger, than one BDP. Cao et al. test 100 KB as shallow and 10 MB as deep, because 10 MB is larger than most BDPs in their grid (p. 133).</dd>
+        <dt id="w-gpgain">goodput gain (GpGain)</dt><dd>Cao et al.'s score: BBR's goodput minus CUBIC's, as a percentage of CUBIC's (Eq. 1, p. 133). Positive means BBR got more. It is not symmetric: \(-34\%\) means CUBIC got \(1/0.66 \approx 1.5\) times BBR's goodput.</dd>
+        <dt id="w-loss-cliff">loss cliff (cliff point)</dt><dd>The random loss rate above which BBR's goodput collapses instead of shrinking slowly. Cao et al. predict it at \(p = 1 - 1/g\), where \(g\) is the largest pacing gain (Eq. 3, p. 134).</dd>
+        <dt id="w-policer-mode">policer mode</dt><dd>BBRv1's long-term bandwidth mode. After two sampling intervals with steady delivery and heavy loss, it paces at their average rate with a pacing gain of 1 for 48 round trips (<code>net/ipv4/tcp_bbr.c:184–194</code>). Cao et al. call the trigger "a signal of policing" (p. 134).</dd>
+        <dt id="w-inflight-cap">inflight cap (in-flight cap)</dt><dd>The most data BBRv1 lets be in flight: cwnd gain times BtlBw times RTprop, so 2 BDPs as BBR estimates them (Ware et al. Eq. 1, p. 140). A sender at its cap is window-limited: it sends only when acks free room.</dd>
+        <dt id="w-probe-time">probe time</dt><dd>Ware et al.'s name for the time BBR spends in <a href="index.html#g-bbr-states">ProbeRTT</a>, waiting for the queue to drain and then holding 4 packets in flight (Eq. 11, p. 142).</dd>
+        <dt id="w-bbrv3">BBRv3 (after reading)</dt><dd>The current version of BBR, specified in the IETF draft draft-ietf-ccwg-bbr-06 (July 2026) and shipped by Google outside the mainline kernel. It reacts to loss rates above 2% and keeps two limits on inflight, one long-term and one short-term. Linux 7.2 still runs BBRv1.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  M["BBR's path model<br/>BtlBw and RTprop"] --> PR["pacing rate =<br/>pacing gain x BtlBw"]
+  M --> CAP["inflight cap =<br/>2 x BtlBw x RTprop"]
+  PR --> SH
+  CAP --> DE
+  PR --> RL
+  subgraph SH["Shallow buffer, below one BDP"]
+    SH1["each 1.25 probe meets a small buffer"] --> SH2["BBR wins on goodput,<br/>with many retransmissions"]
+  end
+  subgraph DE["Deep buffer, CUBIC neighbour"]
+    DE1["CUBIC keeps the buffer full"] --> DE2["CUBIC gains;<br/>BBR's share is set by its inflight cap"]
+  end
+  subgraph RL["Random loss"]
+    RL1["the probe delivers less than it sends"] --> RL2["flat goodput,<br/>then the loss cliff"]
+  end
+  style CAP fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+  style PR fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 11.1 — Three ways the path model meets a path it does not describe.</b> Notice that each regime leans on one control. The shallow buffer and random loss stress the pacing rate and its 1.25 probe; the deep buffer shared with CUBIC stresses the inflight cap. Cao et al. measure all three (pp. 133–135); Ware et al. explain the middle one (pp. 139–142). The papers supply the arrows this diagram leaves out.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Paper section</th><th>Pages</th><th>How</th><th>Look for</th></tr>
+        <tr><td>Cao: abstract, 1 Introduction, 2 Background on BBR</td><td>pp. 130–131</td><td><span class="how skim">skim</span></td><td>The four claims. The background retells the BBR chapter; note that it says BBR keeps "2× BDP" in flight, a phrase the shallow-buffer argument leans on.</td></tr>
+        <tr><td>Cao: 3 Experimental setup</td><td>pp. 131–132</td><td><span class="how close">close</span></td><td>Why the rate limit sits on a separate router (TSQ), Linux 4.15, and a tbf queue as the "buffer".</td></tr>
+        <tr><td>Cao: 4.1.1 Decision tree</td><td>pp. 132–133</td><td><span class="how skim">skim</span></td><td>Fig. 4. The RTT splits never change the class; the tree is bandwidth and buffer.</td></tr>
+        <tr><td>Cao: 4.1.2 Goodput, Loss, Latency</td><td>pp. 133–134</td><td><span class="how close">close</span></td><td>Fig. 5's four heatmaps: who wins in 100 KB and in 10 MB, and the retransmission counts. Here "latency" means completion time.</td></tr>
+        <tr><td>Cao: 4.2 BBR's goodput vs packet losses</td><td>p. 134</td><td><span class="how close">close</span></td><td>Eq. 3, BBR_1.1 and BBR_1.5 in Fig. 7, and the one sentence about policing.</td></tr>
+        <tr><td>Cao: 4.3 Analyzing BBR's fairness</td><td>pp. 134–135</td><td><span class="how close">close</span></td><td>Fig. 8 and Table 1: the share against buffer size, and the WAN path whose own buffer was 20 KB.</td></tr>
+        <tr><td>Cao: 5–7 Related work, limitations, conclusion</td><td>p. 135</td><td><span class="how skim">skim</span></td><td>At most two flows, one topology, one kernel.</td></tr>
+        <tr><td>Ware: 1 Introduction, 2 Testbed, 3 BBR in competition</td><td>pp. 137–138</td><td><span class="how close">close</span></td><td>Fig. 1b is this chapter's spine: 10 Mbit/s, 40 ms, queues of 0.25 to 128 BDPs. Fig. 2: how long the contest takes to settle.</td></tr>
+        <tr><td>Ware: 4 BBR primer</td><td>p. 139</td><td><span class="how skim">skim</span></td><td>A retelling of the BBR chapter. It says the bandwidth filter spans 8 RTTs; the kernel uses 10 rounds (<code>tcp_bbr.c:134</code>).</td></tr>
+        <tr><td>Ware: 5.1–5.3 Assumptions, simple model</td><td>pp. 139–140</td><td><span class="how close">close</span></td><td>Eq. 1–5 and the assumption that a flow's share of the link equals its share of the queue.</td></tr>
+        <tr><td>Ware: 5.4–5.5 Extended model</td><td>pp. 140–142</td><td><span class="how close">close</span></td><td>Eq. 6–11: several BBR flows, a finite queue, and the time lost in ProbeRTT. Fig. 8 checks the model.</td></tr>
+        <tr><td>Ware: 6 Related work, 7 Conclusion</td><td>pp. 142–143</td><td><span class="how skim">skim</span></td><td>The one-paragraph summary of what the cap does.</td></tr>
+      </table>
+
+      <div class="carry" id="carry"><h4>Carry these into the papers</h4><ol>
+        <li>Why does BBR get more goodput than CUBIC when the buffer is far smaller than a BDP, and what does it pay for that goodput?</li>
+        <li>Against CUBIC in a deep buffer, what sets BBR's share of the link, and why does adding more CUBIC flows not lower it?</li>
+        <li>Under random loss, why does BBRv1's goodput stay nearly flat up to about 20% and then collapse, and what decides where the collapse starts?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="buffer-decides">The buffer picks the winner</li>
+          <li data-strand="shallow-retransmits">The price of a shallow buffer</li>
+          <li data-strand="inflight-cap">The cap sets the share</li>
+          <li data-strand="loss-cliff">Flat, then a cliff</li>
+          <li data-strand="policer-mode">The policer detector sits at the cliff</li>
+          <li data-strand="bbrv3">What BBRv3 changes</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 11 "Where BBR loses" (Y. Cao, A. Jain, K. Sharma, A. Balasubramanian, A. Gandhi, "When to use and when not to use BBR", IMC '19, printed pp. 130–136; R. Ware, M. K. Mukerjee, S. Seshan, J. Sherry, "Modeling BBR's Interactions with Loss-Based Congestion Control", IMC '19, printed pp. 137–143).
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: buffer-decides (The buffer picks the winner), shallow-retransmits (The price of a shallow buffer), inflight-cap (The cap sets the share), loss-cliff (Flat, then a cliff), policer-mode (The policer detector sits at the cliff), bbrv3 (What BBRv3 changes).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch11.md.
+End with a reading plan: for each row of the reading guide in ch11.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read the two papers</h2>
+      <p>About an hour and a half, two seven-page short papers from IMC '19. First Cao et al., pp. 130–136 of <code>10-when-to-use-bbr.pdf</code> (PDF pages 1–7). Then Ware et al., pp. 137–143 of <code>extra/ware-2019-bbr-interactions-imc.pdf</code> (PDF pages 1–7; this copy prints no page numbers). Keep the three questions in mind and note the page where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 11 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. Why does BBR get more goodput than CUBIC when the buffer is far smaller than a BDP, and what does it pay for that goodput? <span class="pageref">pp. 133–135</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because every probe overflows a small buffer and only CUBIC slows down. CUBIC cuts its window by 30% per loss and, at a large BDP, regrows for seconds; BBRv1's rate comes from a delivery-rate filter that loss does not touch. At 500 Mbit/s, 200 ms and 100 KB: 386.0 against 179.6 Mbit/s (p. 133). The price is loss: 10.1% against 0.9%, and 305,029 retransmissions against 1,398 sharing 100 KB (Table 1, p. 135).</p></details>
+        <p>2. Against CUBIC in a deep buffer, what sets BBR's share of the link, and why does adding more CUBIC flows not lower it? <span class="pageref">pp. 139–142</span></p>
+        <details class="ans"><summary>Answer</summary><p>Its inflight cap. CUBIC keeps the queue full, so BBR's RTprop estimate includes CUBIC's queue (Eq. 3, p. 140), and BBR's probes push CUBIC back until BBR is window-limited at 2 × BtlBw × that RTT. Equating the cap with BBR's share of the queue gives \(p = 1/2\) (Eq. 5, p. 140). The number of CUBIC flows never enters it (p. 140). Near miss: "so BBR is fair". Against 16 CUBIC flows it still takes 35–40% (p. 137).</p></details>
+        <p>3. Under random loss, why does BBRv1's goodput stay nearly flat up to about 20% and then collapse, and what decides where the collapse starts? <span class="pageref">p. 134</span></p>
+        <details class="ans"><summary>Answer</summary><p>Only the probe can renew BBR's bandwidth estimate, and a probe at pacing gain \(g\) delivers \(g(1-p)\) of it. At 1 or more, every cycle refreshes the max filter; below 1, the filter ages out and the rate shrinks cycle by cycle. Eq. 3 puts the cliff at \(1 - 1/1.25 = 20\%\) (p. 134). Near miss: the gain alone. BBRv1's policer detector fires at nearly the same loss (<code>tcp_bbr.c:188</code>), and the paper names it only for BBR_1.5.</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p><b>Cao et al.</b> measure. They shape a dumbbell on a separate router, tbf for rate and buffer and netem for delay and loss, because shaping on the sender upsets TSQ (p. 132), and run Linux 4.15's BBRv1 against CUBIC in 640 configurations (pp. 132–133). Fig. 5 (p. 133) carries the result: in a 100 KB buffer BBR wins where the BDP is large, by up to 115%; in a 10 MB buffer CUBIC wins by up to 34%. BBR pays in losses, 10.1% against 0.9%, which the authors blame on the cwnd gain of 2.</p>
+      <p>Under random loss (Fig. 7, p. 134), CUBIC and Reno collapse within the first percent while BBR holds to about 20% and then falls. Eq. 3 puts that loss cliff at \(1 - 1/g\); BBR rebuilt with \(g = 1.1\) falls earlier, and with \(g = 1.5\) at the same place as BBR, which the authors put down to the policer logic. Sharing 1 Gbit/s and 20 ms (Fig. 8, Table 1, pp. 134–135), BBR takes 94% at 10 KB, the two split evenly near 5 MB, and CUBIC dominates at 10 MB.</p>
+      <p><b>Ware et al.</b> model the deep-buffer case. In competition BBR becomes window-limited at its inflight cap (p. 137). CUBIC's queue inflates BBR's RTT estimate, BBR's probes push CUBIC back, and the cap stops BBR at half the queue (Eq. 1–5, p. 140). The extended model adds a finite queue, \(N\) BBR flows and the probe time (Eq. 6–11, pp. 140–142). The number of loss-based flows never enters the cap, which is why one BBR flow keeps 35–40% against sixteen.</p>
+
+      <h3 class="strand" id="s-buffer-decides">The buffer picks the winner</h3>
+      <p>Whether BBRv1 or CUBIC gets more goodput depends mostly on the bottleneck buffer counted in BDPs: far below one BDP, BBR wins; far above it, CUBIC wins. The authors' conclusion names "the relative difference between the bottleneck buffer size and BDP" (p. 135).</p>
+      <p>Read Fig. 5 (p. 133) that way. At 500 Mbit/s and 200 ms the <a href="index.html#g-pipe-size">BDP</a> is 12.5 MB, so 100 KB is 0.8% of it: GpGain +115%. At 10 Mbit/s and 200 ms, 10 MB is 40 BDPs: \(-34\%\). The decision tree's two RTT splits (Fig. 4, p. 132) each end in leaves of one class.</p>
+      <p>The mechanism is the <a href="index.html#g-buffer-sizing-rule">buffer-sizing rule</a> from the queueing-maths chapter, applied to CUBIC. After a loss CUBIC's window is \(0.7\,(\text{BDP} + B)\) (RFC 9438 §4.6), which covers the pipe only if \(B \ge 0.43\) BDP. Below that the link idles until CUBIC regrows, and the time to its old peak, \(K = \sqrt[3]{0.3\,W_{\max}/0.4}\) (§4.2, §5.1), is 18 s for an 8,300-packet window. Above one BDP, the congestion-avoidance chapter's <a href="index.html#g-aimd">AIMD</a> fills whatever buffer it gets, and BBR, capped at 2 BDPs in flight, cannot claim it back (p. 133).</p>
+      <p>The bench shows the other half: with a small BDP, a shallow buffer costs CUBIC little. One CUBIC flow on the spine path, 60 s per row (2 October 2026):</p>
+      <table>
+        <tr><th>r1 limit</th><th>in BDPs</th><th>goodput</th><th>mean RTT</th><th>retransmissions</th></tr>
+        <tr><td>4 packets</td><td>0.12</td><td>8.53 Mbit/s</td><td>43 ms</td><td>37</td></tr>
+        <tr><td>17 packets</td><td>0.5</td><td>9.55 Mbit/s</td><td>54 ms</td><td>23</td></tr>
+        <tr><td>33 packets</td><td>1</td><td>9.56 Mbit/s</td><td>72 ms</td><td>16</td></tr>
+        <tr><td>330 packets</td><td>10</td><td>9.56 Mbit/s</td><td>381 ms</td><td>52</td></tr>
+      </table>
+      <p>At 0.12 BDP CUBIC still gets 89%: a 37-packet window regrows in about a second. Fig. 5a agrees, with GpGain between \(-5\%\) and \(+4\%\) at 10–50 Mbit/s; the +115% needs a BDP of thousands of packets. The deep row shows the other cost, 381 ms of RTT: the <a href="index.html#g-bufferbloat">bufferbloat</a> BBR was built to avoid. Data: <a href="labs/ch11-bbr-limits/data/solo-cubic.csv">solo-cubic.csv</a>.</p>
+
+      <h3 class="strand" id="s-shallow-retransmits">The price of a shallow buffer</h3>
+      <p>In a shallow buffer BBRv1 keeps its goodput by not backing off, and pays in retransmissions: often ten times CUBIC's alone, over two hundred times when the two share a buffer (pp. 133, 135).</p>
+      <p>At 100 KB the average loss is 10.1% for BBR and 0.9% for CUBIC; at 10 MB it is 0.8% and 1.3% (p. 133). Sharing 1 Gbit/s and 20 ms through 100 KB, BBR retransmits 305,029 packets and CUBIC 1,398 (Table 1, p. 135). Ware et al. add that BBR's probing "causes buffer overflows and bursty loss for competing flows" (p. 137).</p>
+      <p>Cao et al. blame the cwnd gain: 2 BDPs in flight need a buffer of one BDP (p. 133). That is half the story, because 2 BDPs is a cap. With a correct <a href="index.html#g-windowed-filter">windowed filter</a>, BBR paces at 1.0 × BtlBw and keeps about one BDP in <a href="index.html#g-inflight">inflight</a>. Two things push it past a small buffer:</p>
+      <ul>
+        <li>Each probe sends 1.25 × BtlBw for one RTprop, 0.25 BDP extra: 3.1 MB at 500 Mbit/s and 200 ms, 31 times a 100 KB buffer, every eight rounds.</li>
+        <li>The max filter keeps its largest sample for 10 rounds (<code>tcp_bbr.c:134, 801</code>), so one high <a href="index.html#g-delivery-rate">delivery rate</a> sample paces BBR above the link until it ages out; the max "usually" gives "a slight overestimate" (Ware p. 140). Then BBR does fill its cap.</li>
+      </ul>
+      <p>BBRv1's own loss handling is small: lost packets come off cwnd (<code>tcp_bbr.c:493–494</code>), recovery starts with one round of packet conservation (<code>:481–515</code>), and a 1.25 phase ends early on loss (<code>:579–582</code>). None of the three lowers BtlBw.</p>
+      <p>One claim lacks data: the abstract's "often exhibits large queue sizes" (p. 130). The paper reports retransmissions, never a queue length or an RTT. On a live host this case shows in <code>ss -ti</code> as a climbing <code>retrans</code> while <code>bbr:(bw:…)</code> stays at the link rate.</p>
+
+      <h3 class="strand" id="s-inflight-cap">The cap sets the share</h3>
+      <p>Against loss-based flows in a deep buffer, BBRv1 becomes window-limited at its inflight cap, and that cap sets its share of the link; the number of competitors does not enter (pp. 137, 140).</p>
+      <p>Ware et al. argue in two steps (pp. 139–140). BBR's probes push the total load over the link; everyone loses, CUBIC backs off, and BBR measures more delivery, until it reaches its cap. And CUBIC's packets stay queued while BBR drains in ProbeRTT, so BBR's RTprop estimate is CUBIC's queueing delay. With CUBIC holding a fraction \(p\) of a \(q\)-packet queue on a link of \(c\) packets per second:</p>
+      <p>\[ \begin{aligned} \text{BtlBw}_{est} &amp;= (1-p)\,c, \qquad \text{RTT}_{est} = pq/c,\\ \text{cap} &amp;= 2\,\text{BtlBw}_{est}\,\text{RTT}_{est} = 2(p - p^2)\,q. \end{aligned} \]</p>
+      <p>BBR's own share of the queue is \((1-p)\,q\). Equal to the cap, it gives \(p = 1/2\) (Eq. 5, p. 140), however many CUBIC flows hold the other half. With a 4-BDP cap the same algebra gives 75%, where the authors' modified kernel converged (Fig. 5, p. 140). A capped sender sends one packet per ack: the <a href="index.html#g-ack-clock">ack clock</a> of the congestion-avoidance chapter, inside a rate-based sender, "window-limited and ACK-clocked" (p. 143).</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch11-ware-->
+<svg viewBox="0 0 720 322" role="img" aria-label="Ware et al.&#x27;s model of one BBRv1 flow&#x27;s share of a 10 Mbit/s, 40 ms link against CUBIC, against queue size in BDPs" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="280.0" y2="280.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="284.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="217.5" y2="217.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="221.5" text-anchor="end" fill="#898781">25</text>
+<line x1="58" x2="570" y1="155.0" y2="155.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="159.0" text-anchor="end" fill="#898781">50</text>
+<line x1="58" x2="570" y1="92.5" y2="92.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="96.5" text-anchor="end" fill="#898781">75</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="280.0" y2="280.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="155.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 155.0)">BBR share of the link (%)</text>
+<line x1="58" x2="570" y1="155.0" y2="155.0" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="159.0" fill="#898781"></text>
+<polyline points="58.0,30.0 61.2,30.0 64.4,30.0 67.6,30.0 70.8,30.0 74.0,30.0 77.2,30.0 80.4,30.0 83.6,30.0 86.8,30.0 90.0,30.0 93.2,30.0 96.4,30.0 99.6,30.0 102.8,30.0 106.0,30.0 109.2,30.0 112.4,30.0 115.6,30.0 118.8,30.0 122.0,30.0 125.2,30.0 128.4,30.0 131.6,30.0 134.8,30.0 138.0,30.0 141.2,30.0 144.4,30.0 147.6,30.0 150.8,30.0 154.0,30.0 157.2,30.0 160.4,30.0 163.6,30.0 166.8,30.0 170.0,30.0 173.2,30.0 176.4,30.0 179.6,30.0 182.8,30.0 186.0,30.0 189.2,30.0 192.4,30.0 195.6,30.0 198.8,30.0 202.0,30.0 205.2,30.0 208.4,33.2 211.6,37.3 214.8,41.3 218.0,45.2 221.2,48.9 224.4,52.6 227.6,56.0 230.8,59.4 234.0,62.7 237.2,65.8 240.4,68.9 243.6,71.8 246.8,74.6 250.0,77.4 253.2,80.0 256.4,82.6 259.6,85.0 262.8,87.4 266.0,89.7 269.2,91.9 272.4,94.1 275.6,96.2 278.8,98.2 282.0,100.1 285.2,102.0 288.4,103.8 291.6,105.5 294.8,107.2 298.0,108.8 301.2,110.4 304.4,111.9 307.6,113.4 310.8,114.8 314.0,116.2 317.2,117.5 320.4,118.8 323.6,120.0 326.8,121.2 330.0,122.4 333.2,123.5 336.4,124.5 339.6,125.6 342.8,126.6 346.0,127.6 349.2,128.5 352.4,129.4 355.6,130.3 358.8,131.1 362.0,131.9 365.2,132.7 368.4,133.5 371.6,134.2 374.8,134.9 378.0,135.6 381.2,136.3 384.4,136.9 387.6,137.5 390.8,138.1 394.0,138.7 397.2,139.2 400.4,139.8 403.6,140.3 406.8,140.8 410.0,141.3 413.2,141.7 416.4,142.2 419.6,142.6 422.8,143.1 426.0,143.5 429.2,143.9 432.4,144.2 435.6,144.6 438.8,145.0 442.0,145.3 445.2,145.6 448.4,145.9 451.6,146.3 454.8,146.6 458.0,146.8 461.2,147.1 464.4,147.4 467.6,147.6 470.8,147.9 474.0,148.1 477.2,148.4 480.4,148.6 483.6,148.8 486.8,149.0 490.0,149.2 493.2,149.4 496.4,149.6 499.6,149.8 502.8,150.0 506.0,150.1 509.2,150.3 512.4,150.5 515.6,150.6 518.8,150.8 522.0,150.9 525.2,151.1 528.4,151.2 531.6,151.3 534.8,151.4 538.0,151.6 541.2,151.7 544.4,151.8 547.6,151.9 550.8,152.0 554.0,152.1 557.2,152.2 560.4,152.3 563.6,152.4 566.8,152.5 570.0,152.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<line x1="574" x2="586" y1="155.0" y2="155.0" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="159.0" fill="#1b1f24">Eq. 9 alone</text>
+<polyline points="58.0,36.2 61.2,36.3 64.4,36.3 67.6,36.3 70.8,36.3 74.0,36.3 77.2,36.3 80.4,36.3 83.6,36.3 86.8,36.3 90.0,36.4 93.2,36.4 96.4,36.4 99.6,36.4 102.8,36.4 106.0,36.4 109.2,36.4 112.4,36.5 115.6,36.5 118.8,36.5 122.0,36.5 125.2,36.5 128.4,36.5 131.6,36.6 134.8,36.6 138.0,36.6 141.2,36.6 144.4,36.6 147.6,36.7 150.8,36.7 154.0,36.7 157.2,36.7 160.4,36.8 163.6,36.8 166.8,36.8 170.0,36.8 173.2,36.9 176.4,36.9 179.6,36.9 182.8,37.0 186.0,37.0 189.2,37.0 192.4,37.1 195.6,37.1 198.8,37.1 202.0,37.2 205.2,37.2 208.4,37.3 211.6,37.3 214.8,37.4 218.0,37.4 221.2,37.5 224.4,37.5 227.6,37.6 230.8,37.6 234.0,37.7 237.2,37.7 240.4,37.8 243.6,37.9 246.8,37.9 250.0,38.0 253.2,38.1 256.4,38.1 259.6,38.2 262.8,38.3 266.0,38.4 269.2,38.5 272.4,38.5 275.6,38.6 278.8,38.7 282.0,38.8 285.2,38.9 288.4,39.0 291.6,39.1 294.8,39.2 298.0,39.4 301.2,39.5 304.4,41.6 307.6,43.7 310.8,45.8 314.0,47.7 317.2,49.6 320.4,51.5 323.6,53.3 326.8,55.1 330.0,56.8 333.2,58.4 336.4,60.0 339.6,61.6 342.8,63.1 346.0,64.5 349.2,66.0 352.4,67.4 355.6,68.7 358.8,70.0 362.0,71.3 365.2,72.6 368.4,73.8 371.6,75.0 374.8,76.2 378.0,77.3 381.2,78.4 384.4,79.5 387.6,80.6 390.8,81.6 394.0,82.7 397.2,83.7 400.4,84.7 403.6,85.7 406.8,86.6 410.0,87.6 413.2,88.5 416.4,89.4 419.6,90.4 422.8,91.3 426.0,92.2 429.2,93.1 432.4,93.9 435.6,94.8 438.8,95.7 442.0,96.6 445.2,97.5 448.4,98.3 451.6,99.2 454.8,100.1 458.0,101.0 461.2,101.9 464.4,102.7 467.6,103.6 470.8,104.5 474.0,105.4 477.2,106.4 480.4,107.3 483.6,108.2 486.8,109.2 490.0,110.2 493.2,111.1 496.4,112.1 499.6,113.1 502.8,114.2 506.0,115.2 509.2,116.3 512.4,117.4 515.6,118.5 518.8,119.7 522.0,120.8 525.2,122.0 528.4,123.2 531.6,124.5 534.8,125.8 538.0,127.1 541.2,128.5 544.4,129.9 547.6,131.3 550.8,132.8 554.0,134.3 557.2,135.8 560.4,137.4 563.6,139.1 566.8,140.8 570.0,142.5" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="132.5" y2="132.5" stroke="#eda100" stroke-width="2"/>
+<text x="590" y="136.5" fill="#1b1f24">4-BDP cap</text>
+<polyline points="58.0,36.2 61.2,36.3 64.4,36.3 67.6,36.3 70.8,36.3 74.0,36.3 77.2,36.3 80.4,36.3 83.6,36.3 86.8,36.3 90.0,36.4 93.2,36.4 96.4,36.4 99.6,36.4 102.8,36.4 106.0,36.4 109.2,36.4 112.4,36.5 115.6,36.5 118.8,36.5 122.0,36.5 125.2,36.5 128.4,36.5 131.6,36.6 134.8,36.6 138.0,36.6 141.2,36.6 144.4,36.6 147.6,36.7 150.8,36.7 154.0,36.7 157.2,36.7 160.4,36.8 163.6,36.8 166.8,36.8 170.0,36.8 173.2,36.9 176.4,36.9 179.6,36.9 182.8,37.0 186.0,37.0 189.2,37.0 192.4,37.1 195.6,37.1 198.8,37.1 202.0,37.2 205.2,37.2 208.4,40.4 211.6,44.4 214.8,48.4 218.0,52.2 221.2,55.8 224.4,59.4 227.6,62.8 230.8,66.1 234.0,69.3 237.2,72.4 240.4,75.4 243.6,78.3 246.8,81.1 250.0,83.8 253.2,86.5 256.4,89.0 259.6,91.4 262.8,93.8 266.0,96.1 269.2,98.3 272.4,100.4 275.6,102.5 278.8,104.5 282.0,106.5 285.2,108.3 288.4,110.1 291.6,111.9 294.8,113.6 298.0,115.2 301.2,116.8 304.4,118.4 307.6,119.9 310.8,121.3 314.0,122.7 317.2,124.1 320.4,125.4 323.6,126.7 326.8,127.9 330.0,129.1 333.2,130.3 336.4,131.4 339.6,132.5 342.8,133.6 346.0,134.7 349.2,135.7 352.4,136.7 355.6,137.6 358.8,138.5 362.0,139.5 365.2,140.3 368.4,141.2 371.6,142.0 374.8,142.9 378.0,143.7 381.2,144.5 384.4,145.2 387.6,146.0 390.8,146.7 394.0,147.4 397.2,148.2 400.4,148.9 403.6,149.5 406.8,150.2 410.0,150.9 413.2,151.5 416.4,152.2 419.6,152.8 422.8,153.5 426.0,154.1 429.2,154.7 432.4,155.3 435.6,155.9 438.8,156.5 442.0,157.1 445.2,157.8 448.4,158.4 451.6,159.0 454.8,159.6 458.0,160.2 461.2,160.8 464.4,161.4 467.6,162.0 470.8,162.6 474.0,163.2 477.2,163.9 480.4,164.5 483.6,165.1 486.8,165.8 490.0,166.4 493.2,167.1 496.4,167.8 499.6,168.5 502.8,169.2 506.0,169.9 509.2,170.6 512.4,171.4 515.6,172.1 518.8,172.9 522.0,173.7 525.2,174.5 528.4,175.3 531.6,176.1 534.8,177.0 538.0,177.9 541.2,178.8 544.4,179.7 547.6,180.7 550.8,181.7 554.0,182.7 557.2,183.8 560.4,184.8 563.6,185.9 566.8,187.1 570.0,188.3" fill="none" stroke="#2a78d6" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="190.0" y2="190.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="194.0" fill="#1b1f24">cap 2 BDP + probe</text>
+<polyline points="122.0,280.0 122.0,30.0" fill="none" stroke="#c3c2b7" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3"/>
+<polyline points="398.6,280.0 398.6,30.0" fill="none" stroke="#c3c2b7" stroke-width="1" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 3"/>
+<text x="61.2" y="150.0" fill="#4a5560" text-anchor="start">simple model: 50%</text>
+<text x="125.2" y="260.0" fill="#4a5560" text-anchor="start">spine: 0.5 BDP</text>
+<text x="401.8" y="260.0" fill="#4a5560" text-anchor="start">10 BDP</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">Eq. 9-11: cap 2 BDP, with probe time</text>
+<line x1="344" x2="358" y1="18" y2="18" stroke="#1baf7a" stroke-width="2"/>
+<text x="363" y="22" fill="#1b1f24">Eq. 9 alone</text>
+<line x1="447" x2="461" y1="18" y2="18" stroke="#eda100" stroke-width="2"/>
+<text x="466" y="22" fill="#1b1f24">the paper&#x27;s 4-BDP cap</text>
+<text x="58.0" y="296.0" text-anchor="middle" fill="#898781">0.25</text>
+<text x="122.0" y="296.0" text-anchor="middle" fill="#898781">0.5</text>
+<text x="186.0" y="296.0" text-anchor="middle" fill="#898781">1</text>
+<text x="250.0" y="296.0" text-anchor="middle" fill="#898781">2</text>
+<text x="314.0" y="296.0" text-anchor="middle" fill="#898781">4</text>
+<text x="378.0" y="296.0" text-anchor="middle" fill="#898781">8</text>
+<text x="442.0" y="296.0" text-anchor="middle" fill="#898781">16</text>
+<text x="506.0" y="296.0" text-anchor="middle" fill="#898781">32</text>
+<text x="570.0" y="296.0" text-anchor="middle" fill="#898781">64</text>
+<text x="314.0" y="314.0" text-anchor="middle" fill="#4a5560">bottleneck queue, in BDPs (log scale; the bench: 1 BDP = 33 packets)</text>
+<g class="hit"><title>queue 0.25 BDP = 8 packets · BBR share: Eq. 9 alone 100.0%, with probe time 97.5%, with a 4-BDP cap 97.5%</title><rect x="58.0" y="30" width="32.0" height="250.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 0.5 BDP = 17 packets · BBR share: Eq. 9 alone 100.0%, with probe time 97.4%, with a 4-BDP cap 97.4%</title><rect x="90.0" y="30" width="64.0" height="250.0" fill="transparent"/><line x1="122.0" x2="122.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 1 BDP = 33 packets · BBR share: Eq. 9 alone 100.0%, with probe time 97.2%, with a 4-BDP cap 97.2%</title><rect x="154.0" y="30" width="41.9" height="250.0" fill="transparent"/><line x1="186.0" x2="186.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 1.24 BDP = 41 packets · BBR share: Eq. 9 alone 100.0%, with probe time 97.1%, with a 4-BDP cap 97.1%</title><rect x="195.9" y="30" width="32.0" height="250.0" fill="transparent"/><line x1="205.9" x2="205.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 2 BDP = 66 packets · BBR share: Eq. 9 alone 81.1%, with probe time 78.5%, with a 4-BDP cap 96.8%</title><rect x="227.9" y="30" width="54.1" height="250.0" fill="transparent"/><line x1="250.0" x2="250.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 4 BDP = 132 packets · BBR share: Eq. 9 alone 65.5%, with probe time 62.9%, with a 4-BDP cap 92.9%</title><rect x="282.0" y="30" width="64.0" height="250.0" fill="transparent"/><line x1="314.0" x2="314.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 8 BDP = 264 packets · BBR share: Eq. 9 alone 57.8%, with probe time 54.5%, with a 4-BDP cap 81.1%</title><rect x="346.0" y="30" width="42.3" height="250.0" fill="transparent"/><line x1="378.0" x2="378.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 10 BDP = 330 packets · BBR share: Eq. 9 alone 56.2%, with probe time 52.6%, with a 4-BDP cap 78.4%</title><rect x="388.3" y="30" width="32.0" height="250.0" fill="transparent"/><line x1="398.6" x2="398.6" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 16 BDP = 528 packets · BBR share: Eq. 9 alone 53.9%, with probe time 49.1%, with a 4-BDP cap 73.4%</title><rect x="420.3" y="30" width="53.7" height="250.0" fill="transparent"/><line x1="442.0" x2="442.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 32 BDP = 1057 packets · BBR share: Eq. 9 alone 51.9%, with probe time 44.0%, with a 4-BDP cap 65.9%</title><rect x="474.0" y="30" width="64.0" height="250.0" fill="transparent"/><line x1="506.0" x2="506.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>queue 64 BDP = 2114 packets · BBR share: Eq. 9 alone 51.0%, with probe time 36.7%, with a 4-BDP cap 55.0%</title><rect x="538.0" y="30" width="32.0" height="250.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch11-ware--></div>
+        <figcaption><b>Diagram 11.2 — One BBRv1 flow's share against CUBIC on the spine path, from Ware et al.'s Eq. 9–11 (pp. 141–142).</b> Notice the knee near 1.24 BDP: below it the cap exceeds queue plus pipe and BBR takes the link; above it the share falls toward 50%, and past about 16 BDP the probe time pulls it lower. This is a model: 1514-byte packets, a full queue, ProbeRTT every 10 s. Hover for values.</figcaption></figure>
+      <details class="deriv"><summary>Derivation · the extended model, Eq. 7–11</summary>
+        <p>With \(N\) BBR flows, each holds 4 packets in the queue during ProbeRTT, and the base RTT \(l\) is no longer negligible: \(\text{RTT}_{est} = (pq + 4N)/c + l\) (Eq. 7). The aggregate cap is \(2(1-p)c\,\text{RTT}_{est}\) (Eq. 8), and BBR's inflight is its share of queue plus pipe, \((1-p)(q + cl)\). Divide both sides by \((1-p)\): \(2(pq + 4N + cl) = q + cl\), so \(p = \tfrac12 - \tfrac{1}{2X} - \tfrac{4N}{q}\) with \(X = q/(cl)\) (Eq. 9). A negative \(p\) means BBR takes the whole link (p. 142). ProbeRTT waits for the full queue to drain, then holds for 200 ms and a round trip, every 10 s: \(\text{Probe}_{time} = (q/c + 0.2 + l)\,d/10\) (Eq. 11), and BBR's fraction is \((1-p)(1 - \text{Probe}_{time}/d)\) (Eq. 10).</p>
+        <p>On the spine, \(c = 10^7/8/1514 = 825.6\) packets/s, \(l = 0.04\) s, \(cl = 33.0\). At \(X = 10\), \(q = 330\): \(p = 0.5 - 0.05 - 4/330 = 0.438\); the probe time is \((0.40 + 0.2 + 0.04)/10 = 6.4\%\); BBR gets \(0.562 \times 0.936 = 0.526\). At \(X = 0.5\), \(p\) is negative, so BBR gets \(1 \times (1 - 0.026) = 0.974\). The knee is where \(p = 0\): \(X = 1 + 8N/(cl) = 1.24\).</p>
+      </details>
+      <p>On the spine at 10 BDPs, the model gives BBR 52.6% against one CUBIC flow, and <a href="index.html#g-jain-index">Jain's index</a> from the queueing-maths chapter is 0.997. Add fifteen CUBIC flows. Eq. 9 does not change, so BBR keeps 52.6%, each CUBIC flow gets 2.96%, and Jain's index over 17 flows is \(1/(17 \times (0.526^2 + 16 \times 0.0296^2)) = 0.20\). Ware et al. report 35–40% against 16 CUBIC flows (p. 137).</p>
+      <p>The paper names the model's limits: for one BBR flow at 2–8 BDPs it overshoots, 0.79 against a measured 0.54 at 2 BDPs (Fig. 8a, p. 142), and deep queues take minutes to converge (Fig. 2a, p. 138).</p>
+      <p class="erratum"><b>The paper's slips.</b> Cao et al. write that at 10 MB "Cubic utilizes 3× more bandwidth than BBR" (p. 134); Fig. 8a's end points on the same page are about 810 and 140 Mbit/s, nearer 6×. Table 1's header (p. 135) reads 1e4, 1e5, 1e6, 5e6, 1e6, 5e7, 1e8: the second 1e6, between 5e6 and 5e7, must be 1e7.</p>
+
+      <h3 class="strand" id="s-loss-cliff">Flat, then a cliff</h3>
+      <p>Under random loss BBRv1's goodput stays near the link rate up to a loss cliff near \(p = 1 - 1/g\) and then collapses, while loss-based senders lose most of their rate within the first percent (Eq. 3 and Fig. 7, p. 134).</p>
+      <p>BtlBw is the largest delivery rate of the last 10 rounds, and only the 1.25 phase can beat the current estimate. With a fraction \(p\) of packets dropped at random, a probe at \(g \times \text{BtlBw}\) delivers \(g(1-p) \times \text{BtlBw}\). At 1 or more, each eight-round cycle renews the maximum before it ages out. Below 1, the old maximum expires and the estimate shrinks by about \(g(1-p)\) per cycle: at 25% loss that is 0.94, so ten cycles, about 3 s on the spine, leave 52%. Setting \(g(1-p) = 1\) gives Eq. 3: 20% for 1.25, and 9.1% and 33.3% for the authors' rebuilt BBR_1.1 and BBR_1.5.</p>
+      <p>Fig. 7a samples loss at roughly 0, 1, 2, 5.5, 11.5, 18, 26, 34 and 44%. BBR holds about 93 of 100 Mbit/s at 18% and drops to about 11 at 26%. BBR_1.1 has 84 near 11.5% and 13 near 18%; the text's "around 9%" falls between samples. BBR_1.5 tracks BBR. Retransmissions peak at the cliff (Fig. 7b): before it goodput holds while loss rises; after it BBR sends less, so it loses less.</p>
+      <p>The loss-based side ran on the bench, one flow at a time, 30 s per point, behind a 300-packet queue so nearly every drop is random:</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch11-loss-->
+<svg viewBox="0 0 720 488" role="img" aria-label="Goodput against random loss for CUBIC and Reno on the bench, with the Mathis formula; below, the probe ratio g(1-p) for three pacing gains and the BBRv1 policer detector threshold" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="234.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="190.0" y2="190.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="194.0" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="570" y1="150.0" y2="150.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="154.0" text-anchor="end" fill="#898781">4</text>
+<line x1="58" x2="570" y1="110.0" y2="110.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="114.0" text-anchor="end" fill="#898781">6</text>
+<line x1="58" x2="570" y1="70.0" y2="70.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="74.0" text-anchor="end" fill="#898781">8</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="570" y1="230.0" y2="230.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="130.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 130.0)">goodput (Mbit/s)</text>
+<line x1="58" x2="570" y1="38.8" y2="38.8" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="42.8" fill="#898781">link 9.56</text>
+<polyline points="58.0,38.7 59.5,52.5 65.3,151.6 72.6,174.9 87.3,194.6 131.1,211.4 204.3,219.8 277.4,221.8 350.6,223.2 423.7,225.1 496.9,226.2" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="210.0" y2="210.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="214.0" fill="#1b1f24">Cubic</text>
+<polyline points="58.0,38.7 59.5,66.2 65.3,133.5 72.6,170.8 87.3,184.8 131.1,209.3 204.3,217.0 277.4,220.7 350.6,223.9 423.7,225.4 496.9,226.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="227.0" y2="227.0" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="231.0" fill="#1b1f24">Reno</text>
+<polyline points="61.7,104.4 65.3,141.2 69.0,157.5 72.6,167.2 76.3,173.8 79.9,178.7 83.6,182.5 87.3,185.6 90.9,188.1 94.6,190.3 98.2,192.1 101.9,193.7 105.5,195.2 109.2,196.4 112.9,197.6 116.5,198.6 120.2,199.5 123.8,200.4 127.5,201.2 131.1,201.9 134.8,202.6 138.5,203.2 142.1,203.8 145.8,204.4 149.4,204.9 153.1,205.4 156.7,205.8 160.4,206.3 164.1,206.7 167.7,207.1 171.4,207.4 175.0,207.8 178.7,208.1 182.3,208.5 186.0,208.8 189.7,209.1 193.3,209.3 197.0,209.6 200.6,209.9 204.3,210.1 207.9,210.4 211.6,210.6 215.3,210.8 218.9,211.1 222.6,211.3 226.2,211.5 229.9,211.7 233.5,211.9 237.2,212.1 240.9,212.2 244.5,212.4 248.2,212.6 251.8,212.7 255.5,212.9 259.1,213.1 262.8,213.2 266.5,213.4 270.1,213.5 273.8,213.6 277.4,213.8 281.1,213.9 284.7,214.0 288.4,214.2 292.1,214.3 295.7,214.4 299.4,214.5 303.0,214.7 306.7,214.8 310.3,214.9 314.0,215.0 317.7,215.1 321.3,215.2 325.0,215.3 328.6,215.4 332.3,215.5 335.9,215.6 339.6,215.7 343.3,215.8 346.9,215.9 350.6,216.0 354.2,216.0 357.9,216.1 361.5,216.2 365.2,216.3 368.9,216.4 372.5,216.5 376.2,216.5 379.8,216.6 383.5,216.7 387.1,216.8 390.8,216.8 394.5,216.9 398.1,217.0 401.8,217.0 405.4,217.1 409.1,217.2 412.7,217.2 416.4,217.3 420.1,217.4 423.7,217.4 427.4,217.5 431.0,217.6 434.7,217.6 438.3,217.7 442.0,217.7 445.7,217.8 449.3,217.9 453.0,217.9 456.6,218.0 460.3,218.0 463.9,218.1 467.6,218.1 471.3,218.2 474.9,218.2 478.6,218.3 482.2,218.3 485.9,218.4 489.5,218.4 493.2,218.5 496.9,218.5 500.5,218.6 504.2,218.6 507.8,218.7 511.5,218.7 515.1,218.8 518.8,218.8 522.5,218.9 526.1,218.9 529.8,218.9 533.4,219.0 537.1,219.0 540.7,219.1 544.4,219.1 548.1,219.1 551.7,219.2 555.4,219.2 559.0,219.3 562.7,219.3 566.3,219.3 570.0,219.4" fill="none" stroke="#898781" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<circle cx="58.0" cy="38.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="59.5" cy="52.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="65.3" cy="151.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72.6" cy="174.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="87.3" cy="194.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="131.1" cy="211.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="204.3" cy="219.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="277.4" cy="221.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.6" cy="223.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="423.7" cy="225.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="496.9" cy="226.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="58.0" cy="38.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="59.5" cy="66.2" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="65.3" cy="133.5" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72.6" cy="170.8" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="87.3" cy="184.8" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="131.1" cy="209.3" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="204.3" cy="217.0" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="277.4" cy="220.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="350.6" cy="223.9" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="423.7" cy="225.4" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="496.9" cy="226.6" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="72" cy="18" r="4" fill="#2a78d6"/>
+<text x="85" y="22" fill="#1b1f24">Cubic (bench)</text>
+<circle cx="189" cy="18" r="4" fill="#1baf7a"/>
+<text x="202" y="22" fill="#1b1f24">Reno (bench)</text>
+<line x1="293" x2="307" y1="18" y2="18" stroke="#898781" stroke-width="2"/>
+<text x="312" y="22" fill="#1b1f24">Mathis formula, RTT 45 ms</text>
+<line x1="58" x2="570" y1="426.0" y2="426.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="430.0" text-anchor="end" fill="#898781">0.8</text>
+<line x1="58" x2="570" y1="386.0" y2="386.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="390.0" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="570" y1="346.0" y2="346.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="350.0" text-anchor="end" fill="#898781">1.2</text>
+<line x1="58" x2="570" y1="306.0" y2="306.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="310.0" text-anchor="end" fill="#898781">1.4</text>
+<line x1="58" x2="570" y1="446.0" y2="446.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="361.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 361.0)">g(1-p), a model</text>
+<line x1="58" x2="570" y1="386.0" y2="386.0" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="390.0" fill="#898781"></text>
+<polyline points="58.0,366.0 61.7,366.6 65.3,367.1 69.0,367.6 72.6,368.2 76.3,368.7 79.9,369.3 83.6,369.8 87.3,370.4 90.9,370.9 94.6,371.5 98.2,372.0 101.9,372.6 105.5,373.1 109.2,373.7 112.9,374.2 116.5,374.8 120.2,375.4 123.8,375.9 127.5,376.4 131.1,377.0 134.8,377.5 138.5,378.1 142.1,378.6 145.8,379.2 149.4,379.8 153.1,380.3 156.7,380.8 160.4,381.4 164.1,381.9 167.7,382.5 171.4,383.1 175.0,383.6 178.7,384.1 182.3,384.7 186.0,385.2 189.7,385.8 193.3,386.3 197.0,386.9 200.6,387.4 204.3,388.0 207.9,388.5 211.6,389.1 215.3,389.6 218.9,390.2 222.6,390.8 226.2,391.3 229.9,391.8 233.5,392.4 237.2,392.9 240.9,393.5 244.5,394.0 248.2,394.6 251.8,395.1 255.5,395.7 259.1,396.2 262.8,396.8 266.5,397.3 270.1,397.9 273.8,398.4 277.4,399.0 281.1,399.5 284.7,400.1 288.4,400.6 292.1,401.2 295.7,401.8 299.4,402.3 303.0,402.8 306.7,403.4 310.3,403.9 314.0,404.5 317.7,405.0 321.3,405.6 325.0,406.1 328.6,406.7 332.3,407.2 335.9,407.8 339.6,408.3 343.3,408.9 346.9,409.4 350.6,410.0 354.2,410.5 357.9,411.1 361.5,411.6 365.2,412.2 368.9,412.8 372.5,413.3 376.2,413.8 379.8,414.4 383.5,414.9 387.1,415.5 390.8,416.1 394.5,416.6 398.1,417.1 401.8,417.7 405.4,418.2 409.1,418.8 412.7,419.3 416.4,419.9 420.1,420.4 423.7,421.0 427.4,421.5 431.0,422.1 434.7,422.6 438.3,423.2 442.0,423.7 445.7,424.3 449.3,424.9 453.0,425.4 456.6,425.9 460.3,426.5 463.9,427.1 467.6,427.6 471.3,428.1 474.9,428.7 478.6,429.2 482.2,429.8 485.9,430.3 489.5,430.9 493.2,431.4 496.9,432.0 500.5,432.5 504.2,433.1 507.8,433.6 511.5,434.2 515.1,434.8 518.8,435.3 522.5,435.8 526.1,436.4 529.8,436.9 533.4,437.5 537.1,438.1 540.7,438.6 544.4,439.1 548.1,439.7 551.7,440.2 555.4,440.8 559.0,441.3 562.7,441.9 566.3,442.4 570.0,443.0" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="443.0" y2="443.0" stroke="#eda100" stroke-width="2"/>
+<text x="590" y="447.0" fill="#1b1f24">gain 1.1</text>
+<polyline points="58.0,336.0 61.7,336.6 65.3,337.2 69.0,337.9 72.6,338.5 76.3,339.1 79.9,339.8 83.6,340.4 87.3,341.0 90.9,341.6 94.6,342.2 98.2,342.9 101.9,343.5 105.5,344.1 109.2,344.8 112.9,345.4 116.5,346.0 120.2,346.6 123.8,347.2 127.5,347.9 131.1,348.5 134.8,349.1 138.5,349.8 142.1,350.4 145.8,351.0 149.4,351.6 153.1,352.2 156.7,352.9 160.4,353.5 164.1,354.1 167.7,354.8 171.4,355.4 175.0,356.0 178.7,356.6 182.3,357.2 186.0,357.9 189.7,358.5 193.3,359.1 197.0,359.8 200.6,360.4 204.3,361.0 207.9,361.6 211.6,362.2 215.3,362.9 218.9,363.5 222.6,364.1 226.2,364.8 229.9,365.4 233.5,366.0 237.2,366.6 240.9,367.2 244.5,367.9 248.2,368.5 251.8,369.1 255.5,369.8 259.1,370.4 262.8,371.0 266.5,371.6 270.1,372.2 273.8,372.9 277.4,373.5 281.1,374.1 284.7,374.8 288.4,375.4 292.1,376.0 295.7,376.6 299.4,377.2 303.0,377.9 306.7,378.5 310.3,379.1 314.0,379.8 317.7,380.4 321.3,381.0 325.0,381.6 328.6,382.3 332.3,382.9 335.9,383.5 339.6,384.1 343.3,384.8 346.9,385.4 350.6,386.0 354.2,386.6 357.9,387.2 361.5,387.9 365.2,388.5 368.9,389.1 372.5,389.8 376.2,390.4 379.8,391.0 383.5,391.6 387.1,392.2 390.8,392.9 394.5,393.5 398.1,394.1 401.8,394.8 405.4,395.4 409.1,396.0 412.7,396.6 416.4,397.2 420.1,397.9 423.7,398.5 427.4,399.1 431.0,399.8 434.7,400.4 438.3,401.0 442.0,401.6 445.7,402.2 449.3,402.9 453.0,403.5 456.6,404.1 460.3,404.8 463.9,405.4 467.6,406.0 471.3,406.6 474.9,407.2 478.6,407.9 482.2,408.5 485.9,409.1 489.5,409.8 493.2,410.4 496.9,411.0 500.5,411.6 504.2,412.2 507.8,412.9 511.5,413.5 515.1,414.1 518.8,414.8 522.5,415.4 526.1,416.0 529.8,416.6 533.4,417.2 537.1,417.9 540.7,418.5 544.4,419.1 548.1,419.8 551.7,420.4 555.4,421.0 559.0,421.6 562.7,422.2 566.3,422.9 570.0,423.5" fill="none" stroke="#eb6834" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="423.5" y2="423.5" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="427.5" fill="#1b1f24">gain 1.25</text>
+<polyline points="58.0,286.0 61.7,286.8 65.3,287.5 69.0,288.2 72.6,289.0 76.3,289.8 79.9,290.5 83.6,291.2 87.3,292.0 90.9,292.8 94.6,293.5 98.2,294.2 101.9,295.0 105.5,295.8 109.2,296.5 112.9,297.2 116.5,298.0 120.2,298.8 123.8,299.5 127.5,300.2 131.1,301.0 134.8,301.8 138.5,302.5 142.1,303.2 145.8,304.0 149.4,304.8 153.1,305.5 156.7,306.2 160.4,307.0 164.1,307.8 167.7,308.5 171.4,309.2 175.0,310.0 178.7,310.8 182.3,311.5 186.0,312.2 189.7,313.0 193.3,313.8 197.0,314.5 200.6,315.2 204.3,316.0 207.9,316.8 211.6,317.5 215.3,318.2 218.9,319.0 222.6,319.8 226.2,320.5 229.9,321.2 233.5,322.0 237.2,322.8 240.9,323.5 244.5,324.2 248.2,325.0 251.8,325.8 255.5,326.5 259.1,327.2 262.8,328.0 266.5,328.8 270.1,329.5 273.8,330.2 277.4,331.0 281.1,331.8 284.7,332.5 288.4,333.2 292.1,334.0 295.7,334.8 299.4,335.5 303.0,336.2 306.7,337.0 310.3,337.8 314.0,338.5 317.7,339.2 321.3,340.0 325.0,340.8 328.6,341.5 332.3,342.2 335.9,343.0 339.6,343.8 343.3,344.5 346.9,345.2 350.6,346.0 354.2,346.8 357.9,347.5 361.5,348.2 365.2,349.0 368.9,349.8 372.5,350.5 376.2,351.2 379.8,352.0 383.5,352.8 387.1,353.5 390.8,354.2 394.5,355.0 398.1,355.8 401.8,356.5 405.4,357.2 409.1,358.0 412.7,358.8 416.4,359.5 420.1,360.2 423.7,361.0 427.4,361.8 431.0,362.5 434.7,363.2 438.3,364.0 442.0,364.8 445.7,365.5 449.3,366.2 453.0,367.0 456.6,367.8 460.3,368.5 463.9,369.3 467.6,370.0 471.3,370.8 474.9,371.5 478.6,372.2 482.2,373.0 485.9,373.8 489.5,374.5 493.2,375.2 496.9,376.0 500.5,376.8 504.2,377.5 507.8,378.2 511.5,379.0 515.1,379.8 518.8,380.5 522.5,381.2 526.1,382.0 529.8,382.8 533.4,383.5 537.1,384.2 540.7,385.0 544.4,385.8 548.1,386.5 551.7,387.2 555.4,388.0 559.0,388.8 562.7,389.5 566.3,390.2 570.0,391.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="385.0" y2="385.0" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="389.0" fill="#1b1f24">gain 1.5</text>
+<polyline points="297.0,446.0 297.0,276.0" fill="none" stroke="#898781" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4 3"/>
+<text x="65.3" y="438.0" fill="#4a5560" text-anchor="start">dashed line at 1: the probe delivers the estimate</text>
+<text x="292.6" y="279.0" fill="#4a5560" text-anchor="end">policer detector:</text>
+<text x="292.6" y="289.0" fill="#4a5560" text-anchor="end">16.3% of packets sent</text>
+<text x="292.6" y="299.0" fill="#4a5560" text-anchor="end">(lost/delivered 19.5%)</text>
+<line x1="66" x2="80" y1="264" y2="264" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="268" fill="#1b1f24">the probe phase delivers g(1-p) of the estimate (Cao Eq. 3)</text>
+<text x="58.0" y="462.0" text-anchor="middle" fill="#898781">0</text>
+<text x="131.1" y="462.0" text-anchor="middle" fill="#898781">5</text>
+<text x="204.3" y="462.0" text-anchor="middle" fill="#898781">10</text>
+<text x="277.4" y="462.0" text-anchor="middle" fill="#898781">15</text>
+<text x="350.6" y="462.0" text-anchor="middle" fill="#898781">20</text>
+<text x="423.7" y="462.0" text-anchor="middle" fill="#898781">25</text>
+<text x="496.9" y="462.0" text-anchor="middle" fill="#898781">30</text>
+<text x="570.0" y="462.0" text-anchor="middle" fill="#898781">35</text>
+<text x="314.0" y="480.0" text-anchor="middle" fill="#4a5560">random loss on the bottleneck (%)</text>
+<g class="hit"><title>random loss 0% · cubic: 9.56 Mbit/s · reno: 9.56 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.100, 1.25 -&gt; 1.250, 1.5 -&gt; 1.500</title><rect x="58.0" y="30" width="1.0" height="416.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 0.1% · cubic: 8.87 Mbit/s · reno: 8.19 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.099, 1.25 -&gt; 1.249, 1.5 -&gt; 1.498</title><rect x="58.7" y="30" width="3.7" height="416.0" fill="transparent"/><line x1="59.5" x2="59.5" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 0.5% · cubic: 3.92 Mbit/s · reno: 4.82 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.095, 1.25 -&gt; 1.244, 1.5 -&gt; 1.492</title><rect x="62.4" y="30" width="6.6" height="416.0" fill="transparent"/><line x1="65.3" x2="65.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 1% · cubic: 2.75 Mbit/s · reno: 2.96 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.089, 1.25 -&gt; 1.238, 1.5 -&gt; 1.485</title><rect x="69.0" y="30" width="11.0" height="416.0" fill="transparent"/><line x1="72.6" x2="72.6" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 2% · cubic: 1.77 Mbit/s · reno: 2.26 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.078, 1.25 -&gt; 1.225, 1.5 -&gt; 1.470</title><rect x="79.9" y="30" width="29.3" height="416.0" fill="transparent"/><line x1="87.3" x2="87.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 5% · cubic: 0.93 Mbit/s · reno: 1.03 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 1.045, 1.25 -&gt; 1.188, 1.5 -&gt; 1.425</title><rect x="109.2" y="30" width="45.3" height="416.0" fill="transparent"/><line x1="131.1" x2="131.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 8.2% · probe ratio g(1-p): 1.1 -&gt; 1.010, 1.25 -&gt; 1.147, 1.5 -&gt; 1.377</title><rect x="154.5" y="30" width="30.0" height="416.0" fill="transparent"/><line x1="178.0" x2="178.0" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 9.1% · probe ratio g(1-p): 1.1 -&gt; 1.000, 1.25 -&gt; 1.136, 1.5 -&gt; 1.364</title><rect x="184.5" y="30" width="13.2" height="416.0" fill="transparent"/><line x1="191.1" x2="191.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 10% · cubic: 0.51 Mbit/s · reno: 0.65 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.990, 1.25 -&gt; 1.125, 1.5 -&gt; 1.350</title><rect x="197.7" y="30" width="43.2" height="416.0" fill="transparent"/><line x1="204.3" x2="204.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 15% · cubic: 0.41 Mbit/s · reno: 0.47 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.935, 1.25 -&gt; 1.062, 1.5 -&gt; 1.275</title><rect x="240.9" y="30" width="46.1" height="416.0" fill="transparent"/><line x1="277.4" x2="277.4" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 16.3% · probe ratio g(1-p): 1.1 -&gt; 0.921, 1.25 -&gt; 1.046, 1.5 -&gt; 1.256</title><rect x="286.9" y="30" width="21.9" height="416.0" fill="transparent"/><line x1="296.4" x2="296.4" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 18% · probe ratio g(1-p): 1.1 -&gt; 0.902, 1.25 -&gt; 1.025, 1.5 -&gt; 1.230</title><rect x="308.9" y="30" width="21.2" height="416.0" fill="transparent"/><line x1="321.3" x2="321.3" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 19.2% · probe ratio g(1-p): 1.1 -&gt; 0.889, 1.25 -&gt; 1.010, 1.5 -&gt; 1.212</title><rect x="330.1" y="30" width="14.6" height="416.0" fill="transparent"/><line x1="338.9" x2="338.9" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 20% · cubic: 0.34 Mbit/s · reno: 0.30 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.880, 1.25 -&gt; 1.000, 1.5 -&gt; 1.200</title><rect x="344.7" y="30" width="20.5" height="416.0" fill="transparent"/><line x1="350.6" x2="350.6" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 22% · probe ratio g(1-p): 1.1 -&gt; 0.858, 1.25 -&gt; 0.975, 1.5 -&gt; 1.170</title><rect x="365.2" y="30" width="36.6" height="416.0" fill="transparent"/><line x1="379.8" x2="379.8" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 25% · cubic: 0.25 Mbit/s · reno: 0.23 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.825, 1.25 -&gt; 0.938, 1.5 -&gt; 1.125</title><rect x="401.8" y="30" width="58.5" height="416.0" fill="transparent"/><line x1="423.7" x2="423.7" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 30% · cubic: 0.19 Mbit/s · reno: 0.17 Mbit/s · probe ratio g(1-p): 1.1 -&gt; 0.770, 1.25 -&gt; 0.875, 1.5 -&gt; 1.050</title><rect x="460.3" y="30" width="60.7" height="416.0" fill="transparent"/><line x1="496.9" x2="496.9" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>random loss 33.3% · probe ratio g(1-p): 1.1 -&gt; 0.734, 1.25 -&gt; 0.834, 1.5 -&gt; 1.001</title><rect x="521.0" y="30" width="49.0" height="416.0" fill="transparent"/><line x1="545.1" x2="545.1" y1="30" y2="446.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch11-loss--></div>
+        <figcaption><b>Diagram 11.3 — Goodput against random loss, measured, above Cao et al.'s probe ratio, a model, below.</b> Notice that CUBIC and Reno lose most of their rate before 1%, close to the <a href="index.html#g-mathis-formula">Mathis formula</a> from the queueing-maths chapter, and that the gain-1.25 line crosses 1 at 20%, a few points right of the policer detector. BBR's points are missing: <code>tcp_bbr</code> was not loaded (see the loss lab). Rootless bench, kernel 7.2.6, 2 October 2026. Data: <a href="labs/ch11-bbr-limits/data/sweep-cubic-reno.csv">sweep-cubic-reno.csv</a>. Hover for values.</figcaption></figure>
+      <p>Where it matters: radio links and lossy long paths, where loss is not congestion. BBRv1 delivers there, until the cliff.</p>
+
+      <h3 class="strand" id="s-policer-mode">The policer detector sits at the cliff</h3>
+      <p>BBRv1 has a second loss rule, the policer detector, and for the default gain it fires at almost the same loss rate as Eq. 3's cliff, so Fig. 7's default-gain result cannot tell them apart (p. 134; <code>tcp_bbr.c:184–194, 689–759</code>).</p>
+      <p>A <a href="index.html#g-policer">policer</a>, from the shapers chapter, is a <a href="index.html#g-token-bucket">token bucket</a> with no queue: traffic above its rate is dropped while delivery stays steady. The code looks for that pattern, citing Flach et al. (<code>tcp_bbr.c:682–683</code>):</p>
+      <ul>
+        <li>After a first loss, intervals of 4 to 16 round trips, each ending at a loss (<code>:186, 710–730</code>).</li>
+        <li>An interval is lossy if <code>lost &lt;&lt; 8 &gt;= 50 * delivered</code>: lost over delivered of at least \(50/256 = 19.5\%\) (<code>:188, 740–744</code>; the comment says 20%).</li>
+        <li>Two lossy intervals in a row with delivery rates within 1/8, or 4 kbit/s, of each other mean "policed" (<code>:190–192, 664–673</code>).</li>
+        <li>Then BtlBw becomes their average (<code>:228, 671</code>) and the pacing gain is 1 (<code>:673, 1002–1004</code>) for 48 round trips (<code>:194, 697–701</code>). That is policer mode.</li>
+      </ul>
+      <p>Put both thresholds in the same units. The detector divides by packets delivered, and <code>tp-&gt;lost</code> counts every loss, retransmissions lost again included (<code>tcp_input.c:1326, 1337–1346</code>). Under uniform random loss \(p\), each delivered packet costs \(p/(1-p)\) losses, so 19.5% of delivered is \(50/306 = 16.3\%\) of packets sent. Eq. 3 moved too: since v4.20 BBR paces 1% below its estimate (<code>tcp_bbr.c:148, 252</code>), so the 1.25 cliff is \(1 - 1/(1.25 \times 0.99) = 19.2\%\) on the reader's kernel, three points from the detector. A sender probing at 1.25 times a policer's rate loses 20% of what it sends, the same algebra as Eq. 3; the code does not say why it chose 50/256.</p>
+      <p class="erratum"><b>The paper's gap.</b> Cao et al. invoke the policer logic to explain why BBR_1.5 collapses "much before the predicted 33%" (p. 134), yet count default BBR's collapse near 20% as confirming Eq. 3. For \(g = 1.25\) the two rules predict the same region, and Fig. 7a's samples at about 18% and 26% bracket both. Only BBR_1.1 separates them: Eq. 3 says 9.1%, below the detector, and Fig. 7a shows it already at 84 Mbit/s near 11.5%. Eq. 3 stands, on BBR_1.1 alone; the default-gain cliff is two rules at once. The verdict: a missing explanation. The arithmetic is right, and the authors name the detector in the next sentence.</p>
+      <p>On a live host they look different: policer mode shows <code>pacing_gain:1</code> with <code>cwnd_gain:2</code> for 48 round trips, about 2 s on the spine; the gain cycle shows 1.25 and 0.75 every eight rounds. The loss lab logs both.</p>
+
+      <h3 class="strand" id="s-bbrv3">What BBRv3 changes</h3>
+      <p>Every behaviour in this chapter is BBRv1's, which Linux 7.2 still ships. <b>BBRv3</b>, the version the IETF draft specifies, slows down for loss above 2% per round, keeps a long-term and a short-term bound on inflight, and has no separate policer mode (draft-ietf-ccwg-bbr-06 §2.8, §5.3.3, §5.5.10, Appendix A.17).</p>
+      <p class="since"><b>Since the papers.</b> Checked 2 October 2026. v7.2's <code>net/ipv4/tcp_bbr.c</code> still describes BBRv1 in its header (lines 7–16) and has no <code>inflight_hi</code>, <code>inflight_lo</code> or ECN code; policer mode has changed once since Cao's 4.15 (commit 3aff3b4b986e, v4.16). BBRv3 lives in <code>net/ipv4/tcp_bbr3.c</code> on google/bbr branch <code>bbr-v3-2026-09-16-01</code>, whose header names the bounds <code>inflight_hi</code> and <code>inflight_lo</code> (lines 11–14); draft-06 (6 July 2026) calls them <code>inflight_longterm</code> and <code>inflight_shortterm</code>, and gives the DOWN gain as 0.90 (§5.3.3.1) where the code has 91/100.</p>
+      <table>
+        <tr><th>Knob</th><th>BBRv1, Linux 7.2</th><th>BBRv3, draft-06</th></tr>
+        <tr><td>Random loss</td><td>BtlBw ignores it; cliff near 20%</td><td>over 2% in a round ends a probe and sets <code>inflight_longterm</code> (§2.8, §5.5.10.2)</td></tr>
+        <tr><td>Loss while cruising</td><td>lost packets come off cwnd</td><td>short-term bounds become max(latest, 0.7 × old) per lossy round (§5.5.10.3)</td></tr>
+        <tr><td>Probing cycle</td><td>1.25, 0.75, six rounds at 1.0</td><td>DOWN 0.90, CRUISE 1.0, REFILL 1.0, UP 1.25; a probe every 2–3 s or 63 rounds (§5.6.1, §5.3.3.8.2)</td></tr>
+        <tr><td>Inflight cap</td><td>2 BDP</td><td>2 BDP, 2.25 in UP, under <code>inflight_longterm</code>; CRUISE at 85% of it (§5.6.1)</td></tr>
+        <tr><td>Policers</td><td>policer mode, 50/256</td><td>the short-term bounds adapt (A.17)</td></tr>
+        <tr><td>ProbeRTT</td><td>4 packets, every 10 s</td><td>half a BDP, every 5 s (§2.16.2)</td></tr>
+        <tr><td>ECN</td><td>ignored</td><td>no response specified; a CE mark counts as congestion (§3.7)</td></tr>
+      </table>
+      <figure class="dia"><div class="mermaid">
+stateDiagram-v2
+  state "DOWN<br/>pacing gain 0.90" as D
+  state "CRUISE<br/>gain 1.0, 85% of inflight_longterm<br/>loss lowers the short-term bounds" as C
+  state "REFILL<br/>gain 1.0 for one round<br/>short-term bounds reset" as R
+  state "UP<br/>gain 1.25, cwnd gain 2.25" as U
+  [*] --> D: Drain done
+  D --> C: inflight at or below BDP, headroom free
+  C --> R: 2 to 3 s, or 63 rounds
+  R --> U: one round later
+  U --> D: loss over 2 percent, or no more bandwidth
+</div><figcaption><b>Diagram 11.4 — BBRv3's probing cycle, after draft-ietf-ccwg-bbr-06 §5.3.3 and its table in §5.6.1.</b> Notice the transition from UP to DOWN: a probe ends when a round's loss rate passes 2%, and the inflight then becomes <code>inflight_longterm</code>. BBRv1 has no such transition.</figcaption></figure>
+      <p>For this chapter's three cases: in a shallow buffer v3 stops each probe at 2% loss; random loss meets a gradual response, since v3 aims to tolerate about 1% per round (§5.3.3.8.3); in a deep buffer with CUBIC the 2-BDP cap stays until overflow sets <code>inflight_longterm</code>. None of this is measured here.</p>
+      <p>The other fix sits at the bottleneck, as in the queue-delay chapter. <a href="index.html#g-codel">CoDel</a> holds the standing queue near 5 ms, so CUBIC cannot win by filling a deep buffer, and <a href="index.html#g-flow-queueing">flow queueing</a> serves each flow's own queue in turn, so shares stop depending on who holds the buffer. Neither paper tests an <a href="index.html#g-aqm">AQM</a>; both used drop-tail queues.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system back" id="sys-tcp-bbr-back" data-system="tcp-bbr">
+        <h4>Back to Linux <code>tcp_bbr</code>, read through <code>ss -ti</code></h4>
+        <p><code>ss -ti</code> prints <code>bbr:(bw:…,mrtt:…,pacing_gain:…,cwnd_gain:…)</code> from <code>struct tcp_bbr_info</code> (<code>include/uapi/linux/inet_diag.h:234–241</code>); <code>bw</code> is <code>bbr_bw()</code>, the policer-mode rate while that mode is on (<code>tcp_bbr.c:228</code>). This chapter adds two readings: policer mode is <code>pacing_gain:1</code> with <code>cwnd_gain:2</code> for 48 round trips, and the shallow-buffer storm is <code>retrans</code> climbing while <code>bw</code> stays at the link rate. On 2 October 2026 this host listed only <code>reno cubic</code>: the module is installed, and nobody had loaded it. After <code>sudo modprobe tcp_bbr</code> any user may select it per socket (<code>TCP_CONG_NON_RESTRICTED</code>, <code>tcp_bbr.c:1145</code>). Full card: <a href="ch10.html#sys-tcp-bbr">the BBR chapter</a>.</p>
+      </div>
+      <div class="system back" id="sys-netem-back" data-system="netem">
+        <h4>Back to netem, the kernel's network emulator</h4>
+        <p>netem decides a random loss in <code>netem_enqueue()</code> (<code>sch_netem.c:481</code>), before the packet joins the queue its <code>rate</code> drains, so a sender can send above the rate and still fill it. Cao et al.'s links behaved the same way: BBR delivered about 93 Mbit/s at 18% loss (Fig. 7a, p. 134), more than \(100 \times 0.82 = 82\). Full card: <a href="ch02.html#sys-netem">the queueing-maths chapter</a>.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing. The others use <code>labs/ch11-bbr-limits/</code> (<code>flow.py</code> with BBR's <code>TCP_CC_INFO</code>, <code>duel.sh</code>, <code>losssweep.sh</code>, <code>share.py</code>), which builds qnet's bench with fq on the sender and the 40 ms delay on the ack path. BBR runs need <code>sudo modprobe tcp_bbr</code> once. Commands paste into fish.</p>
+
+      <div class="lab" id="lab-model">
+        <h4>Hands-on · Ware's model and the cliff, by hand</h4>
+        <p class="labmeta">~30 min · trace by hand · paper and pencil, then optionally <code>python3 ware_model.py</code></p>
+        <p><b>Task.</b> For the spine path (\(c = 825.6\) packets/s, \(l = 40\) ms, a BDP of 33.0 packets), compute BBR's share against one CUBIC flow at 0.5, 2 and 10 BDPs (Eq. 9–11), and Jain's index at 10 BDPs with one and with 16 CUBIC flows. Then tabulate Eq. 3's cliff for gains 1.1, 1.25 and 1.5, with and without the 1% margin, beside the policer detector's threshold in packets sent.</p>
+        <p><b>Done when.</b> Three shares within a point of the script's, two Jain indices, and a three-row table marking the lower threshold.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The learning on the cap has Eq. 9–11; the learning on the cliff has Eq. 3. A negative \(p\) from Eq. 9 means BBR takes the whole link before the probe-time correction.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>\(q = X \cdot cl\) packets, \(p = \tfrac12 - \tfrac{1}{2X} - \tfrac{4}{q}\), then BBR's fraction is \((1-p)\,(1 - (q/c + 0.24)/10)\). Jain's index is \((\sum x)^2 / (n \sum x^2)\) over the shares.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>For the detector, solve \(p/(1-p) = 50/256\) for \(p\). For 16 CUBIC flows, nothing in Eq. 9 changes: they split \(1 - \text{BBR}_{frac}\) evenly.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>cd labs/ch11-bbr-limits                       # from the dossier folder
+python3 ware_model.py</code></pre>
+          <p><b>Expected output</b> (cut; the full run is <a href="labs/ch11-bbr-limits/data/ware-model-bench.txt">ware-model-bench.txt</a>):</p>
+          <pre><code>path: 10 Mbit/s, 40 ms, 1514-byte frames: c = 825.6 packets/s, BDP = 33.0 packets
+ X (BDP)  q (pkts)  p loss-based  BBR, Eq. 9  ProbeRTT time  BBR_frac  Jain, 2 flows
+     0.5        17         0.000       1.000          2.6%     0.974          0.527
+       2        66         0.189       0.811          3.2%     0.785          0.755
+      10       330         0.438       0.562          6.4%     0.526          0.997
+  pacing gain 1.1 : cliff p = 1 - 1/g =   9.1%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =   8.2%
+  pacing gain 1.25: cliff p = 1 - 1/g =  20.0%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =  19.2%
+  pacing gain 1.5 : cliff p = 1 - 1/g =  33.3%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =  32.7%
+  lost/delivered = p / (1 - p), so it is crossed at p = 50/306 = 16.34% of the packets sent</code></pre>
+          <p>With 16 CUBIC flows at 10 BDPs, each gets \(0.474/16 = 0.0296\) and Jain's index is 0.20. The lower threshold: for 1.1 the gain (8–9%); for 1.25 the detector (16.3%), just below the gain (19.2%, or 20% on 4.15); for 1.5 the detector, far below 32.7%: Fig. 7a's BBR_1.5 curve.</p>
+          <p><b>What this shows.</b> The share depends on the queue in BDPs and on the cap, never on the number of CUBIC flows (Ware p. 140). And Eq. 3 is testable only where the detector is out of reach, at gain 1.1 (Cao p. 134).</p>
+          <p><b>Common wrong turn.</b> Treating a crossed threshold as a mode that has fired. The detector also needs two intervals in a row with delivery rates within 1/8 of each other (<code>tcp_bbr.c:664–669</code>), so at 18% loss it may stay off for long stretches. Only the pacing-gain trace in the loss lab shows whether it fired.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-duel">
+        <h4>Hands-on · BBR against CUBIC behind half a BDP and ten</h4>
+        <p class="labmeta">~45 min · measure · no sudo for the bench; BBR needs <code>sudo modprobe tcp_bbr</code> once</p>
+        <p><b>Task.</b> Predict BBR's share and Jain's index at 17 and 330 packets of buffer. Run BBR against CUBIC for 120 s at each depth, measured over the second minute, then CUBIC against CUBIC at 330 as the baseline, and read BBR's <code>bbr_mrtt_ms</code> in the deep run.</p>
+        <pre><code>cd labs/ch11-bbr-limits                       # from the dossier folder
+cat /proc/sys/net/ipv4/tcp_available_congestion_control   # bbr must be listed
+../common/qnet.sh -- ./duel.sh --limit 17 --a bbr --b cubic --seconds 120 --out shallow
+../common/qnet.sh -- ./duel.sh --limit 330 --a bbr --b cubic --seconds 120 --out deep
+../common/qnet.sh -- ./duel.sh --limit 330 --a cubic --b cubic --seconds 120 --out baseline</code></pre>
+        <p><b>Done when.</b> BBR's share and Jain's index at both depths sit beside your predictions, with the baseline's index and BBR's deep-run RTprop estimate.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Shallow: Eq. 9 is negative, so the cap does not limit BBR; CUBIC's backing off decides. Deep: the cap decides, computed from an RTT that includes CUBIC's queue.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p><code>duel.sh</code> ends by running <code>share.py</code> over the second minute. BBR's <code>bbr_mrtt_ms</code> should sit near Ware's \(\text{RTT}_{est} = (pq + 4)/c + l\), far above 40 ms in the deep run.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Check that BBR is at its cap: \(2 \times\) <code>bbr_bw_mbps</code> \(\times\) <code>bbr_mrtt_ms</code> \(/ (8 \times 1514)\), with the units sorted out, should be close to <code>cwnd</code> in <code>deep-a.csv</code>.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output.</b> The two CUBIC baselines ran on 2 October 2026 (<a href="labs/ch11-bbr-limits/data/duel-cc-deep-transcript.txt">transcript</a>, CSVs in <code>data/duel-cc-*</code>):</p>
+          <pre><code>duel: limit 330 packets, cubic against cubic, window 60-120 s
+ a-cubic:   4.29 Mbit/s  share  44.8%  retrans     48  mean rtt  379.6 ms  (60 s window)
+ b-cubic:   5.28 Mbit/s  share  55.2%  retrans     58  mean rtt  379.5 ms  (60 s window)
+   total:   9.56 Mbit/s  Jain index 0.989
+duel: limit 17 packets, cubic against cubic, window 60-120 s
+ a-cubic:   5.18 Mbit/s  share  54.2%  retrans     66  mean rtt   55.6 ms  (60 s window)
+ b-cubic:   4.37 Mbit/s  share  45.8%  retrans     77  mean rtt   55.9 ms  (60 s window)
+   total:   9.55 Mbit/s  Jain index 0.993</code></pre>
+          <p>The two BBR runs were <b>not executed: needs <code>sudo modprobe tcp_bbr</code></b>. Expected shape, from Ware et al.'s measurements on this path: at half a BDP, BBR near 90% (8.5 of about 9.5 Mbit/s in Fig. 1b, p. 138; 97% in the model), Jain's index near 0.55, and far more retransmissions than CUBIC. At ten BDPs, BBR between about 40% (Fig. 1b's 4-minute averages at 8 and 16 BDPs) and 53% (the model), Jain's index 0.98 or more, about 350 ms of RTT for both, and <code>bbr_mrtt_ms</code> in the hundreds of milliseconds.</p>
+          <p><b>What this shows.</b> The same two flows are nearly fair in a deep buffer and lopsided in a shallow one. The deep split is set by the inflight cap (Ware pp. 140–142), the shallow one by who backs off on loss (Cao p. 133).</p>
+          <p><b>Common wrong turn.</b> Measuring from \(t = 0\). Startup, CUBIC's slow start and BBR's first climb against CUBIC take tens of seconds; at 8 BDPs Ware et al. needed about 40 s to converge (Fig. 2a, p. 138). Measure the second minute, or longer.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-loss">
+        <h4>Hands-on · Find the cliff, and catch policer mode</h4>
+        <p class="labmeta">~45 min · break a real one · no sudo for CUBIC and Reno; BBR needs the module</p>
+        <p><b>Task.</b> Sweep random loss on the bottleneck for CUBIC, Reno and BBR, 30 s per point. For BBR, find the loss rate where the longest stretch at pacing gain 1.0 with cwnd gain 2 jumps from a few hundred milliseconds, the gain cycle's cruising rounds, to about two seconds, policer mode's 48 rounds.</p>
+        <pre><code>cd labs/ch11-bbr-limits                       # from the dossier folder
+../common/qnet.sh -- ./losssweep.sh --cc "cubic reno" --loss "0 0.1 0.5 1 2 5 10 15 20 25 30" --out mine
+../common/qnet.sh -- ./losssweep.sh --cc bbr --loss "0 1 5 10 14 16 18 20 22 25 30" --out mine
+column -s, -t mine.csv</code></pre>
+        <p><b>Done when.</b> You have goodput for each congestion control at each loss rate, and for BBR the first loss rate whose <code>longest_gain1_s</code> passes one second.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>CUBIC and Reno follow the Mathis formula; BBR follows Eq. 3 until the policer detector, at 16.3% of packets sent, gets its chance.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>In the gain cycle, pacing gain 1.0 lasts at most six rounds, about 0.3 s at 45 ms. Policer mode holds it for 48 rounds, about 2 s. ProbeRTT also has pacing gain 1.0, but with cwnd gain 1.0, which the script leaves out.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>To list the long stretches in one run:</p>
+          <pre><code>python3 -c "
+import csv; s=None
+for r in csv.DictReader(open('mine-bbr-L300-p18.csv')):
+    on = r['pacing_gain'] == '1.0' and r['cwnd_gain'] == '2.0'
+    if on and s is None: s = float(r['t_s'])
+    if not on and s is not None:
+        if float(r['t_s']) - s &gt; 1: print('gain 1.0 from', s, 'to', r['t_s'])
+        s = None
+"</code></pre></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output.</b> CUBIC and Reno, run on 2 October 2026 (<a href="labs/ch11-bbr-limits/data/sweep-cubic-reno.csv">sweep-cubic-reno.csv</a>; goodput in Mbit/s over the last 20 s of each run):</p>
+          <pre><code>loss %    0     0.1   0.5   1     2     5     10    15    20    25    30
+cubic   9.56  8.87  3.92  2.75  1.77  0.93  0.51  0.41  0.34  0.25  0.19
+reno    9.56  8.19  4.82  2.96  2.26  1.03  0.65  0.47  0.30  0.23  0.17</code></pre>
+          <p>The BBR sweep was <b>not executed: needs <code>sudo modprobe tcp_bbr</code></b>. Expected shape, from Fig. 7a (p. 134) and the code: goodput near the link rate up to about 15%, falling by 20–25%, around Eq. 3's 19.2% on this kernel. From about 16%, two-second stretches at pacing gain 1.0 should appear whenever two lossy intervals in a row pass the steady-rate test, and retransmissions should peak near the cliff, as in Fig. 7b.</p>
+          <p><b>What this shows.</b> Loss-based control gives up most of the link by 1% loss, Mathis's \(1/\sqrt p\) from the queueing-maths chapter. BBRv1 ignores random loss until its probe or its policer detector gives way (Cao p. 134; <code>tcp_bbr.c:689–759</code>).</p>
+          <p><b>Common wrong turn.</b> Putting <code>loss</code> on <code>rcv:c0</code>, the ack path, instead of the bottleneck. Acks are cumulative, so the next ack covers a lost one: with 10% ack loss one CUBIC flow still got 9.54 Mbit/s, against 0.51 with 10% data loss (<a href="labs/ch11-bbr-limits/data/wrongturn-ackloss10.txt">transcript</a>). Every congestion control then looks loss-proof.</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: four BBRv1 flows and one CUBIC flow share the spine path behind 330 packets of buffer. From Ware et al.'s Eq. 9–11, what share do the BBR flows get together, what does each flow get, and what is Jain's index over the five?</p>
+        <details class="ans"><summary>Answer</summary><p>About 56% for the BBR flows together, 14% each, 44% for CUBIC, and Jain's index 0.74. Eq. 9 with \(N = 4\): \(p = 0.5 - 0.05 - 16/330 = 0.402\); after probe time BBR gets \(0.598 \times 0.936 = 0.560\) (pp. 141–142). Jain: \(1/(5 \times (4 \times 0.140^2 + 0.440^2)) = 0.74\). Near miss: expecting more BBR flows to dilute BBR's share. The \(4N\) packets they leave queued during ProbeRTT raise every RTT estimate, and with it the aggregate cap.</p></details>
+        <p>2. Here is a symptom: on a 100 Mbit/s access link, <code>ss -ti</code> shows <code>bbr:(bw:41.2Mbps,mrtt:38.5,pacing_gain:1,cwnd_gain:2)</code> in every sample for about two seconds while <code>retrans</code> grows by a sixth of the segments sent; then the gains alternate again. What is BBR doing, and where does 41.2 Mbit/s come from?</p>
+        <details class="ans"><summary>Answer</summary><p>It is in policer mode. Two intervals in a row lost at least 50/256 of what they delivered at a steady rate, so BBR paces at their average delivery rate, gain 1, for 48 round trips: \(48 \times 38.5 = 1.85\) s (<code>tcp_bbr.c:184–194, 664–673, 697–701</code>). <code>bw</code> shows that average (<code>:228</code>), what the path let through: likely a token-bucket policer near 41 Mbit/s. Near miss: ProbeRTT, which has <code>cwnd_gain:1</code> and lasts 200 ms.</p></details>
+        <p>3. Here is a symptom: behind an office switch with a shallow buffer, a CUBIC backup crawls whenever one BBR upload runs. The switch counts thousands of drops a minute, and the BBR host's <code>retrans</code> is in the tens of thousands while <code>bbr:(bw:…)</code> stays at the link rate. What is going on?</p>
+        <details class="ans"><summary>Answer</summary><p>BBR's probes overflow the small buffer and only CUBIC reacts. Every eight rounds BBR sends a quarter BDP more than the link drains, so both flows lose packets; CUBIC cuts by 30% and regrows slowly, while BBRv1 only trims cwnd (Cao pp. 133–135; Ware p. 137). Near miss: "the cwnd gain of 2 fills the buffer". The cap binds only when BtlBw is overestimated; the probe alone overflows this buffer.</p></details>
+        <p>4. Choose and defend: a home uplink with about 40 BDPs of buffer carries your BBRv1 uploads and the family's CUBIC traffic. For fair shares and low delay, do you (a) switch every host you control to BBRv1, or (b) leave the congestion controls alone and run <code>fq_codel</code> as the uplink's bottleneck qdisc?</p>
+        <details class="ans"><summary>Answer</summary><p>(b), if you control the device in front of the uplink. Flow queueing serves each flow's queue in turn, so shares stop depending on who fills the buffer, and CoDel holds the standing queue near 5 ms (the queue-delay chapter). With (a), any remaining CUBIC flow still fills 40 BDPs and the cap sets BBR's share against it (Ware pp. 140–142), at hundreds of milliseconds of RTT. The cost of (b): it must rate-limit just below the modem, so the queue forms where fq_codel runs.</p></details>
+        <p>5. Here is a symptom: a student repeats Cao et al.'s loss sweep on Linux 7.2 and sees BBR's goodput already falling at 17% random loss, earlier than Eq. 3's 20%. The pacing-gain log shows two-second stretches at 1.0. Is Eq. 3 wrong?</p>
+        <details class="ans"><summary>Answer</summary><p>No; a second rule fired. Lost over delivered passes 50/256 at about 16.3% of packets sent, and with steady delivery the policer detector holds the gain at 1.0 for 48 rounds, the two-second stretches (<code>tcp_bbr.c:188, 740–744, 697–701</code>). Eq. 3 with the 1% margin gives 19.2% on 7.2 (<code>:148, 252</code>); Cao et al. name the detector only for BBR_1.5 (p. 134). Near miss: blaming the margin, which moves the cliff by under a point.</p></details>
+        <p>6. Of this chapter's three BBRv1 failures, the shallow-buffer retransmissions, the random-loss cliff and the deep-buffer share against CUBIC, which does BBRv3's 2% loss threshold address directly, and which does it leave mostly in place?</p>
+        <details class="ans"><summary>Answer</summary><p>The first two; the third mostly stays. A probe losing over 2% in a round ends and sets <code>inflight_longterm</code>, and lossy rounds in CRUISE lower the short-term bounds (draft-06 §5.3.3.7, §5.5.10). In a deep buffer CUBIC causes no loss until the buffer overflows, and the cwnd gain of 2 remains (§5.6.1), so Ware's cap mechanism holds until overflow sets the long-term bound. Neither paper measured v3.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>BBRv1 against CUBIC is decided by the buffer in BDPs. Far below one BDP, BBR's probes overflow it and only CUBIC backs off, so BBR wins goodput and pays in retransmissions. In a deep buffer CUBIC fills the queue, BBR is window-limited at its 2-BDP inflight cap, and the cap sets its share whatever the number of CUBIC flows. Under random loss BBR holds until \(g(1-p)\) falls below 1, near 20%, where the policer detector also fires. BBRv3 adds a 2% loss threshold and inflight bounds; Linux 7.2 still ships BBRv1.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> M. Hock, R. Bless, M. Zitterbart, "Experimental evaluation of BBR congestion control", IEEE ICNP 2017, <a href="https://doi.org/10.1109/ICNP.2017.8117540">doi:10.1109/ICNP.2017.8117540</a>. BBR flows overestimating their share and sitting at the 2-BDP cap. Read after the shallow-buffer learning.</li>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> N. Cardwell, I. Swett, J. Beshay (eds.), "BBR Congestion Control", draft-ietf-ccwg-bbr-06, 6 July 2026, <a href="https://datatracker.ietf.org/doc/draft-ietf-ccwg-bbr/">datatracker.ietf.org</a> (a copy is in <code>extra/</code>). Read §5.3.3, §5.5.10 and the table in §5.6.1 after the BBRv3 learning.</li>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> T. Flach et al., "An Internet-Wide Analysis of Traffic Policing", ACM SIGCOMM 2016, pp. 468–482, <a href="https://doi.org/10.1145/2934872.2934873">doi:10.1145/2934872.2934873</a>. Why BBRv1 has a policer mode; <code>tcp_bbr.c</code> cites it. Read after the policer learning.</li>
+        <li class="ref" data-layer="CC"><span class="tag CC">CC</span> D. Scholz et al., "Towards a Deeper Understanding of TCP BBR Congestion Control", IFIP Networking 2018, <a href="https://doi.org/10.23919/IFIPNetworking.2018.8696830">doi:10.23919/IFIPNetworking.2018.8696830</a>. The "at least 35%" result Ware et al. explain (p. 142). Read after the cap learning.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="buffer-decides">The buffer picks the winner</li>
+          <li data-strand="shallow-retransmits">The price of a shallow buffer</li>
+          <li data-strand="inflight-cap">The cap sets the share</li>
+          <li data-strand="loss-cliff">Flat, then a cliff</li>
+          <li data-strand="policer-mode">The policer detector sits at the cliff</li>
+          <li data-strand="bbrv3">What BBRv3 changes</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 11 "Where BBR loses" (Y. Cao, A. Jain, K. Sharma, A. Balasubramanian, A. Gandhi, "When to use and when not to use BBR", IMC '19, printed pp. 130–136; R. Ware, M. K. Mukerjee, S. Seshan, J. Sherry, "Modeling BBR's Interactions with Loss-Based Congestion Control", IMC '19, printed pp. 137–143).
+I have read the chapter and the after half of ch11.html. Lock in.
+Strands: buffer-decides (The buffer picks the winner), shallow-retransmits (The price of a shallow buffer), inflight-cap (The cap sets the share), loss-cliff (Flat, then a cliff), policer-mode (The policer detector sits at the cliff), bbrv3 (What BBRv3 changes).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch11.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch11.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch10.html">← BBR</a><a href="index.html">All chapters</a><a href="ch12.html">Pods with a speed limit →</a></nav>
+<footer>From a full buffer to BBR · chapter 11 reads Y. Cao, A. Jain, K. Sharma, A. Balasubramanian, A. Gandhi, "When to use and when not to use BBR: An empirical analysis and evaluation study", Internet Measurement Conference (IMC '19), printed pp. 130–136 (printed = PDF + 129), and R. Ware, M. K. Mukerjee, S. Seshan, J. Sherry, "Modeling BBR's Interactions with Loss-Based Congestion Control", IMC '19, printed pp. 137–143 (the copy read prints no folios; printed = PDF + 136, from Crossref's page range). The kernel is cited by file:line in v7.2; BBRv3 by section of draft-ietf-ccwg-bbr-06. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

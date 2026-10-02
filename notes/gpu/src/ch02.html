@@ -1,0 +1,123 @@
+    <section id="ch2" class="chapter">
+      <span class="chnum">Chapter 2</span>
+      <h2>Inside a streaming multiprocessor</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> — Last chapter grouped our matvec's threads into warps of 32. Now we find where a warp runs: the streaming multiprocessor, the unit a GPU is built from twenty copies of on the laptop and 132 on the H100.</p>
+      <p class="readfirst">Optional neighbour: the GPU-sharing dossier's <a href="gpu-sharing-dossier.html#ch1">The silicon (chapter 1)</a> maps the whole die, with its graphics clusters, memory controllers and copy engines. This chapter zooms into one of the units on that map and looks at it as a programmer.</p>
+
+      <h3>The chip is made of SMs</h3>
+      <p>A GPU is mostly many copies of one block, the <b>streaming multiprocessor</b>, or <b>SM</b>. Each SM is a complete processor for warps: it fetches instructions, keeps the registers of every thread it is running, and has its own arithmetic units and its own on-chip memory. The laptop's RTX 4050 has 20 SMs. The customer's P5000 also has 20. An H100 SXM5 has 132. The rest of the die is wiring between the SMs and memory, plus a few fixed-function engines.</p>
+      <p>When a kernel launches, its threads are handed out to SMs in groups, and each SM runs many warps at once. A warp that has been placed on an SM is a <b>resident warp</b>. It stays on that SM, with its registers allocated there, until every thread in it has finished. Under normal running nothing moves it elsewhere.</p>
+
+      <h3>One SM, opened up</h3>
+      <p>An Ada SM is split into four <b>SM sub-partitions</b>, and almost everything is per sub-partition. Each one has a <b>warp scheduler</b>, which every cycle picks one resident warp that is ready to go and issues one instruction for it. That one chance per cycle to start an instruction is an <b>issue slot</b>. With four schedulers, an SM can start up to four warp-instructions per cycle.</p>
+      <p>Each sub-partition also has its own slice of the <b>register file</b>, the SM's store of registers for every resident thread: 16,384 registers of 32 bits, 64 KB per sub-partition and 256 KB for the whole SM. That is larger than the SM's cache, and it is the reason the next section works. Each sub-partition has 32 <b>FP32</b> lanes, FP32 being the 4-byte floating-point format, and each lane does one multiply-add per cycle; on Ada, 16 of them can also do integer arithmetic. So one multiply-add instruction for a warp fills one sub-partition's lanes for one cycle.</p>
+      <p>The remaining units are fewer and more specialised. A <b>tensor core</b> does a small matrix multiply, for example 16 × 8 × 16, as one instruction for a whole warp. It matters enormously for matmul and not at all for our matvec. A <b>special function unit</b>, or SFU, computes things like exponentials, sines and reciprocal square roots. The language-model chapters need its exponentials. A <b>load/store unit</b> turns a warp's memory instructions into requests to the memory system.</p>
+      <p>Below the four sub-partitions sits one pool of fast on-chip storage, 128 KB on Ada. Part of it is the <b>L1 cache</b>, a cache of recently used memory, managed by hardware like a CPU's. The rest is <b>shared memory</b>, a scratchpad the kernel's own code reads and writes directly, which the threads of one launch group can use to hand data to each other. The kernel says how it wants the pool split, up to 100 KB of shared memory on Ada.</p>
+
+      <figure class="dia">
+        @@SVG:smfloor@@
+        <figcaption><b>Diagram 2.1 — One Ada SM.</b> Notice that each sub-partition owns its scheduler, its registers and its lanes, so the SM is four small processors sharing an instruction cache and one pool of on-chip memory. Notice also the size of the green blocks: 256 KB of registers, twice the L1 and shared-memory pool beneath them.</figcaption>
+      </figure>
+
+      <h3>Latency hiding: why the register file is so big</h3>
+      <p>A load from the GPU's main memory takes hundreds of cycles to come back. The microbenchmark papers in the reading list measure it per generation. A CPU core attacks that wait inside one thread, with caches, prefetching and out-of-order execution. An SM does something else: when one warp has to wait for its data, the scheduler issues an instruction from a different warp that is ready. If enough warps are resident, there is always one ready, and the arithmetic units never sit idle. This is <b>latency hiding</b>.</p>
+      <p>The switch costs nothing. A CPU switching threads has to save one set of registers and load another. An SM keeps the registers of every resident warp in the register file at the same time, so "switching" just means the scheduler picks a different warp's instruction on the next cycle. That is what the 256 KB of registers per SM buys.</p>
+      <p>Diagram 2.2 runs a tiny model of one scheduler. Every warp loops over the same five instructions: two independent arithmetic instructions, a load, then two instructions that use the loaded value and so must wait for it. The load takes 14 cycles here. Real memory takes far longer, which only makes the effect stronger.</p>
+
+      <figure class="dia">
+        @@SVG:latency@@
+        <figcaption><b>Diagram 2.2 — Latency hiding in one warp scheduler.</b> Notice the grey idle cycles shrink as warps are added: with one warp the scheduler waits after every load, and with eight it almost always finds another warp ready. Each row is computed by the same small simulation, so the gaps are real for this model.</figcaption>
+      </figure>
+
+      <p>The model also shows the limit. Eight warps leave six idle cycles in 44. An Ada sub-partition can hold at most 12 resident warps (48 per SM), and real latencies are much longer than 14 cycles. So warps alone cannot hide everything. The other half of the answer is giving each warp several independent loads in flight before it needs the first result. The compiler does this for our naive matvec by unrolling its loop. In the machine code for Ada, which a later chapter reads line by line, each thread issues twenty-two loads before its first multiply-add.</p>
+
+      <h3>Occupancy, and the version number of an SM</h3>
+      <p><b>Occupancy</b> is the number of resident warps on an SM divided by the most the SM can hold. On Ada the maximum is 48 warps; on Pascal and Hopper it is 64. Several resources cap it, and registers are the first one you meet. The 65,536 registers of an SM are shared by every resident thread, so a kernel whose threads each need many registers fits fewer warps.</p>
+      <p>You can read the register count of every kernel out of the compiled file. For the three kernels of <code>lab/gpu/matvec.cu</code> compiled for Ada, <code>cuobjdump -res-usage</code> reports 38, 40 and 53 registers per thread for the naive, warp-per-row and float4 versions. Registers are handed out per warp, rounded up to a multiple of 8 per thread. The warp-per-row kernel then needs 40 × 32 = 1,280 registers per warp, and 65,536 / 1,280 = 51 warps would fit. The SM's cap of 48 binds first, so registers do not limit it. The float4 kernel rounds 53 up to 56, needs 1,792 per warp, and fits 36 warps: 75% occupancy before any other limit is applied. The scheduling chapter adds the other limits, and one of them lowers that number again.</p>
+      <p>Higher occupancy means more warps to choose from when hiding latency. It does not always mean faster code, because a kernel with fewer, busier warps and more loads in flight per warp can hide latency just as well.</p>
+      <p>Each SM design has a version number, its <b>compute capability</b>, written major.minor. Pascal's GP104 is 6.1, Ada is 8.9, Hopper is 9.0. The number decides which instructions exist and what every limit in this chapter is. The compiler spells it <code>sm_61</code>, <code>sm_89</code>, <code>sm_90</code>, and the compiler chapter explains why there is also a second spelling.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026. Sources: NVIDIA whitepapers and the compute-capability tables; the laptop's SM count is 2,560 lanes ÷ 128, to be confirmed by the lab program</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (RTX 4050 Laptop)</th><th>Hopper (H100 SXM5)</th></tr>
+        <tr><td>Compute capability</td><td>6.1</td><td>8.9</td><td>9.0</td></tr>
+        <tr><td>SMs</td><td>20</td><td>20</td><td>132</td></tr>
+        <tr><td>FP32 lanes per SM / total</td><td>128 / 2,560</td><td>128 / 2,560</td><td>128 / 16,896</td></tr>
+        <tr><td>Registers per SM</td><td>65,536</td><td>65,536</td><td>65,536</td></tr>
+        <tr><td>Most resident warps per SM</td><td>64</td><td>48</td><td>64</td></tr>
+        <tr><td>On-chip pool per SM</td><td>48 KB L1, plus 96 KB shared memory kept separate</td><td>128 KB, up to 100 KB shared</td><td>256 KB, up to 228 KB shared</td></tr>
+        <tr><td>Tensor cores</td><td>none</td><td>4 per SM</td><td>4 per SM, a larger design</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Read the register use of each kernel without running anything. This works on the laptop today, GPU on or off:</p>
+<pre><code>cd lab/gpu
+nvcc -O3 -cubin -arch=sm_89 matvec.cu -o out/matvec.sm_89.cubin
+cuobjdump -res-usage out/matvec.sm_89.cubin | grep -E 'Function|REG'
+
+ Function _Z12matvec_warp4PKfS0_Pfii:
+  REG:53 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 ...
+ Function _Z11matvec_warpPKfS0_Pfii:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 ...
+ Function _Z12matvec_naivePKfS0_Pfii:
+  REG:38 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:384 ...</code></pre>
+        <p>Now repeat with <code>-arch=sm_90</code>. The same source needs 44, 32 and 29 registers on Hopper. The compiler for each SM design makes different choices, which is the subject of a later chapter. The odd names like <code>_Z11matvec_warpPKfS0_Pfii</code> are explained in the compiler chapter.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A GPU is mostly SMs: 20 on the laptop and on the P5000, 132 on an H100. An Ada SM has four sub-partitions, each with a warp scheduler that issues one instruction per cycle for one ready warp, a 64 KB slice of registers, and 32 FP32 lanes, over a shared 128 KB pool of L1 cache and shared memory. Because every resident warp's registers stay in the register file, switching warps is free, and the SM hides memory latency by always issuing from some warp that is ready. Occupancy, resident warps over the maximum, is capped by registers among other things; compute capability is the version number that fixes all these limits.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>FP32</dt><dd>4-byte floating-point numbers, the format of our matvec.</dd>
+          <dt>streaming multiprocessor (SM)</dt><dd>The repeated processor block of a GPU: instruction issue, registers, lanes and on-chip memory for many warps.</dd>
+          <dt>resident warp</dt><dd>A warp placed on an SM, with its registers allocated there until it finishes.</dd>
+          <dt>SM sub-partition</dt><dd>One quarter of an SM, with its own scheduler, register slice and lanes.</dd>
+          <dt>warp scheduler</dt><dd>The unit that picks one ready warp per cycle and issues its next instruction.</dd>
+          <dt>issue slot</dt><dd>One scheduler's chance per cycle to start an instruction.</dd>
+          <dt>register file</dt><dd>The SM's store of registers for all its resident threads: 65,536 × 32 bits.</dd>
+          <dt>tensor core</dt><dd>A unit that does a small matrix multiply as one warp-wide instruction.</dd>
+          <dt>special function unit (SFU)</dt><dd>The unit for exponentials, sines, reciprocal square roots.</dd>
+          <dt>load/store unit</dt><dd>The unit that turns a warp's memory instructions into memory requests.</dd>
+          <dt>L1 cache</dt><dd>The SM's hardware-managed cache of recently used memory.</dd>
+          <dt>shared memory</dt><dd>On-chip scratchpad that a kernel's code manages itself, shared within a launch group.</dd>
+          <dt>latency hiding</dt><dd>Keeping the lanes busy by issuing from another ready warp while some warps wait.</dd>
+          <dt>occupancy</dt><dd>Resident warps on an SM divided by the maximum it can hold.</dd>
+          <dt>compute capability</dt><dd>NVIDIA's major.minor version of an SM design: 6.1, 8.9, 9.0.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: compiled for Hopper, <code>matvec_warp4</code> uses 44 registers per thread. Using the allocation rule from this chapter, how many of its warps fit on one H100 SM by registers alone, and what occupancy is that?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>42 warps, and 42 / 64 ≈ 66% occupancy. 44 is not a multiple of 8, so it rounds up to 48. A warp then needs 48 × 32 = 1,536 registers, and 65,536 / 1,536 = 42.7, which rounds down to 42: half a warp cannot be resident.</p>
+          <p>Two near-misses. Skipping the rounding gives 65,536 / (44 × 32) = 46.5, so 46 warps, and that is the mistake this question is built to catch. Dividing by 48, Ada's warp cap, is the other; Hopper's cap is 64. The register count comes from <code>cuobjdump -res-usage</code> on the compiled <code>sm_90</code> file (the Try-it box). Diagram 7.3, in a later chapter, draws the whole staircase.</p>
+        </details>
+        <p>2. A profiler says all 48 warps on an SM are resident, but its schedulers issue an instruction on only a quarter of the cycles. What are the warps doing, and why would raising occupancy not help?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>They are waiting. A scheduler can only issue from a warp whose next instruction is ready, and here most warps are stuck on a load whose data has not arrived (the grey cycles in diagram 2.2, with many more warps).</p>
+          <p>Occupancy is already at its maximum, 48 of 48, so there are no more warps to add. What helps is more independent work per warp before it needs the data, such as several loads in flight, or less waiting per load. The near-miss is "occupancy is too low": being resident and being ready are different states, and the profiler counted the first.</p>
+        </details>
+        <p>3. "Switching between warps costs nothing." Where does that stop being true?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It is true only between resident warps, because only their registers are already in the register file. A warp that is not yet on the SM cannot be switched in at all: it has to wait until enough resident threads finish to free their registers and their place.</p>
+          <p>The cost has also moved rather than gone away. Every resident warp occupies registers all the time, so a kernel pays for free switching with a cap on how many warps fit, which is occupancy. And switching between different programs that share one GPU is a real save-and-restore, which the GPU-sharing dossier's time-slicing chapter covers.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">NVIDIA Ada GPU Architecture</a> (whitepaper), the source for diagram 2.1, and the <a href="https://docs.nvidia.com/cuda/ada-tuning-guide/index.html">NVIDIA Ada GPU Architecture Tuning Guide</a>. The whitepaper describes the large AD102 chip, and the laptop's AD107 uses the same SM; the tuning guide states the occupancy limits for 8.9 in one place.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/">NVIDIA Hopper Architecture In-Depth</a> (NVIDIA blog, 2022). The H100 SM, for comparison with diagram 2.1. The three-generations chapter returns to it.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://international.download.nvidia.com/geforce-com/international/pdfs/GeForce_GTX_1080_Whitepaper_FINAL.pdf">NVIDIA GeForce GTX 1080</a> (whitepaper). The GP104 chip, the same silicon as the P5000. Its SM diagram is the Pascal column of the table above.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#hardware-multithreading">CUDA Programming Guide: Hardware multithreading</a>. NVIDIA's account of why warp switching is free and how registers and shared memory are divided among resident warps.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://arxiv.org/abs/1903.07486">Dissecting the NVidia Turing T4 GPU via Microbenchmarking</a> (Jia et al., 2019). Measured latencies for each level of memory, with a Pascal GP104 board as the comparison. Use its tables when you want real cycle counts.</li>
+        </ul>
+      </div>
+    </section>

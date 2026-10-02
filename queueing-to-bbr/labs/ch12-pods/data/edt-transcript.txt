@@ -1,0 +1,109 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+7.2.6-arch2-1
+=== under: fq flow_limit 100; podedt.py --limit 10M --offer 8mbit --seconds 8
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 8mbit for 8 s, horizon 2000 ms
+podedt: offered 5285, passed unstamped 5110, stamped 175, horizon drops 0, send errors 0; aggregate clock ends 0 ms ahead of now
+rxcount: 5285 datagrams in 8.00 s
+  second  Mbit/s(wire)  median one-way delay
+       0         8.006       0.0 ms
+       1         8.006       0.0 ms
+       2         7.994       0.0 ms
+       3         8.006       0.0 ms
+       4         7.994       0.0 ms
+       5         8.006       0.0 ms
+       6         7.994       0.0 ms
+       7         8.006       0.1 ms
+ Sent 8002028 bytes 5292 pkt (dropped 0, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 5159 throttled 131 latency 240us
+=== over: fq flow_limit 100; podedt.py --limit 10M --offer 20mbit --seconds 8
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 20mbit for 8 s, horizon 2000 ms
+podedt: offered 13211, passed unstamped 1, stamped 8256, horizon drops 4954, send errors 0; aggregate clock ends 1999 ms ahead of now
+rxcount: 903 datagrams in 9.99 s
+  second  Mbit/s(wire)  median one-way delay
+       0         4.881     123.0 ms
+       1         1.211     743.1 ms
+       2         0.618    1248.2 ms
+       3         0.593    1729.1 ms
+       4         0.618    1999.7 ms
+       5         0.593    1999.8 ms
+       6         0.618    1999.7 ms
+       7         0.593    1999.7 ms
+       8         0.618    1999.8 ms
+       9         0.593    1999.8 ms
+ Sent 1367212 bytes 904 pkt (dropped 7354, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 2 throttled 902 latency 39.9us flows_plimit 7354
+=== bigfq: fq flow_limit 2000; podedt.py --limit 10M --offer 20mbit --seconds 8
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 20mbit for 8 s, horizon 2000 ms
+podedt: offered 13211, passed unstamped 1, stamped 8256, horizon drops 4954, send errors 0; aggregate clock ends 1999 ms ahead of now
+rxcount: 8257 datagrams in 10.00 s
+  second  Mbit/s(wire)  median one-way delay
+       0        10.005     249.9 ms
+       1        10.005     750.1 ms
+       2         9.992    1250.0 ms
+       3        10.005    1749.9 ms
+       4        10.005    1999.7 ms
+       5         9.992    1999.7 ms
+       6        10.005    1999.7 ms
+       7        10.005    1999.7 ms
+       8         9.992    1999.7 ms
+       9        10.005    1999.7 ms
+ Sent 12501210 bytes 8259 pkt (dropped 0, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 3 throttled 8256 latency 13.4us
+=== short: fq flow_limit 100; podedt.py --limit 10M --offer 20mbit --seconds 8 --horizon-ms 100
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 20mbit for 8 s, horizon 100 ms
+podedt: offered 13211, passed unstamped 1, stamped 6687, horizon drops 6523, send errors 0; aggregate clock ends 99 ms ahead of now
+rxcount: 6688 datagrams in 8.10 s
+  second  Mbit/s(wire)  median one-way delay
+       0        10.005     100.0 ms
+       1        10.005     100.0 ms
+       2         9.992     100.0 ms
+       3        10.005     100.0 ms
+       4        10.005     100.0 ms
+       5         9.992     100.0 ms
+       6        10.005     100.0 ms
+       7        10.005      99.9 ms
+       8         9.932      99.9 ms
+ Sent 10125632 bytes 6688 pkt (dropped 0, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 1 throttled 6687 latency 11.7us
+
+# second invocation, the two socket-kept runs (same script, runpod())
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+=== kept: fq on snd:s0 (socket still attached); podedt.py --limit 10M --offer 20mbit --seconds 8
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 20mbit for 8 s, horizon 2000 ms, SO_SNDBUF 212992
+podedt: offered 6673, passed unstamped 1, stamped 6672, horizon drops 0, send errors 0; aggregate clock ends 57 ms ahead of now
+rxcount: 6673 datagrams in 8.08 s
+  second  Mbit/s(wire)  median one-way delay
+       0        10.005      81.0 ms
+       1        10.005      85.9 ms
+       2         9.992      85.8 ms
+       3        10.005      85.8 ms
+       4        10.005      85.8 ms
+       5         9.992      85.8 ms
+       6        10.005      87.0 ms
+       7        10.005      84.6 ms
+       8         8.115      94.2 ms
+ Sent 10103460 bytes 6680 pkt (dropped 0, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 8 throttled 6672 latency 11.5us
+=== keptbig: fq on snd:s0 (socket still attached); podedt.py --limit 10M --offer 20mbit --seconds 8 --sndbuf 4194304
+podedt: limit 10M (1250000 B/s, 1211.2 us per 1514 B), offered 20mbit for 8 s, horizon 2000 ms, SO_SNDBUF 8388608
+podedt: offered 13211, passed unstamped 1, stamped 8256, horizon drops 4954, send errors 0; aggregate clock ends 1999 ms ahead of now
+rxcount: 903 datagrams in 9.99 s
+  second  Mbit/s(wire)  median one-way delay
+       0         4.881     123.0 ms
+       1         1.211     743.2 ms
+       2         0.630    1254.3 ms
+       3         0.581    1736.3 ms
+       4         0.630    1999.8 ms
+       5         0.581    1999.7 ms
+       6         0.630    1999.7 ms
+       7         0.581    1999.7 ms
+       8         0.618    1999.8 ms
+       9         0.593    1999.8 ms
+ Sent 1367212 bytes 904 pkt (dropped 7354, overlimits 0 requeues 0) 
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 2 throttled 902 latency 187us flows_plimit 7354

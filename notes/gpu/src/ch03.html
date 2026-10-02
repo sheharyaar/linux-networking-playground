@@ -1,0 +1,127 @@
+    <section id="ch3" class="chapter">
+      <span class="chnum">Chapter 3</span>
+      <h2>Memory and the bandwidth wall</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> — Last chapter put our matvec's warps on SMs and showed the SM hiding the wait for memory by switching warps. Hiding the wait does not shorten it. This chapter follows the 64 MiB of W from memory to the lanes, and ends with a number: the shortest time our matvec can possibly take on each bench.</p>
+      <p class="readfirst">Optional neighbour: <a href="gpu-sharing-dossier.html#ch1">The silicon (chapter 1)</a> of the GPU-sharing dossier shows where the L2 slices and memory controllers sit on the die. This chapter only needs to know that they exist and how fast they are.</p>
+
+      <h3>The ladder</h3>
+      <p>A GPU has the same kind of memory ladder as a CPU, with a different emphasis. At the top are registers, private to one thread and free to use. Below them is the SM's 128 KB pool, split between L1 cache and shared memory. Below that is the <b>L2 cache</b>, one cache for the whole chip, shared by every SM. At the bottom is the <b>global memory</b>: the GPU's own DRAM, gigabytes of it, visible to every thread of every kernel. W lives there.</p>
+      <p>Two kinds of DRAM appear in our benches. <b>GDDR</b> (graphics double data rate) memory sits as separate chips on the board around the GPU. The laptop has 6 GB of GDDR6 on a 96-bit bus and the P5000 has 16 GB of GDDR5X on a 256-bit bus. <b>HBM</b> (high-bandwidth memory) is stacks of DRAM dies placed in the same package as the GPU, with a very wide bus. The H100 has 80 GB of HBM3 on a 5,120-bit bus. Bus width is most of the difference in speed between these three.</p>
+      <p>Two more names refer to places in that same DRAM, treated specially. <b>Local memory</b> is per-thread storage that lives in global memory. The compiler uses it when a thread's variables do not fit in registers. <b>Constant memory</b> is a small read-only region, 64 KB, with its own cache that is fastest when every lane of a warp reads the same address. The kernel's arguments are placed there, which is why the machine code in a later chapter reads the pointer <code>W</code> from <code>c[0x0][0x160]</code> and the size <code>n</code> from <code>c[0x0][0x178]</code>: bank 0 of constant memory, at fixed offsets.</p>
+
+      <figure class="dia">
+        @@SVG:memladder@@
+        <figcaption><b>Diagram 3.1 — The memory ladder of the laptop GPU.</b> Notice that the only rung with a bandwidth figure on it is global memory. That is the rung W has to come from, because W is 64 MiB and is read once, so no cache above it can hold it for long enough to be reused.</figcaption>
+      </figure>
+
+      <h3>Sectors, and why neighbouring lanes should read neighbouring bytes</h3>
+      <p>Memory is never fetched one float at a time. The unit of transfer between DRAM, L2 and L1 is a <b>sector</b> of 32 bytes. Caches track memory in <b>cache lines</b> of 128 bytes, four sectors each. When a warp issues a load, the load/store unit collects the 32 lanes' addresses and works out which sectors they touch, then fetches each sector once. If neighbouring lanes read neighbouring 4-byte floats, 32 lanes touch exactly four sectors, one cache line, and every byte fetched is used. That is a <b>coalesced</b> access, and getting it is called <b>coalescing</b>.</p>
+      <p>Our two matvec kernels differ in exactly this. In the warp-per-row kernel, lane i of the warp reads <code>W[row][j + i]</code>: thirty-two neighbours. In the naive thread-per-row kernel, lane i is working on row <code>row + i</code>, so the warp's 32 addresses are 4096 × 4 = 16 KiB apart. Each lane lands in a different sector. One warp-wide load now fetches 32 sectors, 1,024 bytes, to deliver 128 useful bytes.</p>
+
+      <figure class="dia">
+        @@SVG:coalesce@@
+        <figcaption><b>Diagram 3.2 — What one warp-wide load touches.</b> Notice the top row: one solid run, four sectors, nothing wasted. In the bottom rows each lane drags a whole sector in to use 4 bytes of it. Whether the other 28 bytes are wasted depends on whether they are still in L1 when that lane moves on to its next float.</figcaption>
+      </figure>
+
+      <p>The naive kernel is saved partly by that last sentence. The same lane reads the next float of its row on the next iteration, which is in the sector it already fetched. If the sector is still in L1, the read is cheap. With dozens of resident warps each pulling 32 different lines through a 128 KB pool, many sectors are evicted before they are used again, and the extra traffic is real. How much it costs is a measurement, and the lab program makes it.</p>
+      <p>Shared memory has a different rule. It is split into 32 <b>banks</b>, each 4 bytes wide, and consecutive 4-byte words sit in consecutive banks. A warp can read 32 words in one go if they are in 32 different banks. If two lanes want different words in the same bank, that is a <b>bank conflict</b>, and the accesses to that bank are done one after another. The classic case is a warp reading one column of a 32 × 32 float tile: every element of a column is in the same bank, so a single read becomes 32. Our matvec does not use shared memory. The attention kernels of the language-model chapters do.</p>
+
+      <h3>Bandwidth, and how many FLOPs a byte buys</h3>
+      <p><b>Bandwidth</b> is how many bytes per second a level of memory can deliver. Peak DRAM bandwidth is the bus width times the transfer rate. The H100's datasheet says 3,352 GB/s and the P5000's says 288 GB/s. NVIDIA does not publish a figure for the laptop chip, but 96 bits at 18 Gbit/s per pin gives about 216 GB/s, and the lab program will confirm the real one. A real kernel reaches perhaps 80 to 90% of peak.</p>
+      <p>Arithmetic is counted in <b>FLOP</b>, floating-point operations, and its rate in <b>FLOPS</b>, per second. A multiply-add counts as two FLOP. The laptop has 2,560 FP32 lanes at up to 2.345 GHz, each doing one multiply-add per cycle: 2,560 × 2 × 2.345 GHz ≈ 12 TFLOPS. Numbers come in several sizes. <b>FP32</b> is the ordinary 4-byte float. <b>FP16</b> is a 2-byte float with less range and precision. <b>BF16</b>, "brain float", is a 2-byte float with FP32's range and even less precision. Language models store their weights in BF16 more often than in anything else, and that halves the bytes of every W.</p>
+      <p>The ratio between the two is the key quantity. <b>Arithmetic intensity</b> is FLOP done per byte moved from memory. Our FP32 matvec does 2 FLOP per 4-byte weight: 0.5 FLOP per byte. The laptop can do 12,000 GFLOPS of arithmetic but only receive 216 GB of data per second. To keep its lanes busy, a kernel would need 12,000 / 216 ≈ 56 FLOP for every byte. Our matvec offers 0.5. The lanes will be idle more than 99% of the time, waiting for W, however good the code is.</p>
+
+      <h3>The roofline</h3>
+      <p>That argument has a standard picture, the <b>roofline</b> (Williams, Waterman and Patterson, 2009). The horizontal axis is arithmetic intensity, the vertical axis is attainable FLOPS, and both are logarithmic. A kernel can never beat bandwidth × intensity, which is the sloped line, nor the arithmetic peak, which is the flat line. The corner where they meet is the <b>ridge point</b>. A kernel to the left of the ridge is <b>memory-bound</b>: its speed is set by bandwidth, and only moving fewer bytes makes it faster. A kernel to the right is <b>compute-bound</b>: its speed is set by arithmetic, and only fewer or cheaper FLOP make it faster.</p>
+
+      <figure class="dia">
+        @@SVG:roofline@@
+        <figcaption><b>Diagram 3.3 — The laptop's FP32 roofline.</b> Notice how far left our matvec sits: at 0.5 FLOP per byte its ceiling is 108 GFLOPS, under 1% of the flat roof. The green point is the same W used for 64 vectors at once, a matmul. Reusing each weight 64 times moves it 64 times further right, onto a roof 64 times higher.</figcaption>
+      </figure>
+
+      <p>The roofline turns the prologue's sentence into a prediction. Our matvec must move at least 64 MiB of W plus 32 KiB of x and y, about 67.1 million bytes. At 216 GB/s that takes at least 311 µs on the laptop, and no kernel can beat it. The compiler, the warps, the registers and the scheduler all decide how close a kernel gets to 311 µs, and none of them can get below it. The same arithmetic gives the other two benches in the table below. Store W in BF16 instead and every number halves.</p>
+      <p>This chapter skips DRAM refresh, bank groups, and the memory controllers' scheduling. They explain why real kernels reach 80 to 90% of peak and not 100%, and nothing here needs more than that.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026. Peak bandwidth and FP32 TFLOPS from NVIDIA datasheets and whitepapers; laptop bandwidth and the two FP32 figures marked "≈" are computed from bus width, clock and lane count</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (RTX 4050 Laptop)</th><th>Hopper (H100 SXM5)</th></tr>
+        <tr><td>Global memory</td><td>16 GB GDDR5X, 256-bit</td><td>6 GB GDDR6, 96-bit</td><td>80 GB HBM3, 5,120-bit</td></tr>
+        <tr><td>Peak bandwidth</td><td>288 GB/s</td><td>≈ 216 GB/s</td><td>3,352 GB/s</td></tr>
+        <tr><td>L2 cache</td><td>2 MB</td><td>not published; the lab program prints it</td><td>50 MB</td></tr>
+        <tr><td>FP32 peak</td><td>≈ 8.9 TFLOPS</td><td>≈ 12 TFLOPS</td><td>66.9 TFLOPS</td></tr>
+        <tr><td>FP32 ridge point</td><td>31 FLOP/byte</td><td>56 FLOP/byte</td><td>20 FLOP/byte</td></tr>
+        <tr><td>Our FP32 matvec, shortest possible time</td><td>233 µs</td><td>311 µs</td><td>20 µs</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>With the laptop GPU on, run the lab program and compare each line against the 311 µs floor:</p>
+<pre><code>./out/matvec
+device: NVIDIA GeForce RTX 4050 Laptop GPU, sm_89, … SMs, L2 … KiB
+d=4096 n=4096, W is 64.0 MiB
+naive (thread/row)  grid=   16   … us   … GB/s  max_err=…
+warp  (warp/row)    grid=  512   … us   … GB/s  max_err=…
+warp4 (float4)      grid=  512   … us   … GB/s  max_err=…
+cublasSgemv                      … us   … GB/s</code></pre>
+        <p class="lcap">Expected shape; the numbers are yours to fill in.</p>
+        <p>The GB/s column is 67.1 MB divided by the measured time, so you can read it straight against the 216 GB/s peak. Expect the two warp kernels and the <code>cublasSgemv</code> line, NVIDIA's library version, to land within shouting distance of each other and well below 216, and the naive kernel to land well below them. If a kernel ever prints more than the peak, W is not coming from DRAM. That happens when W is small enough to fit in L2, which is what the third question below is about.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>W lives in global memory, the GPU's DRAM: GDDR on the laptop and the P5000, HBM on the H100. Memory moves in 32-byte sectors, so a warp's load is cheap when neighbouring lanes read neighbouring bytes (coalesced) and expensive when they are 16 KiB apart, as in the naive kernel. Arithmetic intensity, FLOP per byte, places a kernel on the roofline: our matvec does 0.5 FLOP per byte against a laptop ridge of 56, so it is memory-bound, and its time can never fall below bytes ÷ bandwidth, which is 311 µs on the laptop, 233 µs on the P5000 and 20 µs on the H100.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>L2 cache</dt><dd>One cache for the whole chip, shared by every SM.</dd>
+          <dt>global memory</dt><dd>The GPU's own DRAM, visible to every thread of every kernel.</dd>
+          <dt>GDDR</dt><dd>Graphics DRAM chips on the board around the GPU.</dd>
+          <dt>HBM</dt><dd>High-bandwidth memory: DRAM stacks in the GPU package with a very wide bus.</dd>
+          <dt>local memory</dt><dd>Per-thread storage kept in global memory, used when registers run out.</dd>
+          <dt>constant memory</dt><dd>A 64 KB read-only region with a broadcast cache; the kernel's arguments live there.</dd>
+          <dt>sector</dt><dd>The 32-byte unit memory is moved in.</dd>
+          <dt>cache line</dt><dd>128 bytes, four sectors: the unit caches track.</dd>
+          <dt>coalescing</dt><dd>Neighbouring lanes reading neighbouring bytes, so a warp's load touches the fewest sectors.</dd>
+          <dt>bank / bank conflict</dt><dd>Shared memory's 32 four-byte columns / two lanes wanting different words in one bank, which serialises them.</dd>
+          <dt>bandwidth</dt><dd>Bytes per second a level of memory can deliver.</dd>
+          <dt>FLOP / FLOPS</dt><dd>A floating-point operation / operations per second. A multiply-add is two.</dd>
+          <dt>FP16, BF16</dt><dd>2-byte float; 2-byte float with FP32's range and less precision.</dd>
+          <dt>arithmetic intensity</dt><dd>FLOP done per byte moved from memory.</dd>
+          <dt>roofline</dt><dd>The log-log chart of attainable FLOPS against arithmetic intensity, bounded by bandwidth and peak.</dd>
+          <dt>ridge point</dt><dd>The intensity where the bandwidth slope meets the arithmetic roof: peak ÷ bandwidth.</dd>
+          <dt>memory-bound / compute-bound</dt><dd>Left of the ridge, limited by bytes / right of it, limited by arithmetic.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: the same 4096 × 4096 matvec, but with W stored in BF16 and x and y kept in FP32. What is its arithmetic intensity, and its shortest possible time on the laptop and on the H100?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>1 FLOP per byte; about 156 µs on the laptop and 10 µs on the H100. Each weight is now 2 bytes and still feeds one multiply-add, which is 2 FLOP. W shrinks to 33,554,432 bytes, plus the same 32 KiB of x and y: about 33.6 MB. That is 33.6 MB / 216 GB/s ≈ 156 µs, and 33.6 MB / 3,352 GB/s ≈ 10 µs.</p>
+          <p>The point stays far left of every ridge in the table, so the kernel is still memory-bound, and halving the bytes halves the time. The near-miss is to expect a gain from faster BF16 arithmetic. The arithmetic was never the limit.</p>
+        </details>
+        <p>2. A profiler reports, for the main load instruction of one matvec kernel, about 32 sectors requested per warp-wide load, and about 4 for another kernel. Both load one 4-byte float per lane. Which is the naive kernel, and what does its number cost?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>The 32-sector one is the naive thread-per-row kernel. Its lanes read addresses 16 KiB apart, so each lane needs its own sector (diagram 3.2). The warp-per-row kernel's lanes read 32 neighbours, which is 4 sectors.</p>
+          <p>The cost is up to 8 times as many bytes moved per useful byte: 1,024 fetched for 128 used. The real penalty is smaller only to the extent that L1 still holds each sector when the lane comes back for its next float. Since the kernel is memory-bound, extra bytes become extra time almost one for one. The near-miss is "the naive kernel does more arithmetic". Both do the same 16.8 million multiply-adds.</p>
+        </details>
+        <p>3. "A matvec is memory-bound, so its time is set by DRAM bandwidth." Give a case from this chapter where the second half stops being true, and what sets the time instead.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>When W is small enough to stay in the L2 cache from one call to the next. For example, a 1024 × 1024 FP32 W is 4 MiB, which fits in the H100's 50 MB L2. It does not fit in the P5000's 2 MB. Repeated calls then read W from L2, whose bandwidth is several times DRAM's, so the time is set by L2 bandwidth, and the measured "GB/s" can exceed the DRAM peak.</p>
+          <p>The kernel is still memory-bound: its intensity is still 0.5 FLOP per byte. What changed is which rung of diagram 3.1 the bytes come from. The other way out is the green point of diagram 3.3: reuse each weight for many vectors, which raises the intensity itself.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://cacm.acm.org/magazines/2009/4/22959-roofline-an-insightful-visual-performance-model-for-multicore-architectures">Roofline: An Insightful Visual Performance Model for Multicore Architectures</a> (Williams, Waterman, Patterson, CACM 2009). The original. Sections 1 to 3 are the whole idea; the rest applies it to 2008 CPUs.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory">CUDA Best Practices Guide: Coalesced access to global memory</a>, and on the same page <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-and-memory-banks">Shared memory and memory banks</a>. NVIDIA's diagrams of sectors and banks, worth reading right after this chapter.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/">How to Access Global Memory Efficiently in CUDA C/C++ Kernels</a> (NVIDIA blog). Measures coalesced against strided access on real hardware, the experiment our naive kernel repeats.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#gpu-device-memory-spaces">CUDA Programming Guide: GPU device memory spaces</a>. The table of global, shared, local, constant and register memory with scope and lifetime.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://horace.io/brrr_intro.html">Making Deep Learning Go Brrrr From First Principles</a> (Horace He). The roofline argument told for machine-learning code, with the memory-bound and compute-bound cases named. Good to read now, and again after the language-model chapters.</li>
+        </ul>
+      </div>
+    </section>

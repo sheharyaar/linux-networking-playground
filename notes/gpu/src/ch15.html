@@ -1,0 +1,152 @@
+    <div class="part">Part V · The language model</div>
+    <section id="ch15" class="chapter">
+      <span class="chnum">Chapter 15</span>
+      <h2>Just enough transformer</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag LLM">LLM</span> — This part is about LLM servers, the programs you want to observe. To observe one you need to know what it computes, and this chapter teaches that from zero, with one model, Qwen2.5-0.5B-Instruct, and one source file, llama.cpp's graph for it. By the end, the whole model will turn out to be the prologue's matrix-vector multiply, repeated 169 times per token, with two other operations in between.</p>
+      <p class="readfirst">This chapter skips training entirely: how the weights got their values, gradients, loss functions. For serving, the weights are fixed numbers loaded from a file, and the model is a function from a list of tokens to a guess at the next one.</p>
+
+      <h3>From text to vectors</h3>
+      <p>A language model does not see characters. A <b>tokenizer</b> first cuts the text into <b>tokens</b>, pieces that are often whole words or parts of words, and replaces each by its number in a fixed <b>vocabulary</b>. Qwen2.5's vocabulary has 151,936 tokens. The model's input is a list of token numbers, and its output is a guess at the next number.</p>
+      <p>Inside the model, each token is a vector. The <b>embedding matrix</b> has one row per vocabulary entry, and each row is a vector of 896 numbers for Qwen2.5-0.5B. Turning a token into its vector is a lookup of one row, which llama.cpp writes as <code>ggml_get_rows(ctx0, tok_embd, inp-&gt;tokens)</code> (<code>llama.cpp/src/llama-graph.cpp:2409</code>). That 896 is the model's <b>hidden size</b>. From here until the very end, every token is represented by one vector of that size, its <b>hidden state</b>, which each layer of the model reads and updates.</p>
+
+      <h3>The model in one page</h3>
+      <p>Qwen2.5-0.5B is 24 <b>layers</b> with the same structure and different weights, stacked one after another. llama.cpp builds the whole computation for it in one function, a loop over the layers with a short preamble and postscript (<code>llama.cpp/src/models/qwen2.cpp:53–154</code>). Each layer has two halves, attention and the feed-forward network. Each half starts with a normalisation and ends by adding its result back onto its input.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  tok(["token numbers"]) --> emb["embedding lookup: one row of a<br/>151,936 × 896 matrix per token"]
+  emb --> L
+  subgraph L["one layer, repeated 24 times"]
+    direction LR
+    subgraph A["attention half"]
+      direction TB
+      n1["RMSNorm"] --> qkv["q, k, v:<br/>three matvecs"] --> rope["RoPE: rotate q, k<br/>by position"] --> att["attention over this<br/>token and earlier ones"] --> o["output matvec, Wo"] --> r1(("+ input"))
+    end
+    subgraph F["feed-forward half"]
+      direction TB
+      n2["RMSNorm"] --> gu["gate and up: two<br/>matvecs, 896 → 4,864"] --> sw["SiLU(gate) × up"] --> dn["down matvec,<br/>4,864 → 896"] --> r2(("+ input"))
+    end
+    A --> F
+  end
+  L --> fn["final RMSNorm"] --> head["output matvec:<br/>896 → 151,936 logits"] --> smp(["pick the next token"])
+  style att fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 15.1 — Qwen2.5-0.5B, as <code>qwen2.cpp</code> builds it.</b> Notice how much of it is matvecs: seven per layer and one at the end. The two circles are the residual additions, where each half's output is added to the hidden state it started from. The highlighted box is the only place where one token looks at the others.</figcaption>
+      </figure>
+
+      <p><b>RMSNorm</b> divides the hidden state by its root mean square, the square root of the average of its squared entries, and multiplies each entry by a learned weight. It keeps the numbers in a stable range from layer to layer. The <b>residual</b> addition (<code>qwen2.cpp:110</code> and <code>127</code>) means that a layer adjusts the hidden state rather than replacing it, which is what lets 24 layers be stacked.</p>
+
+      <h3>Attention: where tokens meet</h3>
+      <p>Everything else in the model handles each token on its own. Attention is where a token takes information from the tokens before it. For the new token, three matvecs make three vectors from its normalised hidden state: a <b>query</b> q, a <b>key</b> k and a <b>value</b> v. Think of the query as what this token is looking for, a key as what a token offers to be found by, and a value as what it hands over if found. That analogy is all this chapter uses; from here on the arithmetic carries it.</p>
+      <p>The new token's query is compared with the key of every token so far, including itself, by a dot product. Each score is divided by √64, the square root of the vector length, to keep the numbers moderate. A <b>softmax</b> then turns the scores into weights that are positive and sum to 1: exponentiate each score, divide by the total. The output is the weighted sum of the tokens' values. Tokens never attend to later tokens. During generation there are no later tokens yet; when a whole prompt is processed at once, a <b>causal mask</b> hides them.</p>
+
+      <figure class="dia">
+        @@SVG:attention@@
+        <figcaption><b>Diagram 15.2 — Attention for one head and one new token.</b> Notice that the keys and values of the five earlier tokens are the same ones that were computed when those tokens were new: nothing about "The" or "cat" changes when "mat" arrives. The next chapter turns that observation into a cache.</figcaption>
+      </figure>
+
+      <p>The model does this several times in parallel, in <b>heads</b>. Qwen2.5-0.5B splits its 896-entry query into 14 heads of 64, each comparing in its own 64-entry space, and joins the 14 outputs back into 896 before the output matvec. Its keys and values have only 2 heads of 64 each, shared by the query heads seven at a time. That is <b>grouped-query attention</b> (GQA): the key and value matvecs are 896 to 128 instead of 896 to 896, and, more importantly for the next chapter, there is seven times less key and value data per token to keep.</p>
+      <p>One more step gives tokens a sense of order. Plain dot products do not care where a token sits in the text. <b>RoPE</b>, rotary position embedding, rotates pairs of entries in q and k by angles proportional to the token's position, so that the score between two tokens depends on how far apart they are (<code>qwen2.cpp:86–96</code>). In llama.cpp, attention itself is <code>build_attn</code>. It first stores the new token's k and v into the cache and fetches the layer's keys and values for all tokens so far (<code>llama-graph.cpp:2923–2928</code>). Then it either multiplies the keys by the query, applies the softmax with the mask and the 1/√64 scale, and multiplies by the values (<code>llama-graph.cpp:2696–2740</code>), or does all three in one fused flash-attention kernel (<code>llama-graph.cpp:2668</code>).</p>
+
+      <h3>The feed-forward network: the same little machine for every token</h3>
+      <p>The second half of each layer handles each token alone, with three matvecs. Two of them, <b>gate</b> and <b>up</b>, widen the 896-entry vector to 4,864 entries each. The gate result goes through <b>SiLU</b>, the function z × sigmoid(z), which passes large positive values almost unchanged and squashes negative ones towards zero. The result is multiplied entry by entry with the up result. This combination is called <b>SwiGLU</b> (<code>llama-graph.cpp:1872</code>). The third matvec, <b>down</b>, narrows the 4,864 entries back to 896. Most of the model's weights live here: 13.1 million of each layer's 14.9 million.</p>
+
+      <h3>From the last vector to the next token</h3>
+      <p>After the last layer, a final RMSNorm, and then one more matvec turns the 896-entry hidden state into 151,936 numbers, one per vocabulary entry, called <b>logits</b>. A softmax over the logits gives a probability for each possible next token. Qwen2.5-0.5B has <b>tied embeddings</b>: this last matrix is the embedding matrix itself, reused, and a server that loads the original weights, as vLLM does, keeps one copy. The official files for llama.cpp, in its single-file model format <b>GGUF</b>, carry a second copy named <code>output.weight</code>, so llama.cpp loads both, and reuses the embedding matrix only when that tensor is missing (<code>qwen2.cpp:26–31</code>). Only the last token's logits are needed to choose what comes next, so at the last layer llama.cpp keeps just the rows it will need (<code>qwen2.cpp:106–109</code>).</p>
+      <p>Choosing the token from the probabilities is <b>sampling</b>. <i>Greedy</i> sampling takes the most likely token. <i>Temperature</i> divides the logits by a number before the softmax, flattening or sharpening the distribution, and <i>top-p</i> samples only from the smallest set of tokens whose probabilities add up to p. The chosen token is appended to the list and the whole model runs again for the next one. Producing text one token at a time, each depending on all the previous ones, is called <b>autoregressive</b> generation, and it is why generation is a loop.</p>
+
+      <h3>Counting: the model is the prologue's matvec</h3>
+      <p>Now count what one new token costs. Every matrix in diagram 15.1 is used once per token, as a matrix-vector multiply, with the token's 896-entry vector or the 4,864-entry FFN vector as x.</p>
+      <table class="gen">
+        <caption>The matrices of Qwen2.5-0.5B, from its config: hidden 896, 14 query heads and 2 KV heads of 64, FFN 4,864, vocabulary 151,936</caption>
+        <tr><th>Matrix</th><th>Shape</th><th>Weights</th><th>Per token</th></tr>
+        <tr><td>Wq, Wo</td><td>896 × 896 each</td><td>0.80 M each</td><td>2 matvecs</td></tr>
+        <tr><td>Wk, Wv</td><td>896 × 128 each</td><td>0.11 M each</td><td>2 matvecs</td></tr>
+        <tr><td>gate, up</td><td>896 × 4,864 each</td><td>4.36 M each</td><td>2 matvecs</td></tr>
+        <tr><td>down</td><td>4,864 × 896</td><td>4.36 M</td><td>1 matvec</td></tr>
+        <tr><td><b>one layer</b></td><td></td><td><b>14.9 M</b></td><td><b>7 matvecs</b></td></tr>
+        <tr><td><b>24 layers</b></td><td></td><td><b>357.8 M</b></td><td><b>168 matvecs</b></td></tr>
+        <tr><td>embedding, also the output matrix</td><td>151,936 × 896</td><td>136.1 M</td><td>1 row lookup, 1 matvec</td></tr>
+        <tr><td><b>model</b></td><td></td><td><b>about 494 M</b></td><td><b>169 matvecs</b></td></tr>
+      </table>
+      <p>So generating one token for one user reads every weight once and uses each for one multiply-add: 2 FLOP per weight. In BF16, two bytes per weight, that is 1 FLOP per byte, twice our FP32 matvec's 0.5 and still far below every ridge in diagram 11.1. One token of Qwen2.5-0.5B moves about 988 MB and does about 1 GFLOP. On the laptop's 216 GB/s, that is at least 4.6 ms per token, so no more than about 219 tokens per second for one sequence, before anything else is counted. Generating a token is 169 of the prologue's matvecs in a row, and its speed is set by memory bandwidth.</p>
+
+      <table class="gen">
+        <caption>Qwen2.5-0.5B in BF16 on the three benches: a ceiling for one sequence, from bandwidth alone, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>Bandwidth</td><td>288 GB/s</td><td>about 216 GB/s</td><td>3,352 GB/s</td></tr>
+        <tr><td>Ceiling, tokens per second</td><td>about 291</td><td>about 219</td><td>about 3,390</td></tr>
+        <tr><td>BF16 arithmetic</td><td>none; Pascal predates BF16, so llama.cpp uses other formats</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Fits a 7B model in BF16 (15 GB)?</td><td>barely, with no room left for the cache</td><td>no: 6 GB</td><td>yes, with room to spare</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Watch llama.cpp build diagram 15.1. Its <code>llama-eval-callback</code> example prints every tensor it computes, with the names that <code>qwen2.cpp</code> gives them. It runs on the CPU, so the dGPU can stay off. Download the official GGUF file of Qwen2.5-0.5B-Instruct in its <b>Q8_0</b> form, which stores each weight as an 8-bit integer with one scale for every 32 weights (Before you start), then:</p>
+<pre><code>cd ~/workspace/repos/llama.cpp
+./build/bin/llama-eval-callback -m qwen2.5-0.5b-instruct-q8_0.gguf \
+    -p "The cat sat on the" -n 1 --seed 1 2&gt;&amp;1 | grep -E 'ggml_debug' | head -40</code></pre>
+        <p>Find <code>inp_embd</code>, then <code>attn_norm-0</code>, <code>Qcur-0</code>, <code>Kcur-0</code>, <code>Vcur-0</code>, <code>ffn_inp-0</code>, <code>ffn_out-0</code> and <code>l_out-0</code>, and check each shape against the table: 896 for the hidden state, 14 heads of 64 for q, 2 heads of 64 for k and v, with one column per prompt token. The names come from the <code>cb(…)</code> calls in <code>qwen2.cpp</code>.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Text becomes token numbers, and each token becomes an 896-entry hidden state through an embedding lookup. Qwen2.5-0.5B is 24 layers, each RMSNorm, attention and a residual addition, then RMSNorm, a SwiGLU feed-forward network and a residual addition. Attention compares the new token's query with every earlier key, turns the scores into weights with a softmax, and sums the values; 14 query heads share 2 key-value heads, and RoPE encodes position. A final matvec gives logits over the vocabulary, sampling picks a token, and the loop repeats. One token costs 169 matvecs, about 494 million weights read once: memory-bound, like the prologue's matvec.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>token, vocabulary, tokenizer</dt><dd>A piece of text, the fixed list of all pieces, and the program that cuts text into them.</dd>
+          <dt>embedding matrix</dt><dd>One vector per vocabulary entry; looking up a token's row gives its starting vector.</dd>
+          <dt>hidden size, hidden state</dt><dd>The length of each token's vector (896 here), and the vector itself as layers update it.</dd>
+          <dt>layer</dt><dd>One repeated block of the model: attention and a feed-forward network.</dd>
+          <dt>RMSNorm</dt><dd>Divide by the root mean square, then scale by learned weights.</dd>
+          <dt>residual</dt><dd>Adding a half-layer's output back onto its input.</dd>
+          <dt>query, key, value</dt><dd>The three vectors attention makes for each token.</dd>
+          <dt>softmax</dt><dd>Exponentiate and normalise, turning scores into positive weights that sum to 1.</dd>
+          <dt>causal mask</dt><dd>Hides later tokens from earlier ones when many tokens are processed together.</dd>
+          <dt>head</dt><dd>One of several attention computations done side by side on slices of the vectors.</dd>
+          <dt>grouped-query attention (GQA)</dt><dd>Several query heads sharing one key-value head.</dd>
+          <dt>RoPE</dt><dd>Rotary position embedding: rotating q and k by position-dependent angles.</dd>
+          <dt>feed-forward network, SwiGLU, SiLU</dt><dd>The per-token half of a layer; its gated form; and the function z × sigmoid(z).</dd>
+          <dt>logits</dt><dd>One score per vocabulary entry for the next token.</dd>
+          <dt>tied embeddings</dt><dd>Using the embedding matrix again as the final output matrix.</dd>
+          <dt>GGUF</dt><dd>llama.cpp's single-file model format.</dd>
+          <dt>Q8_0</dt><dd>Weights stored as 8-bit integers, with one scale per 32 weights.</dd>
+          <dt>sampling</dt><dd>Choosing the next token from the probabilities: greedy, temperature, top-p.</dd>
+          <dt>autoregressive</dt><dd>Generating one token at a time, each from all the previous ones.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: llama.cpp's Q8_0 file of Qwen2.5-0.5B-Instruct is 676 MB. Ignoring everything but reading the weights, what is the ceiling in tokens per second for one sequence on the laptop and on the P5000?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>About 410 tokens per second on the laptop and about 550 on the P5000. The file holds two 151,936 × 896 matrices: the embedding table, of which a token reads one row, and the <code>output.weight</code> copy, which it reads whole. At Q8_0's 34 bytes per 32 weights the embedding table is about 145 MB, and the tokenizer takes about 6 MB, so a token reads about 525 MB: 0.525 GB / 216 GB/s ≈ 2.4 ms on the laptop and 0.525 GB / 288 GB/s ≈ 1.8 ms on the P5000.</p>
+          <p>Fewer bytes per weight means proportionally more tokens per second. The near-miss is to divide the file size by the bandwidth, which gives 320 and 426, because it counts the embedding table as read on every token. Computing from FLOPs is further off still: one sequence never gets near the compute roof.</p>
+        </details>
+        <p>2. Qwen2.5-0.5B has 14 query heads but only 2 key-value heads of 64 entries. How many bytes of keys and values does one token add per layer and for the whole model in BF16, and how many would 14 key-value heads need?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>512 bytes per layer and 12,288 bytes for the model; 14 heads would need 86,016 bytes. Each layer keeps a key and a value of 2 heads × 64 entries × 2 bytes, so 2 × 128 × 2 = 512 bytes, and 24 layers make 12,288.</p>
+          <p>GQA makes the stored data seven times smaller while keeping 14 different queries, and the next chapter shows that this stored data is what limits how many users a server can hold, more than the weights do. The near-miss is to think GQA saves arithmetic. It saves a little; mostly it saves memory.</p>
+        </details>
+        <p>3. When llama.cpp processes a 1,000-token prompt, it keeps all 1,000 positions through layers 1 to 23 but only the last position after attention in layer 24 (<code>qwen2.cpp:106–109</code>). Why can it drop the other 999 there, and not earlier?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Because after layer 24's attention, a position's hidden state is used only to compute that position's logits, and only the last position's logits choose the next token. In earlier layers, every position's output is the input to the next layer, where it makes that position's key and value, which every later token will attend to.</p>
+          <p>So all positions must go through every layer up to the last attention, and only the final position needs the rest. The near-miss is to think earlier positions are needed for their own predictions. During generation nobody asks what came after "The"; we already know.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://jalammar.github.io/illustrated-transformer/">The Illustrated Transformer</a> (Jay Alammar). The original encoder-decoder design, drawn step by step; Qwen and Llama keep only the decoder half.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/1706.03762">Vaswani et al., Attention Is All You Need</a> (2017). Section 3.2 defines scaled dot-product attention and multi-head attention.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://arxiv.org/abs/2305.13245">Ainslie et al., GQA</a> (2023), <a href="https://arxiv.org/abs/2104.09864">Su et al., RoFormer</a> for RoPE, <a href="https://arxiv.org/abs/1910.07467">Zhang and Sennrich, RMSNorm</a>, and <a href="https://arxiv.org/abs/2002.05202">Shazeer, GLU Variants</a> for SwiGLU. One paper per box of diagram 15.1.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>, pinned here at commit ec7630a (<code>src/models/qwen2.cpp</code> and <code>src/llama-graph.cpp</code>), and <a href="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF">Qwen2.5-0.5B-Instruct-GGUF</a>, the official GGUF files used in this part.</li>
+          <li class="ref" data-layer="LLM"><span class="tag LLM">LLM</span><a href="https://horace.io/brrr_intro.html">Horace He, Making Deep Learning Go Brrrr From First Principles</a>. Compute, memory and overhead as the three costs, the same lens as this document.</li>
+        </ul>
+      </div>
+    </section>

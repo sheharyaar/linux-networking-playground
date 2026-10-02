@@ -1,0 +1,1 @@
+bulk: 1 runs, 2 paced + 6 unpaced flows; goodput per flow paced 1.133±0.108 Mbit/s, unpaced 1.024±0.088 Mbit/s, unpaced/paced 0.90; loss events per flow paced 31.50, unpaced 36.17; retransmits per flow paced 53.0, unpaced 74.5; lost in the first congestion epoch: paced 100%, unpaced 67%

@@ -1,0 +1,149 @@
+# host, as uid 1000, no namespaces:
+txtime: setsockopt(SO_TXTIME, tai) failed: EPERM (Operation not permitted)
+txtime: clock=mono sent 1 of 1 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+== fq, 1000 stamps 1 ms apart, each handed down 5 ms early (CLOCK_MONOTONIC)
+txtime: clock=mono sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+qdisc fq 823a: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 242566 bytes 1007 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 1 (inactive 1 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 7 throttled 1000 latency 11.1us
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median 13.2 us, p1 12.1, p99 24.9, max 122.1 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== fq, 400 stamps 1 ms apart, each group of 8 handed down in reverse order, 3-17 ms early
+txtime: clock=mono sent 400 of 400 datagrams of 200 B, stamps 1000 us apart, first 10 ms after start, groups of 8 reversed
+400 of 400 stamped datagrams captured
+lateness (captured - stamped): median 12.9 us, p1 11.9, p99 430.0, max 474.7 us
+gap between packets: captured median 1000.1 us, stamped median 1000.0 us
+order on the wire: stamp order, not send order
+
+== fq, 50 stamps that are already 45 ms in the past when handed down
+txtime: clock=mono sent 50 of 50 datagrams of 200 B, stamps 1000 us apart, first -45 ms after start
+50 of 50 stamped datagrams captured
+lateness (captured - stamped): median 45060.1 us, p1 45058.2, p99 45276.4, max 45276.4 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== fq, 20 stamps 11 s ahead, handed down at once (default horizon 10s, horizon_drop)
+txtime: clock=mono sent 20 of 20 datagrams of 200 B, stamps 1000 us apart, first 11005 ms after start, all handed down at once
+qdisc fq 823a: root refcnt 17 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 351578 bytes 1459 pkt (dropped 20, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 2 (inactive 2 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 59 throttled 1400 latency 11.2us
+ horizon_drops 20
+
+== fq horizon 2s horizon_cap, 20 stamps 5 s ahead, handed down at once
+txtime: clock=mono sent 20 of 20 datagrams of 200 B, stamps 1000 us apart, first 5005 ms after start, all handed down at once
+-- 0.2 s later
+ Sent 351578 bytes 1459 pkt (dropped 20, overlimits 0 requeues 0) 
+ backlog 4840b 20p requeues 0
+  flows 3 (inactive 2 throttled 1) band0_pkts 0 band1_pkts 20 band2_pkts 0 next_packet_delay 1.79s
+  gc 0 highprio 0 fastpath 59 throttled 1401 latency 11.2us
+ horizon_drops 20  horizon_caps 20
+-- after
+ Sent 356418 bytes 1479 pkt (dropped 20, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 3 (inactive 3 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 59 throttled 1406 latency 10.1us
+ horizon_drops 20  horizon_caps 20
+20 of 20 stamped datagrams captured
+lateness (captured - stamped): median -3014401.5 us, p1 -3023889.0, p99 -3004925.4, max -3004925.4 us
+gap between packets: captured median 0.9 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF: permanent neighbour first (ETF drops ARP), then etf clockid CLOCK_TAI delta 500000
+tc exit 0
+qdisc etf 8240: root refcnt 17 clockid TAI delta 500000 offload off deadline_mode off skip_sock_check off
+-- try tc qdisc replace with another delta
+Error: Change operation not supported by specified qdisc.
+tc exit 2
+-- try clockid CLOCK_MONOTONIC
+Error: Invalid clockid. CLOCK_TAI must be used.
+tc exit 2
+-- 6 s idle, nothing sent by us
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ Sent 0 bytes 0 pkt (dropped 1, overlimits 0 requeues 0) 
+
+== ETF delta 500000 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 0 SO_EE_ORIGIN_TXTIME errors on the error queue
+ Sent 242000 bytes 1000 pkt (dropped 0, overlimits 0 requeues 0) 
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -497.0 us, p1 -497.6, p99 -485.4, max -251.4 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF delta 100000 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 0 SO_EE_ORIGIN_TXTIME errors on the error queue
+ Sent 242000 bytes 1000 pkt (dropped 0, overlimits 0 requeues 0) 
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -96.8 us, p1 -97.6, p99 -85.7, max -76.1 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF delta 50000 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 0 SO_EE_ORIGIN_TXTIME errors on the error queue
+ Sent 242000 bytes 1000 pkt (dropped 0, overlimits 0 requeues 0) 
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -46.9 us, p1 -47.7, p99 -35.9, max -23.0 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF delta 20000 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 0 SO_EE_ORIGIN_TXTIME errors on the error queue
+ Sent 242000 bytes 1000 pkt (dropped 1, overlimits 0 requeues 0) 
+1000 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -17.2 us, p1 -17.7, p99 -7.9, max 11.8 us
+gap between packets: captured median 1000.1 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF delta 10000 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 30 SO_EE_ORIGIN_TXTIME errors on the error queue
+  ECANCELED TXTIME_MISSED: 30
+ Sent 234740 bytes 970 pkt (dropped 30, overlimits 30 requeues 0) 
+970 of 1000 stamped datagrams captured
+lateness (captured - stamped): median -6.9 us, p1 -7.6, p99 2.7, max 14.1 us
+gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+order on the wire: stamp order, which is also send order
+
+== ETF delta 0 ns: 1000 CLOCK_TAI stamps 1 ms apart, each handed down 5 ms early
+txtime: clock=tai sent 1000 of 1000 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 226 SO_EE_ORIGIN_TXTIME errors on the error queue
+  ECANCELED TXTIME_MISSED: 226
+ Sent 0 bytes 0 pkt (dropped 1000, overlimits 1000 requeues 0) 
+txgaps: no stamped datagrams in the capture
+
+== ETF: 50 CLOCK_TAI stamps already 45 ms in the past
+txtime: clock=tai sent 0 of 50 datagrams of 200 B, stamps 1000 us apart, first -45 ms after start
+txtime: 50 sendmsg() calls failed: ['ENOBUFS']
+txtime: 50 SO_EE_ORIGIN_TXTIME errors on the error queue
+  EINVAL TXTIME_INVALID_PARAM: 50
+ Sent 0 bytes 0 pkt (dropped 50, overlimits 0 requeues 0) 
+
+== ETF: a CLOCK_MONOTONIC socket
+txtime: clock=mono sent 0 of 20 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: 20 sendmsg() calls failed: ['ENOBUFS']
+txtime: 20 SO_EE_ORIGIN_TXTIME errors on the error queue
+  EINVAL TXTIME_INVALID_PARAM: 20
+ Sent 0 bytes 0 pkt (dropped 70, overlimits 0 requeues 0) 
+
+== ETF: ping, which has no SO_TXTIME
+--- 10.0.2.1 ping statistics ---
+2 packets transmitted, 0 received, 100% packet loss, time 2061ms
+
+ Sent 0 bytes 0 pkt (dropped 73, overlimits 0 requeues 0) 
+
+== SO_TXTIME clocks and CAP_NET_ADMIN (root of this lab's user namespace, then with the capability dropped)
+txtime: clock=tai sent 1 of 1 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start
+txtime: setsockopt(SO_TXTIME, tai) failed: EPERM (Operation not permitted)
+txtime: clock=mono sent 1 of 1 datagrams of 200 B, stamps 1000 us apart, first 5 ms after start

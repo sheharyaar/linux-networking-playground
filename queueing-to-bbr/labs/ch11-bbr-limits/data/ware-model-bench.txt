@@ -1,0 +1,20 @@
+path: 10 Mbit/s, 40 ms, 1514-byte frames: c = 825.6 packets/s, BDP = 33.0 packets
+BBR flows N = 1, inflight cap k = 2 BDP; simple model (deep buffer, one flow): BBR share 50%
+ X (BDP)  q (pkts)  p loss-based  BBR, Eq. 9  ProbeRTT time  BBR_frac  Jain, 2 flows
+    0.25         8         0.000       1.000          2.5%     0.975          0.526
+     0.5        17         0.000       1.000          2.6%     0.974          0.527
+       1        33         0.000       1.000          2.8%     0.972          0.529
+       2        66         0.189       0.811          3.2%     0.785          0.755
+       4       132         0.345       0.655          4.0%     0.629          0.938
+       8       264         0.422       0.578          5.6%     0.545          0.992
+      10       330         0.438       0.562          6.4%     0.526          0.997
+      16       528         0.461       0.539          8.8%     0.491          1.000
+      32      1057         0.481       0.519         15.2%     0.440          0.986
+      64      2114         0.490       0.510         28.0%     0.367          0.934
+
+Cao et al.'s cliff (Eq. 3, p. 134): the probe delivers g (1 - p) of the estimate; below 1 the estimate decays
+  pacing gain 1.1 : cliff p = 1 - 1/g =   9.1%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =   8.2%
+  pacing gain 1.25: cliff p = 1 - 1/g =  20.0%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =  19.2%
+  pacing gain 1.5 : cliff p = 1 - 1/g =  33.3%;  with v7.2's 1% pacing margin, 1 - 1/(0.99 g) =  32.7%
+BBRv1 policer detector (tcp_bbr.c:188, 743): lost/delivered >= 50/256 = 19.53%; with uniform random loss p,
+  lost/delivered = p / (1 - p), so it is crossed at p = 50/306 = 16.34% of the packets sent

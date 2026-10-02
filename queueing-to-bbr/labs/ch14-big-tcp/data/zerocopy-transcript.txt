@@ -1,0 +1,5 @@
+# bigpair.sh --size 185000; sender with --zerocopy (SO_ZEROCOPY + MSG_ZEROCOPY, 1 MiB buffer); capture at rcv:c0, first 20,000 data skbs; 2 s each; kernel 7.2.6-arch2-1 (CONFIG_MAX_SKB_FRAGS=17), 2026-10-02
+# 17 frags x 4096-byte user pages = 69,632 bytes of payload; + 66 (IPv4) or 86 (IPv6) bytes of headers
+zc-v4.pcap: IPv4 20000 data skbs, max 69698 B, median 69698 B, above 65,535: 18085 (90.4%), IP length field 0: 18085, hop-by-hop first: 0
+zc-v6.pcap: IPv6 20000 data skbs, max 69718 B, median 69718 B, above 65,535: 15478 (77.4%), IP length field 0: 15478, hop-by-hop first: 0
+# the same pair without --zerocopy (copy path, 32 KB page frags): see capture-transcript.txt, 183,962 / 184,298 B

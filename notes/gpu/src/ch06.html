@@ -1,0 +1,200 @@
+    <section id="ch6" class="chapter">
+      <span class="chnum">Chapter 6</span>
+      <h2>Reading PTX</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag ISA">ISA</span> — Last chapter showed PTX as the point where NVIDIA's compiler and LLVM produce the same kind of text, and the point where bpftime will splice its code into ours. Now we learn to read that text, on the PTX of <code>matvec_warp</code> itself and on a few lines of the PTX that bpftime injects.</p>
+
+      <h3>The frame of a PTX file</h3>
+      <p>Every PTX file opens with three lines. <code>.version 9.4</code> is the <b>PTX ISA version</b>, the edition of the language this file is written in; CUDA 13.4 writes 9.4, clang 22 writes 8.8, and bpftime's own trampoline file says 8.1. <code>.target sm_89</code> is the virtual architecture, the feature level the code may use. <code>.address_size 64</code> says pointers are 64 bits.</p>
+      <p>Then come functions. A kernel is declared with <b><code>.entry</code></b>: an entry point the host can launch. A device function that other device code calls is a <b><code>.func</code></b>. <code>.visible</code> makes the name visible outside this file, which is how the driver finds it by its mangled name. The kernel's arguments are declared in the <b><code>.param</code></b> state space, one line each, with the type of each argument:</p>
+<pre><code>.visible .entry _Z11matvec_warpPKfS0_Pfii(
+	.param .u64 _Z11matvec_warpPKfS0_Pfii_param_0,     // const float *W
+	.param .u64 _Z11matvec_warpPKfS0_Pfii_param_1,     // const float *x
+	.param .u64 _Z11matvec_warpPKfS0_Pfii_param_2,     // float *y
+	.param .u32 _Z11matvec_warpPKfS0_Pfii_param_3,     // int n
+	.param .u32 _Z11matvec_warpPKfS0_Pfii_param_4      // int d
+)
+{
+	.reg .pred 	%p&lt;13&gt;;
+	.reg .f32 	%f&lt;40&gt;;
+	.reg .b32 	%r&lt;43&gt;;
+	.reg .b64 	%rd&lt;40&gt;;</code></pre>
+      <p class="lcap">Listing 6.1 — the head of <code>matvec_warp</code>, from <code>nvcc -ptx -arch=sm_89</code> (CUDA 13.4). Comments added.</p>
+      <p>The four <code>.reg</code> lines declare <b>virtual registers</b>: as many as the code wants, each with a type. <code>%p</code> registers are predicates, one bit each. <code>%f</code> registers hold 32-bit floats, <code>%r</code> 32-bit untyped bits, <code>%rd</code> 64-bit values such as addresses. <code>%r&lt;43&gt;</code> means "43 of these". The PTX for this kernel uses about 140 virtual registers. <code>ptxas</code> will fit them into 40 real ones, the number <code>cuobjdump</code> reported in the SM chapter.</p>
+
+      <h3>State spaces: every address says where it points</h3>
+      <p>A <b>state space</b> is PTX's name for a kind of storage, and every load and store names one. <code>.reg</code> is registers. <code>.param</code> holds kernel and function arguments. <code>.global</code> is global memory. <code>.shared</code> is the block's shared memory. <code>.local</code> is per-thread memory in DRAM. <code>.const</code> is constant memory. So a load from global memory is <code>ld.global</code>, a load of an argument is <code>ld.param</code>, a store to shared memory is <code>st.shared</code>. The instruction's suffix then gives the type: <code>ld.global.f32</code> loads one 32-bit float.</p>
+      <p>C pointers do not carry a state space, so PTX also has <b>generic addresses</b>, which can point into global, shared or local memory and are resolved by hardware. The kernel receives its pointers as generic addresses and converts them once at the top with <code>cvta.to.global.u64</code>, "convert address to the global space". After that it can use the faster <code>ld.global</code> directly.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph PTX["PTX state space"]
+    direction TB
+    s_reg[".reg"]
+    s_par[".param"]
+    s_sh[".shared"]
+    s_gl[".global"]
+    s_loc[".local"]
+    s_con[".const"]
+  end
+  subgraph HWM["where it lives on the laptop GPU"]
+    direction TB
+    h_rf["register file, 256 KB per SM"]
+    h_cb["constant memory bank 0, the c[0x0][...] of the SASS chapter"]
+    h_sm["shared memory, in the SM's 128 KB pool"]
+    h_g["global memory: DRAM, through L2 and L1"]
+    h_l["also DRAM, private to one thread"]
+    h_c["constant memory, with its broadcast cache"]
+  end
+  s_reg --> h_rf
+  s_par --> h_cb
+  s_sh --> h_sm
+  s_gl --> h_g
+  s_loc --> h_l
+  s_con --> h_c
+  style s_gl fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+  style h_g fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 6.1 — PTX state spaces and the memories behind them.</b> Notice that three different state spaces, <code>.global</code>, <code>.local</code> and the data behind <code>.const</code>, all end up in the same DRAM. The state space tells the hardware which path and which cache to use, and the orange pair is the one our matvec spends its time on (diagram 3.1).</figcaption>
+      </figure>
+
+      <h3>Reading the body</h3>
+      <p>The kernel's first job is to work out who it is. It reads <b>special registers</b>: read-only registers the hardware fills in for each thread. <code>%tid</code> is <code>threadIdx</code>, <code>%ntid</code> is <code>blockDim</code>, <code>%ctaid</code> is <code>blockIdx</code> and <code>%nctaid</code> is <code>gridDim</code>. Others give the thread's place in the hardware: <code>%laneid</code> its lane, <code>%warpid</code> its warp slot on the SM, <code>%smid</code> which SM it is running on, <code>%globaltimer</code> a 64-bit nanosecond clock and <code>%clock64</code> the SM's cycle counter. Here is the C of listing 4.2 next to the PTX it became:</p>
+      <table>
+        <tr><th>CUDA C++ (<code>matvec.cu:67–79</code>)</th><th>PTX for <code>sm_89</code></th></tr>
+        <tr><td><code>blockIdx.x * blockDim.x + threadIdx.x</code></td><td><code>mov.u32 %r15, %ntid.x;</code><br><code>mov.u32 %r16, %ctaid.x;</code><br><code>mov.u32 %r1, %tid.x;</code><br><code>mad.lo.s32 %r17, %r16, %r15, %r1;</code></td></tr>
+        <tr><td><code>warp = … / 32;  lane = threadIdx.x % 32;</code></td><td><code>shr.u32 %r2, %r17, 5;</code><br><code>and.b32 %r3, %r1, 31;</code></td></tr>
+        <tr><td><code>if (warp &gt;= d) return;</code></td><td><code>setp.ge.s32 %p1, %r2, %r14;</code><br><code>@%p1 bra $L__BB1_10;</code></td></tr>
+        <tr><td><code>sum += w[j] * x[j];</code> (one of four unrolled copies)</td><td><code>ld.global.nc.f32 %f15, [%rd39+-256];</code><br><code>ld.global.nc.f32 %f16, [%rd38+-256];</code><br><code>fma.rn.f32 %f17, %f16, %f15, %f39;</code></td></tr>
+        <tr><td><code>j += 32</code>, four times</td><td><code>add.s64 %rd39, %rd39, 512;</code> (4 × 32 lanes × 4 bytes)</td></tr>
+        <tr><td><code>__shfl_down_sync(0xffffffff, v, 16)</code></td><td><code>shfl.sync.down.b32 %r27|%p7, %r22, %r25, %r24, %r26;</code><br>(value, offset 16, clamp 31, member mask −1)</td></tr>
+        <tr><td><code>if (lane == 0) y[warp] = sum;</code></td><td><code>setp.ne.s32 %p12, %r3, 0;</code><br><code>@%p12 bra $L__BB1_10;</code><br><code>st.global.f32 [%rd35], %f8;</code></td></tr>
+      </table>
+      <p class="lcap">Listing 6.2 — source next to PTX, lines picked from the same <code>nvcc -ptx</code> output.</p>
+      <p>Branches work through predicates. <code>setp.ge.s32 %p1, %r2, %r14</code> sets predicate <code>%p1</code> to "warp ≥ d". <code>@%p1 bra …</code> is a <b>guarded instruction</b>: it runs only in the lanes whose <code>%p1</code> is true. Any PTX instruction can carry a guard, branches and arithmetic alike, and this is the instruction-level form of the divergence in the SIMT chapter. Lanes that disagree about <code>%p1</code> take the branch differently, and the hardware's active mask does the rest.</p>
+      <p>The inner loop shows two things that earlier chapters predicted. The addresses step by 128 bytes per copy, 32 lanes × 4 bytes, so each warp-wide load is one cache line: coalescing, visible in the offsets. And the loads are <code>ld.global.nc</code>. The <code>.nc</code> means non-coherent: the load may go through a read-only cache that does not keep up with writes made during the kernel. The compiler may only use it because <code>const</code> and <code>__restrict__</code> promised that W and x do not change while the kernel runs. The float4 kernel's loads are <code>ld.global.nc.v4.f32 {%f13, %f14, %f15, %f16}, [%rd35]</code>: a <b>vector load</b>, four registers filled by one instruction. <code>fma.rn.f32</code> is a fused multiply-add, one rounding for the whole a × b + c, rounding to nearest.</p>
+
+      <h3>When threads must agree: atomics, fences and scopes</h3>
+      <p>Our matvec never needs two threads to coordinate. bpftime does, so here is the minimum. An <b>atomic</b> instruction reads, modifies and writes one memory location so that no other thread's access can land in between. <code>atom.global.cas.b32</code> is compare-and-swap, <code>atom.global.add.f32</code> an atomic add, <code>atom.global.exch.b32</code> an exchange.</p>
+      <p>A <b>memory scope</b> names the set of threads a guarantee covers. <code>.cta</code> is one block. <code>.cluster</code> is a group of blocks, on Hopper only. <code>.gpu</code> is every thread on this GPU. <code>.sys</code> is the whole system: this GPU, the host CPUs, and other GPUs. An atomic at <code>.gpu</code> scope is atomic for every thread on the device and makes no promise about the CPU. A <b>fence</b>, written <code>membar</code> in its oldest form, orders one thread's own memory accesses: everything before it becomes visible, to everyone in the named scope, before anything after it. <code>membar.sys</code> is the strongest. On Volta and later, PTX also has <code>fence</code> and loads and stores with acquire and release semantics, which give finer control. Pascal has only <code>membar</code>.</p>
+      <p>Now read the code bpftime injects when a GPU probe has to ask the host for something. This is its own PTX, from <code>trampoline_ptx.h</code>:</p>
+<pre><code>$L__BB2_2:
+	atom.global.cas.b32 	%r11, [%rd8], 0, 1;   // take a lock: 0 → 1
+	setp.eq.s32 	%p5, %r11, 1;                 // somebody else holds it?
+	@%p5 bra 	$L__BB2_2;                        //   then spin
+	st.u32 	[%rd1+12], %r5;                       // write the request
+	st.u64 	[%rd1+16], %rd6;
+	membar.sys;                                   // request visible system-wide
+	st.global.u32 [%rd1], 1;                      // raise "request ready"
+spin_wait:
+	membar.sys;
+	ld.global.u32 %r12, [%rd10];                  // read "answer ready"
+	setp.eq.u32 p0, %r12, 0;
+	@p0 bra spin_wait;                            // not yet: spin
+	st.global.u32 [%rd10], 0;
+	membar.sys;
+	ld.u64 	%rd13, [%rd1+2097184];                // read the answer
+	atom.global.exch.b32 	%r13, [%rd8], 0;      // release the lock</code></pre>
+      <p class="lcap">Listing 6.3 — <code>bpftime/attach/nv_attach_impl/trampoline_ptx.h:100–122</code>, comments added. The file declares <code>.target sm_61</code>.</p>
+      <p>Every piece is from this chapter. A compare-and-swap loop is a spinlock, and the lock is one word in global memory, so it serialises every thread on the GPU that reaches this code. The request is written to memory that the host can also see, and <code>membar.sys</code> makes sure the host sees the request before it sees the flag. Then the thread spins on a second flag until the host answers. Where that shared memory lives, and why the host can see it at all, is the next chapter's subject. Why this design costs so much is the probe-cost chapter's.</p>
+      <p>The same file also shows two state spaces in use for bpftime's own data: <code>.visible .const .align 8 .u64 constData;</code> holds the address of that shared region, and <code>.visible .const .align 8 .b8 map_info[40960];</code> is a table of 1,024 map descriptors of 40 bytes each, in constant memory. And it reads the clock and the SM number the same way any kernel can: <code>mov.u64 %rd1, %globaltimer;</code> and <code>mov.u32 %r1, %smid;</code> (lines 1648 and 1830). NVIDIA's documentation warns that <code>%smid</code> and <code>%warpid</code> are volatile: a thread can be moved, for example when the GPU stops its block to run other work, so the value is "where I was when I read it".</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph SYS[".sys: GPU, host CPUs and other GPUs"]
+    direction LR
+    subgraph GPU[".gpu: every thread on this GPU"]
+      direction LR
+      subgraph CL[".cluster: a group of blocks, Hopper only"]
+        direction LR
+        CTA[".cta: one block"]
+      end
+    end
+    CPU["host CPU threads"]
+  end
+  style CTA fill:#e6f4f1,stroke:#0f7b6c
+  style SYS fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 6.2 — Memory scopes, nested.</b> Notice that only the outermost box contains the host CPU. A GPU thread that wants a host thread to see its writes in order must use <code>.sys</code>, and that is why every fence in listing 6.3 is <code>membar.sys</code>.</figcaption>
+      </figure>
+
+      <h3>Calls</h3>
+      <p>A <code>.func</code> is called with <code>call</code>. Arguments and the return value travel through <code>.param</code> variables that the caller declares, and <code>ptxas</code> later decides which real registers carry them. bpftime's helpers are <code>.func</code>s with names like <code>_bpf_helper_ext_0502</code>, which returns the value of <code>%globaltimer</code>. The probe compiled from your eBPF program also becomes a <code>.func</code>, and the bpftime chapters show the one-line <code>call</code> that is inserted into your kernel to run it.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026. From the "Target ISA Notes" of the PTX ISA 9.4 reference</caption>
+        <tr><th>PTX feature</th><th>Pascal (sm_61)</th><th>Ada (sm_89)</th><th>Hopper (sm_90)</th></tr>
+        <tr><td><code>membar.cta</code>, <code>.gl</code>, <code>.sys</code></td><td>yes</td><td>yes</td><td>yes</td></tr>
+        <tr><td><code>fence</code>; loads with <code>.acquire</code>, scope qualifiers (sm_70+)</td><td>no</td><td>yes</td><td>yes</td></tr>
+        <tr><td><code>atom</code> with a scope qualifier (sm_60+)</td><td>yes</td><td>yes</td><td>yes</td></tr>
+        <tr><td><code>.cluster</code> scope (sm_90+)</td><td>no</td><td>no</td><td>yes</td></tr>
+        <tr><td><code>shfl.sync</code>; legacy <code>shfl</code> without a mask</td><td>both</td><td><code>shfl.sync</code> only</td><td><code>shfl.sync</code> only</td></tr>
+        <tr><td><code>%globaltimer</code>, <code>%smid</code>, <code>%warpid</code>, <code>%laneid</code></td><td>yes</td><td>yes</td><td>yes</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>Make PTX for all three generations, from one source, on the laptop:</p>
+<pre><code>nvcc  -O3 -ptx -arch=sm_89 matvec.cu -o out/matvec.sm_89.ptx
+nvcc  -O3 -ptx -arch=sm_90 matvec.cu -o out/matvec.sm_90.ptx
+clang -x cuda --cuda-gpu-arch=sm_61 --cuda-device-only -S -O3 matvec.cu -o out/matvec.sm_61.clang.ptx
+grep -c 'ld.global.nc' out/*.ptx
+diff &lt;(grep -v '^//' out/matvec.sm_89.ptx) &lt;(grep -v '^//' out/matvec.sm_90.ptx) | head</code></pre>
+        <p>The <code>sm_89</code> and <code>sm_90</code> files differ in little more than the <code>.target</code> line: PTX is meant to be nearly the same everywhere. The clang file is laid out differently, because a different compiler wrote it, but it is the same language. The real differences between generations show up one level down, in SASS.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>A PTX file declares its ISA version, its target and its address size, then <code>.entry</code> kernels and <code>.func</code> device functions with arguments in the <code>.param</code> space and unlimited typed virtual registers. Every memory instruction names a state space (<code>.global</code>, <code>.shared</code>, <code>.local</code>, <code>.const</code>, <code>.param</code>), and generic C pointers are converted once with <code>cvta</code>. Threads learn who they are from special registers such as <code>%tid</code>, <code>%ctaid</code>, <code>%smid</code> and <code>%globaltimer</code>. Branches are predicates plus guarded instructions. Coordination uses atomics and fences at a named scope, <code>.cta</code> to <code>.sys</code>, and bpftime's call to the host is a <code>.gpu</code>-wide spinlock and <code>.sys</code> fences around a request in memory both sides can see.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>PTX ISA version</dt><dd>The <code>.version</code> line: which edition of PTX a file is written in.</dd>
+          <dt><code>.entry</code> / <code>.func</code></dt><dd>A launchable kernel / a device function reached with <code>call</code>.</dd>
+          <dt><code>.param</code></dt><dd>The state space for kernel and function arguments.</dd>
+          <dt>virtual register</dt><dd>A typed PTX register (<code>%p</code>, <code>%r</code>, <code>%rd</code>, <code>%f</code>); <code>ptxas</code> maps them to real ones.</dd>
+          <dt>state space</dt><dd>PTX's name for a kind of storage, written into every load and store.</dd>
+          <dt>generic address</dt><dd>A pointer without a state space, resolved by hardware; <code>cvta</code> converts it.</dd>
+          <dt>special register</dt><dd>A read-only register the hardware fills: <code>%tid</code>, <code>%ctaid</code>, <code>%smid</code>, <code>%globaltimer</code>, …</dd>
+          <dt>guarded instruction</dt><dd>An instruction prefixed by a predicate, <code>@%p</code>, that runs only in lanes where it is true.</dd>
+          <dt><code>.nc</code> load</dt><dd>A load through the non-coherent read-only path, allowed only for data that does not change during the kernel.</dd>
+          <dt>vector load</dt><dd>One load that fills several registers, such as <code>ld.global.v4.f32</code>.</dd>
+          <dt>atomic</dt><dd>A read-modify-write that no other access can interrupt, such as <code>atom.global.cas</code>.</dd>
+          <dt>memory scope</dt><dd>The set of threads a guarantee covers: <code>.cta</code>, <code>.cluster</code>, <code>.gpu</code>, <code>.sys</code>.</dd>
+          <dt>fence (<code>membar</code>)</dt><dd>An instruction that makes a thread's earlier accesses visible within a scope before its later ones.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: in the unrolled loop of listing 6.2, the address registers step by 512 bytes per loop iteration. For the float4 kernel, which loads 16 bytes per lane and is unrolled the same four times, what would you expect the step to be, and why?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>2,048 bytes. Per copy of the loop body, each of the 32 lanes moves 16 bytes, so the warp advances 32 × 16 = 512 bytes. Four copies per iteration make 4 × 512 = 2,048. The PTX agrees: the float4 loads use offsets like <code>[%rd38+-1024]</code>, two copies' worth (1,024 bytes) behind the address register.</p>
+          <p>The near-miss is 512, which is the step for the scalar loop. The rule behind both numbers is lanes × bytes per lane × unroll factor. It is worth being able to read a loop's stride straight out of PTX, because the stride is how you see whether a warp's loads are coalesced.</p>
+        </details>
+        <p>2. A probe uses <code>atom.global.add.u64</code> at the default scope to count events into a counter in memory that the host can read directly. The host polls the counter while the kernel runs, and its last reading, taken as the kernel ends, is sometimes lower than the true count. Using diagram 6.2, what is missing?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>System scope. A plain <code>atom.global</code> is atomic among GPU threads, at <code>.gpu</code> scope, and makes no promise about when or in what order a host thread sees the result. A host reading during the kernel can see stale values. For a true total, use <code>atom.sys</code> on memory the host can see, or read only after the host has synchronised with the kernel's end.</p>
+          <p>This is what <code>membar.sys</code> does in listing 6.3. The near-miss is to suspect lost atomic updates. Atomics on the GPU are never lost; the host is reading before the updates are guaranteed to be visible to it.</p>
+        </details>
+        <p>3. "PTX is the same on every GPU, so a PTX file written for Ada can be used for Pascal." Where does that stop being true? Use the table.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>It stops at two points. First, the <code>.target</code>: PTX targeting <code>sm_89</code> may use features that 6.1 lacks, and the driver will not JIT it downward at all (the compiler chapter's rule). Second, the instructions themselves. Code that uses <code>fence</code>, acquire loads or scoped loads needs <code>sm_70</code> or later, and <code>.cluster</code> needs <code>sm_90</code>.</p>
+          <p>The language is shared; the feature set is versioned. That is exactly why bpftime compiles its trampoline for <code>sm_61</code> and uses only <code>membar</code> and scoped <code>atom</code>, which work on all three benches (listing 6.3's <code>.target sm_61</code>).</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#state-spaces">PTX ISA 9.4: State spaces</a> and <a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#special-registers">Special registers</a>. The reference for everything in this chapter. Read the special-registers list once from top to bottom; probes use half of it.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#memory-consistency-model">PTX ISA: Memory consistency model</a>, with <a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#scope">scope</a>. Heavy going. Read the scope section and the definitions of "morally strong" operations; skip the axioms on a first pass.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-atom">PTX ISA: atom</a> and <a href="https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-membar">membar/fence</a>. The source of the target requirements in the table.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/inline-ptx-assembly/">Using Inline PTX Assembly in CUDA</a>. How bpftime's trampoline writes <code>mov.u64 %0, %%globaltimer;</code> inside C++; you will need this the day you add a helper.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/device-callable-apis.html#sm-id-and-warp-id">CUDA Programming Guide: SM ID and warp ID</a>. NVIDIA's warning that <code>%smid</code> and <code>%warpid</code> are volatile.</li>
+        </ul>
+      </div>
+    </section>

@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maglev (side path) · chapter 13 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 13 of 14</p>
+    <h1>Maglev (side path)</h1>
+    <p class="sub">A side path off the main chain. After it you can fill a Maglev table by hand, predict how much of it moves when a backend leaves, and find each step of the paper in Cilium's kube-proxy replacement.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The paper</h2>
+    <ol><li><a href="#book">pp. 1–13</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-vip-ecmp">One VIP, many Maglevs</a></li>
+        <li><a href="#s-ct-then-hash">Tracking first, the table second</a></li>
+        <li><a href="#s-offset-skip">A preference list from two numbers</a></li>
+        <li><a href="#s-take-turns">Taking turns</a></li>
+        <li><a href="#s-disruption">What moves when a backend leaves</a></li>
+        <li><a href="#s-choosing-m">Choosing M</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 13 · before you read</span>
+      <h2>Maglev (side path)</h2>
+      <p class="chmeta">~6 min before · pp. 1–13 (~1 h, selected) · ~22 min after · <span class="tag LB">LB</span><br>
+        <span class="spine">The paper's seven-slot table (Table 1, p. 6): three backends fill it in turns, then backend B1 is removed and we count which slots change hands.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>This is a side path. The main chain follows one upload through queues and senders; here we follow it one step further, to the service address it was sent to. Somebody has to choose which backend receives it. The upload is 100 MB at about 9.5 Mbit/s of goodput (the bench rate from the congestion-avoidance chapter), so for about 84 seconds each of its roughly 69,000 data packets must reach that same backend. A backend that never saw the connection's start answers with a reset.</p>
+      <p>Google had the same problem at a larger scale (pp. 1–2). A hardware load balancer is one box plus a spare. Maglev replaces it with ordinary servers: the router spreads packets over many Maglev machines, and each one picks a backend. Now the choice is made in many places at once. When the set of Maglevs changes, a connection's packets arrive at a machine that has never seen it. When a backend dies, the others must take its connections without disturbing everyone else's.</p>
+      <p>So the question is: how can many machines that share no state send every packet of a connection to the same backend, keep the backends evenly loaded, and move as few connections as possible when a backend comes or goes? The paper's answer is a table of \(M\) slots per service, filled by a rule that every machine computes the same way. The spine is the smallest such table, the paper's own: seven slots and three backends. You fill it, take one backend away, and count what moved. You asked for this paper because Cilium's kube-proxy replacement ships the same algorithm; the system card reads it in your fork.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-five-tuple">5-tuple</dt><dd>Source IP, source port, destination IP, destination port and protocol number: the five header fields that name one connection (p. 4, footnote 1).</dd>
+        <dt id="w-vip">VIP (virtual IP address)</dt><dd>An address that names a service rather than a machine. No single interface owns it; load balancers announce it to the router and many backends serve it (p. 2).</dd>
+        <dt id="w-ecmp">ECMP (equal-cost multipath)</dt><dd>A router with several equally good next hops for one address hashes each packet's 5-tuple to pick one, so a connection stays on one next hop while the set does not change (p. 2).</dd>
+        <dt id="w-gre">GRE (generic routing encapsulation)</dt><dd>Wrapping a packet in an outer IP header addressed to the chosen backend. The backend unwraps it and sees the original packet, still addressed to the VIP (p. 2).</dd>
+        <dt id="w-dsr">DSR (direct server return)</dt><dd>The backend sends its reply from the VIP straight to the router, so replies skip the load balancer (p. 3).</dd>
+        <dt id="w-conntrack-table">connection tracking table</dt><dd>A fixed-size hash table on each Maglev, one per packet thread, that remembers which backend was chosen for each 5-tuple (pp. 4–5).</dd>
+        <dt id="w-consistent-hashing">consistent hashing</dt><dd>A rule that maps keys to backends so that each backend gets almost the same share (load balancing) and few keys change backend when the set of backends changes (p. 5).</dd>
+        <dt id="w-maglev-table">Maglev lookup table</dt><dd>The paper's consistent hash: an array of \(M\) slots per VIP, each naming a backend. A packet's 5-tuple hash modulo \(M\) picks its slot. \(M\) is prime (p. 6).</dd>
+        <dt id="w-offset-skip">offset and skip (preference list)</dt><dd>Two numbers hashed from a backend's name. The backend's preference list is the slots \(\text{offset},\ \text{offset} + \text{skip},\ \text{offset} + 2\,\text{skip}, \dots\), each taken modulo \(M\) (p. 6).</dd>
+        <dt id="w-disruption">disruption (minimal disruption)</dt><dd>The share of table slots that change backend when the set of backends changes. The slots that matter are those of backends that did not leave (pp. 5, 11).</dd>
+        <dt id="w-overprovision">overprovision factor</dt><dd>The busiest backend's load divided by the average load. A pool has to be sized for its busiest backend (p. 9).</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  C["Client"] ==>|"packet to the VIP"| R["Router<br/>ECMP hashes the 5-tuple"]
+  R ==>|"picks one Maglev"| M1["Maglev 1<br/>table:<br/>B1 B0 B1 B0 B2 B2 B0"]
+  R -.-> M2["Maglev 2<br/>the same table"]
+  R -.-> M3["Maglev 3<br/>the same table"]
+  M1 ==>|"5-tuple hash mod 7 = slot 6,<br/>GRE to B0"| B0["Backend B0"]
+  B0 ==>|"DSR: the reply comes from the VIP"| R
+  R ==>|"reply"| C
+  M2 -.->|"announce the VIP"| R
+  style M1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 13.1 — One VIP, many Maglevs, after the paper's Fig. 2 (p. 2).</b> Notice the two hashes. The router's ECMP hash picks a Maglev; the Maglev's table picks a backend. Every Maglev holds the same seven-slot table, so whichever one the router picks, slot 6 names B0. The reply leaves by DSR and never passes a Maglev. The dotted lines are setup: every Maglev announces the VIP, and the router may pick any of them.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Paper section</th><th>Pages</th><th>How</th><th>Look for</th></tr>
+        <tr><td>Abstract and §1 Introduction</td><td>pp. 1–2</td><td><span class="how skim">skim</span></td><td>Capacity \(N \times T\) and connection persistence: the two demands the rest serves.</td></tr>
+        <tr><td>§2 System overview, Figs 2–3</td><td>pp. 2–3</td><td><span class="how close">close</span></td><td>VIP, ECMP, GRE and DSR in one picture (one VIP, many Maglevs). Skim §2.2's configuration objects.</td></tr>
+        <tr><td>§3.1 Overall structure, Fig. 4</td><td>pp. 3–4</td><td><span class="how close">close</span></td><td>Steering hash, then connection tracking, then consistent hashing on a miss; why a hash and no round robin.</td></tr>
+        <tr><td>§3.2 Fast packet processing, Fig. 5</td><td>pp. 4–5</td><td><span class="how skim">skim</span></td><td>Take the numbers (9.06 Mpps, 350 ns, 50 µs, 300 µs). Skip the ring pointers; nothing later uses them.</td></tr>
+        <tr><td>§3.3 Backend selection</td><td>p. 5</td><td><span class="how close">close</span></td><td>The two cases connection tracking cannot cover (tracking first, the table second).</td></tr>
+        <tr><td>§3.4 Consistent hashing, Pseudocode 1, Table 1</td><td>pp. 5–7</td><td><span class="how close">close</span></td><td>Offset and skip, why \(M\) is prime, taking turns, \(\lfloor M/N \rfloor\) or \(\lceil M/N \rceil\), and the one extra move in Table 1.</td></tr>
+        <tr><td>§4 Operational experience</td><td>pp. 7–9</td><td><span class="how skim">skim</span></td><td>§4.1: active-passive pairs gave way to ECMP. §4.2–4.4 (VIP matching, fragments, monitoring) are Google-specific: read them later or never.</td></tr>
+        <tr><td>§5.1–5.2 Load balancing and throughput, Figs 7–10</td><td>pp. 9–11</td><td><span class="how skim">skim</span></td><td>The overprovision factor; the Linux stack reaches under 30% of kernel bypass.</td></tr>
+        <tr><td>§5.3 Consistent hashing, Figs 11–12</td><td>p. 11</td><td><span class="how close">close</span></td><td>Balance against Karger and rendezvous hashing; the percent of entries that change; why the default is 65537.</td></tr>
+        <tr><td>§6–7 Related work, conclusion</td><td>pp. 11–12</td><td><span class="how skim">skim</span></td><td>Other balancers favour minimal disruption; Maglev favours balance.</td></tr>
+      </table>
+      <p class="note">Which Table 1: read the one in <code>12-maglev.pdf</code>, Google's author copy. It matches the USENIX PDF updated on 8 March 2016. The first USENIX PDF printed different columns; the learning on preference lists shows what they were.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the paper</h4><ol>
+        <li>Every Maglev already remembers each connection's backend in its connection tracking table. Why does it also need a consistent hash, and in which situations does the hash decide?</li>
+        <li>How do two numbers per backend become a preference list over the whole table, and why must the table size be prime?</li>
+        <li>When backend B1 leaves Table 1, which slots change hands, and what does the paper trade away to keep the backends' shares equal?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="vip-ecmp">One VIP, many Maglevs</li>
+          <li data-strand="ct-then-hash">Tracking first, the table second</li>
+          <li data-strand="offset-skip">A preference list from two numbers</li>
+          <li data-strand="take-turns">Taking turns: shares within one slot</li>
+          <li data-strand="disruption">What moves when a backend leaves</li>
+          <li data-strand="choosing-m">Choosing M</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 13 "Maglev (side path)" (D. E. Eisenbud et al., "Maglev: A Fast and Reliable Software Network Load Balancer", NSDI '16, Google author version), printed pp. 1–13.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: vip-ecmp (One VIP, many Maglevs), ct-then-hash (Tracking first, the table second), offset-skip (A preference list from two numbers), take-turns (Taking turns: shares within one slot), disruption (What moves when a backend leaves), choosing-m (Choosing M).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch13.md.
+End with a reading plan: for each row of the reading guide in ch13.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read the paper</h2>
+      <p>Pages 1–13 of <code>12-maglev.pdf</code> (printed page = PDF page), about an hour if you follow the reading guide: §2.1, §3.1, §3.3–3.4 and §5.3 closely, the rest skimmed. Keep the three questions in mind and note the page where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 13 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. Every Maglev already remembers each connection's backend in its connection tracking table. Why does it also need a consistent hash, and in which situations does the hash decide? <span class="pageref">pp. 4–5</span></p>
+        <details class="ans"><summary>Answer</summary><p>Because tracking is local and finite (p. 5). It helps only packets that reach the Maglev holding the entry, and only while the table has room. The hash decides for new connections, for connections that ECMP moves to a Maglev with no entry (a rolling restart changes the set for over an hour), and when the table is full. Every Maglev computes the same table, so the recomputed answer equals the first. Near miss: sharing tracking state between Maglevs, which the paper rejects as too slow (p. 5).</p></details>
+        <p>2. How do two numbers per backend become a preference list over the whole table, and why must the table size be prime? <span class="pageref">p. 6</span></p>
+        <details class="ans"><summary>Answer</summary><p>A backend hashes its name twice, \(\text{offset} = h_1 \bmod M\) and \(\text{skip} = h_2 \bmod (M-1) + 1\), and its \(j\)-th preference is \((\text{offset} + j \cdot \text{skip}) \bmod M\) (p. 6). Stepping by skip reaches every slot only if skip and \(M\) share no factor. Skip can be anything from 1 to \(M-1\), so \(M\) must be prime. With \(M = 8\) and skip 2 the list is 0, 2, 4, 6, 0, … Near miss: "prime for better hashing". It is there so that every list covers every slot.</p></details>
+        <p>3. When backend B1 leaves Table 1, which slots change hands, and what does the paper trade away to keep the backends' shares equal? <span class="pageref">pp. 6–7, 11</span></p>
+        <details class="ans"><summary>Answer</summary><p>Slots 0 and 2, B1's, go to B0, and slot 6 moves from B0 to B2 although B0 stayed (p. 7). That extra move buys balance: the survivors take turns again from scratch, so shares stay within one slot. Karger's and rendezvous hashing never move a survivor's slot but need 29.7% and 49.5% overprovisioning at the paper's test size. Maglev moves about 2.3% of the table when 1% of 1,000 backends fail (Fig. 12, p. 11), harmless unless a connection also lost its tracking entry (p. 6).</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p>Google's network load balancer is software on ordinary servers (pp. 1–2). The router spreads a VIP's packets over every Maglev with ECMP; each Maglev picks a backend and sends the packet there in GRE, and the backend replies by DSR (Fig. 2, pp. 2–3). Capacity is machines times what one forwards, so §3.2 is about speed: kernel bypass, batching, about 350 ns per packet (pp. 4–5).</p>
+      <p>Backend selection has two parts (p. 5). A per-thread connection tracking table remembers each 5-tuple's backend, and a miss consults consistent hashing and records the answer (Fig. 4, p. 4). Tracking fails when the ECMP set changes or the table fills, so the hash must give the same answer on every Maglev.</p>
+      <p>The hash is Maglev hashing (§3.4, pp. 5–7). Each backend's preference list comes from two hashes of its name, and \(M\) is prime so that every list covers every slot. Backends take turns claiming their next free preference, so shares differ by at most one slot, and \(M &gt; 100N\) keeps that under 1% (p. 6). Table 1 shows seven slots before and after B1 leaves: one survivor's slot moves.</p>
+      <p>That is the trade: balance first, minimal disruption second (p. 6). With 1,000 backends in 65537 slots, Karger's and rendezvous hashing need 29.7% and 49.5% overprovisioning where Maglev is almost exact. When 1% of the backends fail, about 2.3% of a 65537-slot table moves, and under 0.6% of a 655373-slot one. Google keeps 65537: concurrent failures are rare, tracking comes first, and the bigger table takes 22.9 ms to build against 1.8 ms (p. 11).</p>
+
+      <h3 class="strand" id="s-vip-ecmp">One VIP, many Maglevs</h3>
+      <p>Maglev scales by adding machines behind one VIP. Every Maglev announces the VIP at the same cost, the router's ECMP hash spreads connections over them, and the capacity is \(N \times T\), machines times the throughput of one (p. 2). This works only if every packet of a connection reaches the same backend whichever Maglev it lands on. The paper calls that connection persistence.</p>
+      <p>Put the spine behind a VIP (Diagram 13.1). Three Maglevs each hold B1, B0, B1, B0, B2, B2, B0, so a 5-tuple whose hash is 6 modulo 7 reaches B0 from any of them. GRE keeps the VIP as the inner destination, and B0 replies by DSR, so the reply never meets a Maglev (pp. 2–3).</p>
+      <p>The capstone's upload is one 5-tuple: about 69,000 data packets of 1448 bytes over 84 s. DSR exists because replies are "typically larger in size" (p. 3); for an upload the large direction is inbound, so every data packet crosses the load balancer and only the acks skip it. Its 825 packets per second are 0.1% of what one Maglev forwards at 10 Gbit/s (p. 4). The worst delay the forwarder adds, a full pool of 3,000 packets drained at 10 Mpps, is \(3000 / 10^7\ \text{s} = 300\ \mu\text{s}\) (p. 5). That is <a href="index.html#g-littles-law">Little's law</a>: time inside = number inside / rate.</p>
+      <p>Where it matters: Maglevs once ran as active-passive pairs, half of them idle (p. 7). ECMP fixed that and brought the next learning's problem: it keeps a connection on one Maglev only while the set of Maglevs stays the same.</p>
+
+      <h3 class="strand" id="s-ct-then-hash">Tracking first, the table second</h3>
+      <p>A Maglev reuses the backend in its connection tracking table when it has an entry and that backend is healthy. Only on a miss does it look the 5-tuple up in the Maglev table, and then it records the result (p. 4). So the table decides exactly where tracking cannot: new connections, connections that arrive at a Maglev with no entry for them, and a full tracking table (p. 5).</p>
+      <figure class="dia"><div class="mermaid">
+sequenceDiagram
+  participant C as Client
+  participant R as Router with ECMP
+  participant A as Maglev A
+  participant B as Maglev B
+  participant B0 as Backend B0
+  participant B2 as Backend B2
+  C->>R: SYN to the VIP
+  R->>A: ECMP picks A
+  A->>A: tracking miss, slot 6 names B0, record it
+  A->>B0: GRE
+  Note over R,B: a third Maglev joins, the ECMP set changes
+  C->>R: next data packet
+  R->>B: ECMP now picks B
+  alt the backends did not change
+    B->>B: tracking miss, same table, slot 6 names B0
+    B->>B0: GRE, the connection carries on
+  else B1 left at the same moment
+    B->>B: tracking miss, rebuilt table, slot 6 names B2
+    B->>B2: GRE
+    B2-->>C: reset, B2 never saw this connection
+  end
+</div><figcaption><b>Diagram 13.2 — A connection that changes Maglev, after §3.3 (p. 5).</b> Notice that Maglev B has no tracking entry in either branch, so the table alone decides. With unchanged backends, B built the same table A built. If B1 leaves at the same moment, slot 6 has moved to B2 and the connection is reset: "resets are proportional to the number of lookup table disruptions" (p. 6).</figcaption></figure>
+      <p>A reset needs both failures at once: a lost tracking entry and a moved slot. That is why the paper can accept a few moved slots (p. 6).</p>
+      <p>The steering module follows the same logic (p. 4). It hashes the 5-tuple to pick a receive queue, instead of using round robin, so a connection's packets stay on one thread: no reordering between threads, and one backend choice with no race against a health update. Reordering matters for the main chain: reordered packets raise duplicate acks, and three make TCP retransmit and halve its <a href="index.html#g-cwnd">congestion window</a>, the loss signal of the congestion-avoidance chapter, with nothing lost. <a href="index.html#g-flow-queueing">Flow queueing</a> in fq_codel also keeps each flow in one queue, and so in order.</p>
+
+      <h3 class="strand" id="s-offset-skip">A preference list from two numbers</h3>
+      <p>Each backend's preference list is a permutation of all \(M\) slots, made from two hashes of its name (p. 6):</p>
+      <p>\[ \begin{aligned} \text{offset} &amp;= h_1(\text{name}) \bmod M, \qquad \text{skip} = h_2(\text{name}) \bmod (M-1) + 1, \\ \text{permutation}[i][j] &amp;= (\text{offset} + j \cdot \text{skip}) \bmod M. \end{aligned} \]</p>
+      <p>The example gives B0 (3, 4), B1 (0, 2) and B2 (3, 1), with \(M = 7\) (pp. 6–7). Table 1 lists 3, 0, 4, 1, 5, 2, 6; then 0, 2, 4, 6, 1, 3, 5; then 3, 4, 5, 6, 0, 1, 2 (p. 6). Each holds all seven slots once, and two backends may share a first choice, as B0 and B2 share slot 3.</p>
+      <p>\(M\) must be prime "so that all values of skip are relatively prime to it" (p. 6). A walk that steps by skip returns to its start after \(M / \gcd(\text{skip}, M)\) steps. With \(M = 8\), skip 2 visits 0, 2, 4, 6 and skip 4 visits 0, 4; once those slots fill, Pseudocode 1's inner loop runs off the end of the list.</p>
+      <details class="deriv"><summary>Derivation · the walk visits every slot exactly when gcd(skip, M) = 1</summary>
+        <p>Two steps \(j \ne j'\) with \(0 \le j, j' &lt; M\) land on the same slot when \((j - j') \cdot \text{skip} \equiv 0 \pmod M\). If \(\gcd(\text{skip}, M) = 1\), skip has an inverse modulo \(M\), so \(j \equiv j'\), which is impossible: the \(M\) steps hit \(M\) different slots. If \(g = \gcd(\text{skip}, M) &gt; 1\), then \(j - j' = M/g\) works, so the walk repeats after \(M/g\) steps and reaches only \(M/g\) slots. For every skip in \(1 \dots M-1\) to have gcd 1, \(M\) must have no factor below itself: \(M\) is prime.</p>
+      </details>
+      <p>The paper does not name \(h_1\) and \(h_2\) (p. 6). Each backend stores two numbers, and its next preference is one addition. Cilium uses the two 64-bit halves of one seeded MurmurHash3-128 of the backend's address string (<code>pkg/maglev/maglev.go:203–208</code>).</p>
+      <p class="erratum"><b>The first printing's slip.</b> The first USENIX PDF (3 March 2016, printed p. 528) names the backends B1–B3 and prints the columns 2, 4, 6, 1, 3, 5, 7 / 1, 5, 2, 6, 3, 7, 4 / 5, 6, 7, 1, 2, 3, 4. Those are the inverse lists, each slot's rank in the backend's list counted from 1, while the text defines \(\text{permutation}[i][j]\) as the \(j\)-th slot. Its Before and After columns were right. The update of 8 March 2016 and Google's copy print the lists themselves and count rows from 0, so the extra move becomes row 6.</p>
+
+      <h3 class="strand" id="s-take-turns">Taking turns: shares within one slot</h3>
+      <p>Pseudocode 1 runs in rounds (p. 6). In each round every backend, in a fixed order, claims the first slot in its list that is still empty. A round fills \(N\) slots, so each backend ends with \(\lfloor M/N \rfloor\) or \(\lceil M/N \rceil\), and the first \(M \bmod N\) backends get the extra one. With \(M &gt; 100N\), that one slot is "at most a 1% difference in hash space assigned to backends" (p. 6).</p>
+      <p>Run it on the spine (Diagram 13.3, left). Round 1: B0 claims 3, B1 claims 0, B2 finds 3 taken and claims 4. Round 2: B0 finds 0 and 4 taken and claims 1, B1 claims 2, B2 claims 5. Round 3: B0 finds 5 and 2 taken and claims 6, and the table is full: B1, B0, B1, B0, B2, B2, B0 (p. 6). The shares are 3, 2, 2, and B0 gets the extra slot because it comes first. The build took 12 probes, and <a href="index.html#g-jain-index">Jain's index</a> of the shares is \(49/51 = 0.96\).</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch13-table1-->
+<svg viewBox="0 0 720 344" role="img" aria-label="The paper's Table 1 rebuilt: three preference lists, the order slots were claimed, the table before and after backend B1 leaves" xmlns="http://www.w3.org/2000/svg" font-size="13" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<text x="151.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">Preference lists: permutation[i][j]</text>
+<text x="151.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">slot = (offset + j × skip) mod 7</text>
+<text x="97.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B0 (3, 4)</text>
+<rect x="76" y="76" width="42" height="3" fill="#2a78d6"/>
+<text x="151.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B1 (0, 2)</text>
+<rect x="130" y="76" width="42" height="3" fill="#eb6834"/>
+<text x="205.0" y="72.0" text-anchor="middle" fill="#1b1f24" font-size="12" font-weight="600">B2 (3, 1)</text>
+<rect x="184" y="76" width="42" height="3" fill="#1baf7a"/>
+<text x="58.0" y="114.0" text-anchor="end" fill="#898781" font-size="12">j=0</text>
+<text x="58.0" y="148.0" text-anchor="end" fill="#898781" font-size="12">j=1</text>
+<text x="58.0" y="182.0" text-anchor="end" fill="#898781" font-size="12">j=2</text>
+<text x="58.0" y="216.0" text-anchor="end" fill="#898781" font-size="12">j=3</text>
+<text x="58.0" y="250.0" text-anchor="end" fill="#898781" font-size="12">j=4</text>
+<text x="58.0" y="284.0" text-anchor="end" fill="#898781" font-size="12">j=5</text>
+<text x="58.0" y="318.0" text-anchor="end" fill="#898781" font-size="12">j=6</text>
+<g class="hit"><title>B0 round 1: claims slot 3</title><rect x="73" y="95" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">3</text>
+<text x="115.0" y="106.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B0 round 2: slot 0 is taken, try the next preference</title><rect x="73" y="129" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="148.0" text-anchor="middle" fill="#898781">0</text>
+<line x1="88.0" x2="106.0" y1="144" y2="144" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 2: slot 4 is taken, try the next preference</title><rect x="73" y="163" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="182.0" text-anchor="middle" fill="#898781">4</text>
+<line x1="88.0" x2="106.0" y1="178" y2="178" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 2: claims slot 1</title><rect x="73" y="197" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">1</text>
+<text x="115.0" y="208.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B0 round 3: slot 5 is taken, try the next preference</title><rect x="73" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="250.0" text-anchor="middle" fill="#898781">5</text>
+<line x1="88.0" x2="106.0" y1="246" y2="246" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 3: slot 2 is taken, try the next preference</title><rect x="73" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="97.0" y="284.0" text-anchor="middle" fill="#898781">2</text>
+<line x1="88.0" x2="106.0" y1="280" y2="280" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B0 round 3: claims slot 6</title><rect x="73" y="299" width="48" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="91.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">6</text>
+<text x="115.0" y="310.0" text-anchor="end" fill="#4a5560" font-size="10">r3</text>
+<g class="hit"><title>B1 round 1: claims slot 0</title><rect x="127" y="95" width="48" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="145.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">0</text>
+<text x="169.0" y="106.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B1 round 2: claims slot 2</title><rect x="127" y="129" width="48" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="145.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">2</text>
+<text x="169.0" y="140.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="163" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="182.0" text-anchor="middle" fill="#c3c2b7">4</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="197" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="216.0" text-anchor="middle" fill="#c3c2b7">6</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="250.0" text-anchor="middle" fill="#c3c2b7">1</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="284.0" text-anchor="middle" fill="#c3c2b7">3</text>
+<g class="hit"><title>B1: never reached, the table filled first</title><rect x="127" y="299" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="151.0" y="318.0" text-anchor="middle" fill="#c3c2b7">5</text>
+<g class="hit"><title>B2 round 1: slot 3 is taken, try the next preference</title><rect x="181" y="95" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef"/></g>
+<text x="205.0" y="114.0" text-anchor="middle" fill="#898781">3</text>
+<line x1="196.0" x2="214.0" y1="110" y2="110" stroke="#898781" stroke-width="1.5"/>
+<g class="hit"><title>B2 round 1: claims slot 4</title><rect x="181" y="129" width="48" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="199.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">4</text>
+<text x="223.0" y="140.0" text-anchor="end" fill="#4a5560" font-size="10">r1</text>
+<g class="hit"><title>B2 round 2: claims slot 5</title><rect x="181" y="163" width="48" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="199.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">5</text>
+<text x="223.0" y="174.0" text-anchor="end" fill="#4a5560" font-size="10">r2</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="197" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="216.0" text-anchor="middle" fill="#c3c2b7">6</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="231" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="250.0" text-anchor="middle" fill="#c3c2b7">0</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="265" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="284.0" text-anchor="middle" fill="#c3c2b7">1</text>
+<g class="hit"><title>B2: never reached, the table filled first</title><rect x="181" y="299" width="48" height="28" rx="5" fill="#fff" stroke="#e8ebef" stroke-dasharray="3 3"/></g>
+<text x="205.0" y="318.0" text-anchor="middle" fill="#c3c2b7">2</text>
+<text x="316.0" y="114.0" text-anchor="end" fill="#898781" font-size="12">slot 0</text>
+<text x="316.0" y="148.0" text-anchor="end" fill="#898781" font-size="12">slot 1</text>
+<text x="316.0" y="182.0" text-anchor="end" fill="#898781" font-size="12">slot 2</text>
+<text x="316.0" y="216.0" text-anchor="end" fill="#898781" font-size="12">slot 3</text>
+<text x="316.0" y="250.0" text-anchor="end" fill="#898781" font-size="12">slot 4</text>
+<text x="316.0" y="284.0" text-anchor="end" fill="#898781" font-size="12">slot 5</text>
+<text x="316.0" y="318.0" text-anchor="end" fill="#898781" font-size="12">slot 6</text>
+<text x="375.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">Table before</text>
+<text x="375.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">B0: 3 slots, B1: 2, B2: 2</text>
+<g class="hit"><title>slot 0: B1</title><rect x="330" y="95" width="90" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="375.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B1</text>
+<g class="hit"><title>slot 1: B0</title><rect x="330" y="129" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 2: B1</title><rect x="330" y="163" width="90" height="28" rx="5" fill="#eb6834" fill-opacity="0.22" stroke="#eb6834" stroke-width="1.5"/></g>
+<text x="375.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B1</text>
+<g class="hit"><title>slot 3: B0</title><rect x="330" y="197" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 4: B2</title><rect x="330" y="231" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="375.0" y="250.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 5: B2</title><rect x="330" y="265" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="375.0" y="284.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 6: B0</title><rect x="330" y="299" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="375.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<text x="505.0" y="30.0" text-anchor="middle" fill="#1b1f24" font-size="13" font-weight="600">After B1 leaves</text>
+<text x="505.0" y="48.0" text-anchor="middle" fill="#4a5560" font-size="12">B0: 4 slots, B2: 3</text>
+<g class="hit"><title>slot 0: was B1, must move (B1 left)</title><rect x="460" y="95" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#eb6834" stroke-width="2" stroke-dasharray="4 3"/></g>
+<text x="505.0" y="114.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 1: B0</title><rect x="460" y="129" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="505.0" y="148.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 2: was B1, must move (B1 left)</title><rect x="460" y="163" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#eb6834" stroke-width="2" stroke-dasharray="4 3"/></g>
+<text x="505.0" y="182.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 3: B0</title><rect x="460" y="197" width="90" height="28" rx="5" fill="#2a78d6" fill-opacity="0.22" stroke="#2a78d6" stroke-width="1.5"/></g>
+<text x="505.0" y="216.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B0</text>
+<g class="hit"><title>slot 4: B2</title><rect x="460" y="231" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="505.0" y="250.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 5: B2</title><rect x="460" y="265" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#1baf7a" stroke-width="1.5"/></g>
+<text x="505.0" y="284.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<g class="hit"><title>slot 6: was B0, now B2. The one extra move: B0 never left</title><rect x="460" y="299" width="90" height="28" rx="5" fill="#1baf7a" fill-opacity="0.22" stroke="#be123c" stroke-width="2.5"/></g>
+<text x="505.0" y="318.0" text-anchor="middle" fill="#1b1f24" font-weight="700">B2</text>
+<line x1="424" x2="456" y1="109.0" y2="109.0" stroke="#898781" stroke-width="1.5"/>
+<path d="M450,105.0L456,109.0L450,113.0" fill="none" stroke="#898781" stroke-width="1.5"/>
+<line x1="424" x2="456" y1="177.0" y2="177.0" stroke="#898781" stroke-width="1.5"/>
+<path d="M450,173.0L456,177.0L450,181.0" fill="none" stroke="#898781" stroke-width="1.5"/>
+<line x1="424" x2="456" y1="313.0" y2="313.0" stroke="#be123c" stroke-width="1.5"/>
+<path d="M450,309.0L456,313.0L450,317.0" fill="none" stroke="#be123c" stroke-width="1.5"/>
+<text x="566.0" y="114.0" text-anchor="start" fill="#4a5560" font-size="12">B1 left: must move</text>
+<text x="566.0" y="182.0" text-anchor="start" fill="#4a5560" font-size="12">B1 left: must move</text>
+<text x="566.0" y="312.0" text-anchor="start" fill="#be123c" font-size="12" font-weight="700">extra move:</text>
+<text x="566.0" y="327.0" text-anchor="start" fill="#4a5560" font-size="12">B0 stayed, lost it</text>
+</svg>
+<!--/PLOT:ch13-table1--></div>
+        <figcaption><b>Diagram 13.3 — The paper's Table 1 (p. 6), rebuilt by <code>notes/plots/ch13_plots.py</code>.</b> Notice the left block: a struck-out number was already taken, a coloured one is a claim, and r1–r3 is its round. Dashed cells were never reached. On the right, slots 0 and 2 must move when B1 leaves, and slot 6 moves although B0 stayed. Hover a cell for its step.</figcaption></figure>
+      <p>The paper's own test, 1,000 backends in 65537 slots, gives 65 or 66 slots each: a 1.5% difference, outside its own rule, which Fig. 11 still draws as level bars (p. 11).</p>
+      <details class="deriv"><summary>Derivation · the average build costs about M ln M probes (p. 6)</summary>
+        <p>Treat each preference as a random slot. When \(n\) slots are full, a probe finds an empty slot with probability \((M - n)/M\), so the expected number of probes for the next claim is \(M/(M-n)\). Summing over \(n = 0 \dots M-1\) gives \(M\,(1 + \tfrac12 + \dots + \tfrac1M) = M H_M \approx M(\ln M + 0.577)\), the paper's \(\sum_{n=1}^{M} M/n\). For \(M = 7\) that is 18.15 probes; Table 1 needed 12. For \(M = 65537\) it is about \(7.6 \times 10^5\). The worst case, \(O(M^2)\), needs every backend to share one list with \(N = M\); choosing \(M \gg N\) avoids it.</p>
+      </details>
+      <p>Weights change "the relative frequency of the backends' turns", which the paper does not describe (p. 6): the <a href="index.html#g-quantum">quantum</a> idea from <a href="index.html#g-drr">DRR</a>, more turns for a heavier backend. Cilium skips a backend's turn while its counter runs ahead of its weight (<code>maglev.go:315–336</code>) and sorts the backends by address string first (<code>:282–287</code>). Order decides who gets the extra slot and what each claims, so nodes with different orders would build different tables. The paper never mentions order.</p>
+
+      <h3 class="strand" id="s-disruption">What moves when a backend leaves</h3>
+      <p>A removal rebuilds the table from scratch. The leaver's slots must move, and a few slots also move between backends that stayed, because the survivors take turns again and reach their preferences in different rounds. The paper accepts these extra moves to keep the balance (pp. 6–7).</p>
+      <p>Remove B1 (Diagram 13.3, right). In rounds 1 and 2, B0 claims 3 and 0, and B2 claims 4 and 5. In round 3, B0 finds 4 taken and claims 1, and B2 claims 6, which B0 held before. In round 4, B0 finds 5 taken and claims 2. B1's slots 0 and 2 went to B0, as they must, and slot 6 moved between survivors: one extra move among five slots (p. 7). B2 reached slot 6 a round earlier because it no longer waits for B1.</p>
+      <p>A plain mod-N table (slot \(j\) to backend \(j \bmod N\)) moves two survivors' slots here. At 100 backends the Python lab moves 98% of a mod-N table against 1.3% of a 16381-slot Maglev table.</p>
+      <p>Fig. 12's "percent of changed table entries" (p. 11) does not say which entries count. A reproduction settles it:</p>
+      <table>
+        <tr><th>Failed backends</th><th>Fig. 12, read off</th><th>Survivors' slots moved</th><th>All slots moved</th></tr>
+        <tr><td>0.1% (1 of 1,000), \(M = 65537\)</td><td>≈ 0.6%</td><td>0.58%</td><td>0.68%</td></tr>
+        <tr><td>1% (10), \(M = 65537\)</td><td>≈ 2.3%</td><td>2.33%</td><td>3.33%</td></tr>
+        <tr><td>3% (30), \(M = 65537\)</td><td>≈ 2.8%</td><td>2.81%</td><td>5.81%</td></tr>
+        <tr><td>1% (10), \(M = 655373\)</td><td>≈ 0.55%</td><td>0.57%</td><td>1.57%</td></tr>
+      </table>
+      <p>Only the survivors' count matches the curves, so that is the paper's metric. This is an inference from the lab's Python, 20 tables per point where the paper used 200 (<a href="labs/ch13-maglev/data/maglev-fig12.csv">maglev-fig12.csv</a>).</p>
+      <p class="erratum"><b>The docs' slip.</b> Cilium's docs say \(M &gt; 100N\) guarantees "at most 1% difference in the reassignments" on backend changes (Maglev section; in the fork, <code>Documentation/network/kubernetes/kubeproxy-free.rst:499, 523–524, 565</code>). The paper's 1% (p. 6) bounds the difference in hash space between backends: balance. At its default \(M = 16381\) with the docs' 160 backends (\(M/N = 102\)), Cilium's own code moves 1.54% of the table between surviving backends when one backend leaves (mean of 20 removals), and 1.31% at 100 backends. The 1% line is crossed near \(M/N = 300\). The package test that asserts under 1% (<code>pkg/maglev/maglev_test.go:160–162</code>) uses 3 backends in 1021 slots.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch13-disruption-->
+<svg viewBox="0 0 720 322" role="img" aria-label="Share of a Maglev table that changes owner among backends that stayed, when one or three of 100 backends leave, against M/N" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="550" y1="280.0" y2="280.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="284.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="550" y1="248.8" y2="248.8" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="252.8" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="550" y1="217.5" y2="217.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="221.5" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="550" y1="155.0" y2="155.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="159.0" text-anchor="end" fill="#898781">4</text>
+<line x1="58" x2="550" y1="92.5" y2="92.5" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="96.5" text-anchor="end" fill="#898781">6</text>
+<line x1="58" x2="550" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">8</text>
+<line x1="58" x2="550" y1="280.0" y2="280.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="155.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 155.0)">% of the table that moves</text>
+<line x1="58" x2="550" y1="248.8" y2="248.8" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="556" y="252.8" fill="#898781">the docs&#x27; 1%</text>
+<polyline points="74.9,190.3 127.4,168.2 179.2,175.6 230.6,175.7 282.3,184.6 333.9,219.0 385.4,238.3 436.9,254.2 488.4,262.6 540.0,268.8" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="554" x2="566" y1="272.2" y2="272.2" stroke="#2a78d6" stroke-width="2"/>
+<text x="570" y="276.2" fill="#1b1f24">one of 100 leaves</text>
+<polyline points="74.9,41.6 127.4,34.7 179.2,55.7 230.6,108.3 282.3,161.5 333.9,199.6 385.4,227.3 436.9,244.3 488.4,256.0 540.0,264.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="554" x2="566" y1="220.6" y2="220.6" stroke="#eb6834" stroke-width="2"/>
+<text x="570" y="224.6" fill="#1b1f24">three of 100 leave</text>
+<circle cx="74.9" cy="190.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="127.4" cy="168.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="179.2" cy="175.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="230.6" cy="175.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="282.3" cy="184.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="333.9" cy="219.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="385.4" cy="238.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="436.9" cy="254.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.4" cy="262.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="540.0" cy="268.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="74.9" cy="41.6" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="127.4" cy="34.7" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="179.2" cy="55.7" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="230.6" cy="108.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="282.3" cy="161.5" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="333.9" cy="199.6" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="385.4" cy="227.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="436.9" cy="244.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.4" cy="256.0" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="540.0" cy="264.1" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<path d="M381.4,235.2L389.4,243.2M381.4,243.2L389.4,235.2" stroke="#1b1f24" stroke-width="2" stroke-linecap="round"/>
+<path d="M346.5,227.9L354.5,235.9M346.5,235.9L354.5,227.9" stroke="#1b1f24" stroke-width="2" stroke-linecap="round"/>
+<path d="M381.4,224.3L389.4,232.3M381.4,232.3L389.4,224.3" stroke="#1b1f24" stroke-width="2" stroke-linecap="round"/>
+<path d="M346.5,217.9L354.5,225.9M346.5,225.9L354.5,217.9" stroke="#1b1f24" stroke-width="2" stroke-linecap="round"/>
+<text x="365.3" y="86.2" fill="#4a5560" text-anchor="start">plain mod-N moves about 98%</text>
+<text x="365.3" y="101.9" fill="#4a5560" text-anchor="start">at every size (off this scale)</text>
+<text x="351.7" y="176.9" fill="#4a5560" text-anchor="start">× Cilium’s Go code, M = 16381:</text>
+<text x="351.7" y="192.5" fill="#4a5560" text-anchor="start">N = 160 and N = 100</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">one of 100 leaves</text>
+<line x1="211" x2="225" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="230" y="22" fill="#1b1f24">three of 100 leave</text>
+<path d="M365,14L373,22M365,22L373,14" stroke="#1b1f24" stroke-width="2"/>
+<text x="382" y="22" fill="#1b1f24">Cilium pkg/maglev</text>
+<text x="88.1" y="296.0" text-anchor="middle" fill="#898781">3</text>
+<text x="177.6" y="296.0" text-anchor="middle" fill="#898781">10</text>
+<text x="259.3" y="296.0" text-anchor="middle" fill="#898781">30</text>
+<text x="348.7" y="296.0" text-anchor="middle" fill="#898781">100</text>
+<text x="430.4" y="296.0" text-anchor="middle" fill="#898781">300</text>
+<text x="519.9" y="296.0" text-anchor="middle" fill="#898781">1000</text>
+<text x="304.0" y="314.0" text-anchor="middle" fill="#4a5560">table size per backend, M/N (log scale)</text>
+<g class="hit"><title>M = 251, N = 100 (M/N = 3): one backend leaves → 2.87% of the table moves between backends that stayed; three leave → 7.63%; entries per backend 2–3; plain mod-N moves 82%</title><rect x="58.0" y="30" width="43.2" height="250.0" fill="transparent"/><line x1="74.9" x2="74.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 509, N = 100 (M/N = 5): one backend leaves → 3.58% of the table moves between backends that stayed; three leave → 7.85%; entries per backend 5–6; plain mod-N moves 88%</title><rect x="101.2" y="30" width="52.1" height="250.0" fill="transparent"/><line x1="127.4" x2="127.4" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 1021, N = 100 (M/N = 10): one backend leaves → 3.34% of the table moves between backends that stayed; three leave → 7.18%; entries per backend 10–11; plain mod-N moves 93%</title><rect x="153.3" y="30" width="51.6" height="250.0" fill="transparent"/><line x1="179.2" x2="179.2" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 2039, N = 100 (M/N = 20): one backend leaves → 3.34% of the table moves between backends that stayed; three leave → 5.49%; entries per backend 20–21; plain mod-N moves 96%</title><rect x="204.9" y="30" width="51.6" height="250.0" fill="transparent"/><line x1="230.6" x2="230.6" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 4093, N = 100 (M/N = 41): one backend leaves → 3.05% of the table moves between backends that stayed; three leave → 3.79%; entries per backend 40–41; plain mod-N moves 98%</title><rect x="256.5" y="30" width="51.7" height="250.0" fill="transparent"/><line x1="282.3" x2="282.3" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 8191, N = 100 (M/N = 82): one backend leaves → 1.95% of the table moves between backends that stayed; three leave → 2.57%; entries per backend 81–82; plain mod-N moves 98%</title><rect x="308.1" y="30" width="51.5" height="250.0" fill="transparent"/><line x1="333.9" x2="333.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 16381, N = 100 (M/N = 164): one backend leaves → 1.33% of the table moves between backends that stayed; three leave → 1.69%; entries per backend 163–164; plain mod-N moves 98%</title><rect x="359.7" y="30" width="51.5" height="250.0" fill="transparent"/><line x1="385.4" x2="385.4" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 32749, N = 100 (M/N = 327): one backend leaves → 0.82% of the table moves between backends that stayed; three leave → 1.14%; entries per backend 327–328; plain mod-N moves 98%</title><rect x="411.2" y="30" width="51.5" height="250.0" fill="transparent"/><line x1="436.9" x2="436.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 65521, N = 100 (M/N = 655): one backend leaves → 0.56% of the table moves between backends that stayed; three leave → 0.77%; entries per backend 655–656; plain mod-N moves 98%</title><rect x="462.7" y="30" width="51.5" height="250.0" fill="transparent"/><line x1="488.4" x2="488.4" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>M = 131071, N = 100 (M/N = 1311): one backend leaves → 0.36% of the table moves between backends that stayed; three leave → 0.51%; entries per backend 1310–1311; plain mod-N moves 98%</title><rect x="514.2" y="30" width="35.8" height="250.0" fill="transparent"/><line x1="540.0" x2="540.0" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<line x1="348.7" x2="348.7" y1="30" y2="280" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/><text x="353.7" y="44" text-anchor="start" fill="#4a5560">← M = 100 N, the paper’s rule</text>
+</svg>
+<!--/PLOT:ch13-disruption--></div>
+        <figcaption><b>Diagram 13.4 — The share of the table that moves between backends that stayed, when one or three of 100 backends leave, against slots per backend.</b> Notice that the lines cross the docs' 1% only near \(M/N = 300\), three times the paper's rule. The crosses, Cilium's <code>pkg/maglev</code> at \(M = 16381\) with 160 and 100 backends, sit on the Python curves. Python: 20 tables per point; Go: 20 removals each; 2 October 2026. Data: <a href="labs/ch13-maglev/data/maglev-sweep-n100.csv">maglev-sweep-n100.csv</a>, <a href="labs/ch13-maglev/data/cilium-go-lab.txt">cilium-go-lab.txt</a>. Hover for values.</figcaption></figure>
+      <p>Where it matters: with tracking, a moved slot breaks only connections that also lost their entry (Diagram 13.2); without it, every moved slot is a live connection sent to the wrong backend.</p>
+
+      <h3 class="strand" id="s-choosing-m">Choosing M</h3>
+      <p>A bigger \(M\) improves balance and cuts disruption, and it costs memory and build time for every VIP (pp. 6, 11). Google's default is 65537 (p. 11).</p>
+      <p>When 1% of 1,000 backends fail, 2.3% of a 65537-slot table moves against 0.57% of a 655373-slot one, and the build time grows from 1.8 ms to 22.9 ms (p. 11). At 100 backends, one removal moves 1.3% at \(M/N = 164\), 0.83% at 327 and 0.56% at 655 (Diagram 13.4). So balance within 1% needs \(M/N \ge 100\), and one removal under 1% needs \(M/N\) near 300.</p>
+      <p>Cilium stores 4 bytes per slot: 64 KiB per frontend at 16381 and 256 KiB at 65521 (<code>bpf/lib/lb.h:317–332</code>). Its builder also keeps every preference list while it fills, \(N \times M\) 8-byte entries and never fewer than \((M/100) \times M\) (<code>maglev.go:157–162, 358–360</code>): 21 MB of agent memory at 16381 and 343 MB at 65521. The lab's builds took about 1.3 ms for 160 backends at 16381 and 32 ms for 1,000 backends at 65521, on a shared laptop.</p>
+      <p class="since"><b>Since the paper.</b> Linux added a Maglev scheduler to IPVS in v4.18 (2018, commit 039f32e8cdea), <code>net/netfilter/ipvs/ip_vs_mh.c</code>. It uses the same ten primes (<code>:49–50</code>) and defaults to 4093 slots; your kernel has <code>CONFIG_IP_VS_MH=m</code> with the default index 12. Offset and skip come from two fixed hsiphash keys (<code>:72, 142–147</code>), and it hashes only the source address, plus the source port when a flag is set (<code>:479–484</code>).</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system" id="sys-cilium-maglev" data-system="cilium-maglev">
+        <h4>Meet the system · Cilium's Maglev, in kube-proxy replacement</h4>
+        <p><b>What it is.</b> Cilium's kube-proxy replacement balances Kubernetes services in BPF instead of iptables. With <code>bpf-lb-algorithm=maglev</code>, the agent builds one Maglev table per service frontend and the datapath hashes each new connection into it.</p>
+        <p><b>Why it exists.</b> A NodePort or LoadBalancer packet can arrive at any node, and nodes share no connection tracking. The default, <code>random</code>, picks differently on each node; Maglev makes them agree without talking (Cilium docs). It arrived in Cilium 1.9, in 2020.</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li>The builder, <code>pkg/maglev/maglev.go</code>: offset and skip from a seeded MurmurHash3-128 of a string such as <code>[10.244.1.5:8080/TCP,State:active]</code> (<code>:203–208, 229–253</code>), sorted by that string (<code>:282–287</code>), filled by Pseudocode 1 (<code>:315–336</code>).</li>
+          <li>The map <code>cilium_lb4_maglev</code>: per service ID, an array of \(M\) backend IDs (<code>bpf/lib/lb.h:317–332</code>), replaced whole on every update (<code>pkg/loadbalancer/maps/lbmaps.go:625–646</code>).</li>
+          <li>The lookup <code>lb4_select_backend_id_maglev</code>: a seeded jhash of source address, ports and protocol, modulo \(M\) (<code>lb.h:1847–1874</code>, <code>bpf/lib/hash.h:12–17</code>).</li>
+        </ul>
+        <table>
+          <tr><th>Agent flag (Helm value)</th><th>What it does</th></tr>
+          <tr><td><code>bpf-lb-algorithm</code> (<code>loadBalancer.algorithm</code>)</td><td><code>random</code> by default (<code>pkg/loadbalancer/config.go:483</code>), or <code>maglev</code>.</td></tr>
+          <tr><td><code>bpf-lb-maglev-table-size</code> (<code>maglev.tableSize</code>)</td><td>\(M\): one of ten primes (<code>maglev.go:48</code>), default 16381 (<code>:38</code>), compiled into the BPF programs (<code>pkg/datapath/linux/config/config.go:443</code>).</td></tr>
+          <tr><td><code>bpf-lb-maglev-hash-seed</code> (<code>maglev.hashSeed</code>)</td><td>12 bytes seeding MurmurHash3 and the two jhash seeds (<code>maglev.go:79–88</code>); the same on every node.</td></tr>
+          <tr><td><code>bpf-lb-algorithm-annotation</code> (<code>bpf.lbAlgorithmAnnotation</code>)</td><td>Per-Service choice by annotation; forced on in your fork with <code>vpc.enabled</code> (<code>cilium-configmap.yaml:486–493</code>).</td></tr>
+          <tr><td><code>bpf-lb-external-clusterip</code> (<code>bpf.lbExternalClusterIP</code>)</td><td>Gives ClusterIP frontends a table too (<code>pkg/loadbalancer/reconciler/bpf_reconciler.go:1179–1197</code>).</td></tr>
+        </table>
+        <p class="here"><b>Where this chapter lives inside it.</b> <i>One VIP, many Maglevs</i>: each node is a Maglev, a NodePort or LoadBalancer frontend is the VIP, and ECMP is whatever routes clients to the nodes. Maglev covers only traffic that enters a node from outside: a pod connecting to a service is balanced at <code>connect()</code> by the socket load balancer, which picks a random slot (<code>bpf/bpf_sock.c:124–128, 408</code>). So the capstone's upload meets Maglev only if it enters the cluster at a node. <i>Tracking first</i>: in <code>lb4_local</code>, <code>CT_NEW</code> picks from the table and records it (<code>lb.h:2133–2155</code>); an existing entry is reused, a backend that is no longer active keeps its connections' non-SYN packets, and a deleted one gets a fresh pick (<code>:2167–2199</code>). <i>Preference lists and taking turns</i>: <code>getOffsetAndSkip</code> and <code>computeLookupTable</code>, in sorted order so that every node agrees. <i>What moves</i>: each backend change recomputes the table from the active backends (<code>bpf_reconciler.go:1053–1058, 1348–1363</code>). Your fork goes further than the paper. Its VPC public entry keeps no per-flow state and relies on Maglev alone to reach the same backend from whichever node holds the address (<code>bpf/lib/vpc_dsr.h:30–33, 498–503</code>), and drops ICMP errors for frontends without Maglev (<code>:353–354</code>): §3.3's argument with the tracking layer removed.</p>
+        <p><b>Try it</b> (~2 min, no sudo, no network; it builds from the fork's <code>vendor/</code> and writes nothing into the fork):</p>
+        <pre><code>cd labs/ch13-maglev/go          # from the dossier folder
+./run-go.sh                     # offline go test of pkg/maglev</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026:</p>
+        <pre><code>fork: v1.19.6-vpc.25 at 8ab00248bc
+=== RUN   TestPermutations
+--- PASS: TestPermutations (0.20s)
+=== RUN   TestReproducible
+--- PASS: TestReproducible (0.00s)
+=== RUN   TestBackendRemoval
+--- PASS: TestBackendRemoval (0.00s)
+=== RUN   TestWeightedBackendWithRemoval
+--- PASS: TestWeightedBackendWithRemoval (0.00s)
+PASS
+ok  	github.com/cilium/cilium/pkg/maglev	0.209s
+fork still clean: 0 changed files</code></pre>
+        <p><code>TestBackendRemoval</code> asserts under 1% for 3 backends in 1021 slots (\(M/N = 340\)); its comment extends that to any \(M &gt; 100N\), the docs' slip.</p>
+        <p><b>Clean up.</b> Nothing: the script ends by checking that the fork has no changes.</p>
+        <p class="drift">Stable: the algorithm, the sorted order, conntrack before the table. Drifting (as of October 2026, fork v1.19.6-vpc.25, docs 1.20): Helm keys, which frontends get a table, the built-in seed, the builder's scratch memory.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">No sudo needed; run the commands from the dossier folder. The third lab's optional cluster part needs Docker and was not run for this page.</p>
+
+      <div class="lab" id="lab-table1">
+        <h4>Hands-on · Fill Table 1 by hand, then remove B2</h4>
+        <p class="labmeta">~30 min · trace by hand · paper and pencil</p>
+        <p><b>Task.</b> From B0 (3, 4), B1 (0, 2), B2 (3, 1) and \(M = 7\), write the three preference lists, run Pseudocode 1 round by round, and count the probes. Then remove B2 (the paper removes B1), rebuild, and mark each changed slot: B2's own and any extra. Do the same for a mod-N table, \(j \bmod 3\) then \(j \bmod 2\) over B0 and B1. Last, write the list for skip 2 with \(M = 8\).</p>
+        <p><b>Done when.</b> Your first table reads B1, B0, B1, B0, B2, B2, B0 after 12 probes, and you can name the extra moves after removing B2, for Maglev and for mod-N.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Each round, each backend claims exactly one slot: the first one in its list that is still empty. Keep a pointer per backend. It only moves forward, past every slot it tried.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Draw seven empty boxes. In round 2 of the full table, B0 finds 0 and 4 taken and claims 1: three probes. For the rebuild without B2, start again from seven empty boxes, with only B0 and B1 taking turns.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Without B2: round 1, B0 claims 3 and B1 claims 0; round 2, B0 finds 0 taken and claims 4, and B1 claims 2. Two more rounds finish it.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>full table, M = 7                                   probes
+round 1: B0 -> 3     B1 -> 0     B2: 3 taken -> 4         4
+round 2: B0: 0, 4 taken -> 1     B1 -> 2     B2 -> 5      5
+round 3: B0: 5, 2 taken -> 6     (table full)             3
+table:   B1 B0 B1 B0 B2 B2 B0                            12
+
+without B2 (B0 and B1 take turns)
+round 1: B0 -> 3     B1 -> 0
+round 2: B0: 0 taken -> 4        B1 -> 2
+round 3: B0 -> 1     B1: 4 taken -> 6
+round 4: B0 -> 5
+table:   B1 B0 B1 B0 B0 B0 B1
+moved:   slots 4, 5 (B2's own) -> B0;  extra: slot 6, B0 -> B1
+
+mod-N:   B0 B1 B2 B0 B1 B2 B0   ->   B0 B1 B0 B1 B0 B1 B0
+moved:   slots 2, 5 (B2's own);  extra: slot 3 B0 -> B1, slot 4 B1 -> B0
+
+M = 8, skip 2:   0 2 4 6 0 2 4 6     (the odd slots are never reached)</code></pre>
+          <p><b>Expected output.</b> The full table matches p. 6. Checked by script: <code>notes/plots/ch13_plots.py</code> rebuilds both of the paper's tables and asserts them (2 October 2026).</p>
+          <p><b>What this shows.</b> Under Maglev one survivor's slot moves whether B1 or B2 leaves; removing B0 moves none. Under mod-N two move, and the gap grows with \(N\) (the learning on what moves, pp. 6–7). The extra move comes from timing: with one backend gone, a survivor reaches a contested slot a round earlier.</p>
+          <p><b>Common wrong turn.</b> Rebuilding from the old table: keeping the survivors' slots and handing out only B2's two. That gives no extra move, which Maglev never promised. Pseudocode 1 always starts from an empty table (lines 2–3, p. 6); that fresh start keeps the shares within one slot, and it is also what moves slot 6.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-python">
+        <h4>Hands-on · Measure balance and disruption at real sizes</h4>
+        <p class="labmeta">~45 min · measure · no sudo, needs Python 3</p>
+        <p><b>Task.</b> Fill the two TODOs in <a href="labs/ch13-maglev/maglev_starter.py"><code>maglev_starter.py</code></a>: <code>populate()</code>, which is Pseudocode 1, and <code>extra_moved()</code>, the share of the table that changed owner among backends that stayed. The script checks <code>populate()</code> against Table 1, then prints slots per backend and the moved share for 100 backends at five sizes, Maglev against mod-N. The last command is one point of Fig. 12.</p>
+        <pre><code>cd labs/ch13-maglev                 # from the dossier folder
+python3 maglev_starter.py
+python3 -c "import random, maglev_starter as m; r = random.Random(1); print(sum(m.one_trial(65537, 1000, 10, r)[2] for _ in range(5)) / 5)"</code></pre>
+        <p><b>Done when.</b> "Table 1 matches p. 6" prints, slots per backend are \(\lfloor M/N \rfloor\) or \(\lceil M/N \rceil\) at every size, Maglev's moved share falls from about 3% to about 0.6% while mod-N stays near 98%, and the Fig. 12 point is near 2.3%.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p><code>populate()</code> is Pseudocode 1 with three pieces of state: a pointer per backend, the table, and a count of filled slots. Compute each preference when you need it; an \(N \times M\) array at 1,000 backends and 65537 slots would hold 65 million numbers.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Inside <code>while True</code>, loop <code>for i, (off, sk) in enumerate(os_)</code>. Probe <code>c = (off + nxt[i] * sk) % M</code>; while <code>entry[c] &gt;= 0</code>, advance <code>nxt[i]</code> and probe again. Return as soon as the count reaches \(M\), even in the middle of a round.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p><code>extra_moved()</code> walks both tables slot by slot and skips slots whose old owner left: <code>sum(1 for b, a in zip(before, after) if b != a and b not in dead)</code>, as a percent of <code>len(before)</code>.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>def populate(os_, M):
+    N = len(os_); nxt = [0] * N; entry = [-1] * M; n = 0
+    while True:
+        for i, (off, sk) in enumerate(os_):
+            c = (off + nxt[i] * sk) % M
+            while entry[c] &gt;= 0:              # taken: try the next preference
+                nxt[i] += 1
+                c = (off + nxt[i] * sk) % M
+            entry[c] = i; nxt[i] += 1; n += 1
+            if n == M:
+                return entry
+
+def extra_moved(before, after, dead):
+    moved = sum(1 for b, a in zip(before, after) if b != a and b not in dead)
+    return 100 * moved / len(before)</code></pre>
+          <p><b>Expected output</b> (the author's run, 2 October 2026; 2 s, then 4 s for the last line; <a href="labs/ch13-maglev/data/python-lab-run.txt">python-lab-run.txt</a>):</p>
+          <pre><code>Table 1 matches p. 6
+M      M/N   entries  maglev_moved%  modN_moved%
+251        3  2-3          3.11          82.7
+1021      10  10-11         3.73          93.6
+4093      41  40-41         3.04          97.5
+16381    164  163-164        1.36          98.1
+65521    655  655-656        0.58          98.0
+2.36</code></pre>
+          <p><b>What this shows.</b> Balance is exact at every size, within one slot (the learning on taking turns, p. 6). Disruption is a separate number: it falls with \(M/N\) and is still 1.4% at \(M/N = 164\). A mod-N table is balanced too and moves almost everything. The Fig. 12 point, 2.36%, matches the paper's 2.3% (p. 11). The sweep behind Diagram 13.4 used the same two functions with 20 tables per point.</p>
+          <p><b>Common wrong turn.</b> Counting every changed slot, the removed backends' own slots included. That adds \(k/N\) to every number, 3.3% instead of 2.3% for the Fig. 12 point, which no longer matches the figure.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-cilium">
+        <h4>Hands-on · Cilium's own table: offline, then in a throwaway cluster</h4>
+        <p class="labmeta">~60 min · read the source and measure · Go part: no sudo, no network · cluster part: Docker and kind (not executed here)</p>
+        <p><b>Task.</b> Predict, for \(M = 16381\) and 160 backends, the slots per backend and the share that moves between survivors when one backend leaves. Then run <code>./run-go.sh lab</code>, which compiles <a href="labs/ch13-maglev/go/ch13_lab_test.go"><code>ch13_lab_test.go</code></a> into your fork's <code>pkg/maglev</code> with <code>go test -overlay</code>, copying and downloading nothing. Find the line in <code>maglev.go</code> that makes every node take turns in the same order. Optionally, run the cluster part; its scripts touch only their own cluster, <code>qbbr-maglev</code>.</p>
+        <pre><code>cd labs/ch13-maglev/go              # from the dossier folder
+./run-go.sh lab
+# optional: needs Docker and kind; creates and deletes its own cluster
+cd ../cluster
+./up.sh
+./dump.sh before
+python3 compare.py before
+kubectl --context kind-qbbr-maglev scale deploy/echo --replicas=2
+sleep 20; ./dump.sh after
+python3 compare.py before after
+./down.sh</code></pre>
+        <p><b>Done when.</b> You predicted 102 or 103 slots and about 1.5%, the run agrees, and you can point at <code>maglev.go:282–287</code>. If you ran the cluster, <code>compare.py</code> says every node holds the same table, with 84, 84 and 83 slots per backend.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The slots per backend come from the learning on taking turns: \(16381 = 160 \times 102 + 61\). The moved share is Diagram 13.4 at \(M/N = 102\).</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Read <code>GetLookupTable</code> (<code>maglev.go:272–290</code>). Backend IDs are allocated per node (<code>:258–261</code>). Which property of a backend is the same on every node?</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>The sort compares <code>hashString</code>, the address string built by <code>setHashString</code> (<code>:229–253</code>). Two nodes that took turns in different orders would give the extra slot to different backends, and each backend's claims depend on who claimed before it.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's run, 2 October 2026; full transcript in <a href="labs/ch13-maglev/data/cilium-go-lab.txt">cilium-go-lab.txt</a>):</p>
+          <pre><code>Cilium pkg/maglev, M = 16381, seed JLfvgnHc2kaSUFaI
+weights 1 and 100 give the same table: yes
+N,M_over_N,min_entries,max_entries,k_removed,trials,extra_moved_pct_mean,extra_moved_pct_max
+3,5460.3,5460,5461,1,3,0.026,0.055
+100,163.8,163,164,1,20,1.305,1.374
+100,163.8,163,164,3,20,1.654,1.758
+160,102.4,102,103,1,20,1.539,1.624
+160,102.4,102,103,3,20,1.859,1.990
+build time N=160 M=16381: median 1.28ms; permutation scratch 21.4 MB; table 65524 bytes
+build time N=1000 M=65521: median 32.64ms; permutation scratch 524.2 MB; table 262084 bytes
+fork still clean: 0 changed files</code></pre>
+          <p>The order is fixed by the sort at <code>maglev.go:282–287</code>. Without it, two nodes could take turns in different orders and build different tables, so a connection that moved between nodes would land on a different backend: the "same table" branch of Diagram 13.2 would fail on every ECMP change.</p>
+          <p><b>The cluster part</b> (not executed: needs a throwaway kind cluster). <code>up.sh</code> creates a three-node cluster with no kube-proxy, installs Cilium 1.19.5 with <code>loadBalancer.algorithm=maglev</code>, <code>maglev.tableSize=251</code> and a random seed, and starts three echo pods behind NodePort 30080. Expected from the code: <code>cilium-dbg bpf lb maglev list</code> prints one row per NodePort frontend, <code>[ID]/v4</code> and 251 backend IDs (<code>cilium-dbg/cmd/bpf_lb_maglev_list.go:91–122</code>), and none for the ClusterIP. <code>compare.py before</code> should show 84, 84 and 83 slots and one table on every node. After the scale-down the removed pod's slots move and a few more move between the two pods that stayed: in 2,000 random 3-backend tables of 251 slots the extra moves averaged 3 and were usually under 6. <code>compare.py</code> was checked on synthetic dumps only.</p>
+          <p><b>What this shows.</b> The paper's algorithm runs unchanged in your fork (the learnings on preference lists and taking turns, p. 6), plus one rule the paper never needed to state: a fixed order. At the defaults, one removal moves 1.5% of the table between survivors.</p>
+          <p><b>Common wrong turn.</b> Trusting the docs and predicting under 1%. The docs' 1% is the paper's balance bound (p. 6); the run measures disruption, 1.54% at \(M/N = 102\).</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: with Cilium's default 16381 slots, how many slots does each backend get with 160 backends, and with 200? Which breaks the paper's 1% rule?</p>
+        <details class="ans"><summary>Answer</summary><p>With 160, 102 or 103 (\(16381 = 160 \times 102 + 61\)), a \(1/102 = 0.98\%\) difference. With 200, 81 or 82 (\(16381 = 200 \times 81 + 181\)), a \(1/81 = 1.2\%\) difference: that breaks \(M &gt; 100N\) (p. 6), which allows at most 163 backends here. Near miss: reading 1.2% as the share of connections that move when a backend leaves. That is disruption, already 1.5% at 160 backends (the lab's Go run).</p></details>
+        <p>2. Here is a symptom: during an hour-long rolling restart of the Maglevs, one backend fails. Hundreds of long connections to other, healthy backends are reset; none were in the hour before. Why?</p>
+        <details class="ans"><summary>Answer</summary><p>Two changes overlapped. The restart moved connections to Maglevs with no tracking entry, so those Maglevs used the table (p. 5). The failure rebuilt the table, which moved a few percent of the survivors' slots too, like row 6 in Table 1 (p. 7). A connection that changed Maglev and sat on a moved slot reached a backend that never saw it: "resets are proportional to the number of lookup table disruptions" (p. 6). Near miss: blaming the failed backend; these connections were on healthy ones.</p></details>
+        <p>3. Here is a symptom: with <code>bpf-lb-algorithm=maglev</code>, <code>cilium-dbg bpf lb maglev list</code> shows tables for a service's NodePort frontends, none for its ClusterIP, and pod-to-service connections still spread at random. Is Maglev broken?</p>
+        <details class="ans"><summary>Answer</summary><p>No. Pod-to-service traffic never reaches the table: the socket load balancer picks a random slot at <code>connect()</code> (<code>bpf/bpf_sock.c:124–128, 408</code>), and the docs exclude east-west traffic from Maglev. A ClusterIP frontend gets a table only with <code>bpf-lb-external-clusterip</code> (<code>bpf_reconciler.go:1179–1184</code>). The paper's problem is traffic from outside, where many machines must agree (p. 2). Near miss: a missing hash seed; it changes which backend wins a slot, never whether a table exists.</p></details>
+        <p>4. Here is a symptom, predicted from your fork's code: in the VPC public load balancer path, scaling a service from 160 to 159 backends would reset about 1.5% of the connections to backends that stayed. A plain NodePort service would reset none. Why?</p>
+        <details class="ans"><summary>Answer</summary><p>The public entry keeps no tracking. <code>vpc_dsr.h</code> holds no per-flow state at the entry and runs the Maglev lookup on every packet (<code>:30–33, 498–503</code>), so every moved slot sends live connections elsewhere, and a rebuild at 160 backends in 16381 slots moves 1.54% of the table between survivors. A plain NodePort finds its service conntrack entry first and keeps the old backend (<code>lb.h:2104, 2167–2199</code>), the paper's two-part strategy (p. 5). Remedies: a larger \(M\), or state at the entry.</p></details>
+        <p>5. Choose and defend: 300 backends behind ECMP and a rolling update every day. Keep \(M = 16381\), or raise it to 65521?</p>
+        <details class="ans"><summary>Answer</summary><p>Raise it. At 16381, \(M/N = 55\): 54 or 55 slots, a 1.9% imbalance outside the paper's rule (p. 6), and about 2.5% of the table moving per removed backend (Diagram 13.4). At 65521, \(M/N = 218\): a 0.5% imbalance and about 1.1% moving. The cost: 256 KiB per frontend instead of 64 KiB, at least 343 MB of builder scratch, and a restart of every agent to change it, which briefly mixes tables across nodes (docs). With tracking in front and rare updates, the default is defensible.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>Maglev spreads a VIP over many machines with ECMP and keeps each connection on one backend in two steps: a local connection tracking table, and, where tracking cannot help, a Maglev table every machine builds the same way. Each backend's preference list is offset plus multiples of skip modulo a prime \(M\); backends take turns claiming free slots, so shares differ by at most one slot and \(M &gt; 100N\) keeps that within 1%. A removal moves the leaver's slots and a few others, about 1.5% at Cilium's defaults, which matters only where tracking is lost too. Cilium runs the same algorithm, conntrack first, for traffic entering a node.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="LB"><span class="tag LB">LB</span> D. Karger et al., "Consistent Hashing and Random Trees", STOC '97, pp. 654–663, <a href="https://doi.org/10.1145/258533.258660">doi:10.1145/258533.258660</a>. The ring that never moves a survivor's key: the guarantee Maglev gives up.</li>
+        <li class="ref" data-layer="LB"><span class="tag LB">LB</span> D. G. Thaler, C. V. Ravishankar, "Using Name-Based Mappings to Increase Hit Rates", <i>IEEE/ACM ToN</i> 6(1), 1998, pp. 1–14, <a href="https://doi.org/10.1109/90.663936">doi:10.1109/90.663936</a>. Rendezvous hashing, Fig. 11's other baseline.</li>
+        <li class="ref" data-layer="LB"><span class="tag LB">LB</span> P. Patel et al., "Ananta: Cloud Scale Load Balancing", SIGCOMM 2013, pp. 207–218, <a href="https://doi.org/10.1145/2486001.2486026">doi:10.1145/2486001.2486026</a>. ECMP plus a flow table, the design §6 contrasts (pp. 11–12).</li>
+        <li class="ref" data-layer="LB"><span class="tag LB">LB</span> Cilium docs, "Kubernetes Without kube-proxy", Maglev and DSR sections, <a href="https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/">docs.cilium.io</a> (1.20, October 2026). The knobs and the east-west caveat; mind the docs' slip.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="vip-ecmp">One VIP, many Maglevs</li>
+          <li data-strand="ct-then-hash">Tracking first, the table second</li>
+          <li data-strand="offset-skip">A preference list from two numbers</li>
+          <li data-strand="take-turns">Taking turns: shares within one slot</li>
+          <li data-strand="disruption">What moves when a backend leaves</li>
+          <li data-strand="choosing-m">Choosing M</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 13 "Maglev (side path)" (D. E. Eisenbud et al., "Maglev: A Fast and Reliable Software Network Load Balancer", NSDI '16, Google author version), printed pp. 1–13.
+I have read the chapter and the after half of ch13.html. Lock in.
+Strands: vip-ecmp (One VIP, many Maglevs), ct-then-hash (Tracking first, the table second), offset-skip (A preference list from two numbers), take-turns (Taking turns: shares within one slot), disruption (What moves when a backend leaves), choosing-m (Choosing M).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch13.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch13.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch12.html">← Pods with a speed limit</a><a href="index.html">All chapters</a><a href="ch14.html">BIG TCP (side path) →</a></nav>
+<footer>From a full buffer to BBR · chapter 13 reads D. E. Eisenbud et al., "Maglev: A Fast and Reliable Software Network Load Balancer", NSDI '16, in Google's author version (printed pp. 1–13), whose Table 1 matches the USENIX update of 8 March 2016. Page references are to that copy's printed folios. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

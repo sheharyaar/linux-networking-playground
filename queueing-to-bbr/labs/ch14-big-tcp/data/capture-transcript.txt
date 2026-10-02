@@ -1,0 +1,4 @@
+cap-v6-65536.pcap: IPv6 20000 data skbs, max 64346 B, median 64346 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+cap-v4-65536.pcap: IPv4 20000 data skbs, max 65226 B, median 65226 B, above 65,535: 0 (0.0%), IP length field 0: 0, hop-by-hop first: 0
+cap-v6-185000.pcap: IPv6 20000 data skbs, max 184298 B, median 184298 B, above 65,535: 19963 (99.8%), IP length field 0: 19963, hop-by-hop first: 0
+cap-v4-185000.pcap: IPv4 20000 data skbs, max 183962 B, median 183962 B, above 65,535: 19963 (99.8%), IP length field 0: 19963, hop-by-hop first: 0

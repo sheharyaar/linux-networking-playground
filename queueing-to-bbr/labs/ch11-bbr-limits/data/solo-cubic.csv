@@ -1,0 +1,6 @@
+cc,limit,loss_pct,goodput_mbps,mean_rtt_ms,retrans,segs_out,retrans_pct,gain_1.25,gain_0.75,gain_1.0,longest_gain1_s
+cubic,4,0,8.525,43.1,37,29486,0.13,,,,
+cubic,17,0,9.545,53.6,23,32996,0.07,,,,
+cubic,33,0,9.564,72.1,16,33047,0.05,,,,
+cubic,333,0,9.564,384.8,52,33830,0.15,,,,
+cubic,330,0,9.564,381.3,52,33659,0.15,,,,

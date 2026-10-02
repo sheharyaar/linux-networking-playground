@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eiffel · chapter 9 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 9 of 14</p>
+    <h1>Eiffel</h1>
+    <p class="sub">After this chapter you can explain why a packet scheduler may swap its sorted tree for buckets and a find-first-set bitmap, count the words such a queue reads to find the next packet among 20,000 buckets, and say why Linux's fq still keeps its waiting flows in a red-black tree.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The paper</h2>
+    <ol><li><a href="#book">pp. 18–28 (selected)</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-rank-as-integer">Ranks are integers in a moving window</a></li>
+        <li><a href="#s-ffs-levels">One find-first-set per level</a></li>
+        <li><a href="#s-moving-window">A window that moves</a></li>
+        <li><a href="#s-granularity">Bucket width against order</a></li>
+        <li><a href="#s-single-shaper">Every limit becomes a time</a></li>
+        <li><a href="#s-timer-and-tree">Where the cores went</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 9 · before you read</span>
+      <h2>Eiffel</h2>
+      <p class="chmeta">~7 min before · pp. 18–19, 21–22, 24, 26, 28 of 17–31 (selected, ~1 h) · ~22 min after · <span class="tag HOST">HOST</span><br>
+        <span class="spine">The paper's own kernel queue (p. 26): 20,000 buckets of 100 µs over a 2 s horizon, holding the packets of 20,000 paced TCP flows. Every dequeue must find the first non-empty bucket among the 20,000.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>The small-queues chapter left fq holding every waiting flow in its <a href="index.html#g-throttled-tree">throttled tree</a>, a red-black tree ordered by the time each flow may send next. Each insert walks about \(\log_2 n\) levels of that tree. Eiffel's authors <a href="index.html#g-pacing">paced</a> 20,000 TCP flows to 24 Gbit/s in total between two EC2 machines, and fq used a median of 14 times as many CPU cores as their own qdisc did (p. 26).</p>
+      <p>The paper's argument starts from one observation. A scheduler is a priority queue, and the usual priority queues compare keys, which costs \(O(\log n)\) per packet for \(n\) queued packets, or \(O(m \log n)\) for a policy with \(m\) ranking functions (p. 18). Packet ranks are special: they are integers, they sit in a window that moves with time, and many packets share one. So the queue can index an array instead of comparing keys. This chapter follows the paper's kernel queue: 20,000 buckets of 100 µs over a 2 s <a href="index.html#g-horizon">horizon</a>. On every dequeue it must find the first non-empty bucket, and a timer must fire when that bucket is due.</p>
+      <p>Eiffel has two halves. One is a data structure: buckets, one bit per bucket, and a CPU instruction that finds the first set bit of a word, stacked in levels. The other is a way to write scheduling policies, built on a hardware design called PIFO. One idea from that half matters for the rest of this reading list: every rate limit can become a time written on the packet, so one queue ordered by time can enforce them all.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-eiffel">Eiffel</dt><dd>The paper's software scheduler: the queues below plus an extended PIFO way of writing policies, built as a Linux qdisc and as a module of the BESS software switch.</dd>
+        <dt id="w-rank">rank</dt><dd>The number a scheduling policy gives a packet; the scheduler sends the smallest rank first. A send time, a deadline, a finish number or a strict priority can each be a rank.</dd>
+        <dt id="w-integer-priority-queue">integer priority queue</dt><dd>A priority queue whose keys are integers in a known range, so it can find an element by indexing an array instead of comparing keys.</dd>
+        <dt id="w-bucketed-queue">bucketed queue</dt><dd>An integer priority queue over the ranks 0 to \(C\), split into \(N\) buckets of \(C/N\) ranks each. Packets in one bucket count as equal and leave first-in first-out.</dd>
+        <dt id="w-ffs">find first set (FFS)</dt><dd>A CPU instruction that returns the index of the lowest set bit of a machine word in a few cycles. With one bit per bucket, it names the first non-empty bucket.</dd>
+        <dt id="w-hierarchical-ffs">hierarchical FFS queue</dt><dd>A tree of bitmap words over the buckets. Each bit says whether the word below it has any bit set. Finding the first non-empty bucket costs one word and one FFS per level: \(\lceil \log_w N \rceil\) levels for \(N\) buckets and \(w\)-bit words.</dd>
+        <dt id="w-cffs">cFFS (circular hierarchical FFS queue)</dt><dd>Two hierarchical FFS queues: a primary for the current range of ranks and a secondary for the range after it. When the primary empties, their pointers swap, so the range moves forward without rebuilding a bitmap.</dd>
+        <dt id="w-gradient-queue">gradient queue</dt><dd>Eiffel's arithmetic stand-in for FFS: each non-empty bucket adds a weighted parabola to a running sum, and the sum's lowest point falls on the highest non-empty bucket. Its approximate form answers in one step and can miss.</dd>
+        <dt id="w-pifo">PIFO (push-in first-out)</dt><dd>A queue that inserts each element where its rank puts it and always removes from the head. Sivaraman et al. (2016) build programmable hardware schedulers from trees of PIFOs.</dd>
+        <dt id="w-single-shaper">single shaper</dt><dd>Eiffel's way to enforce every rate limit in a scheduling hierarchy with one queue ordered by time: each limit becomes a send time on the packet.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  P["Packet with rank r"] -.->|"enqueue: append to bucket r,<br/>set its bit, and a parent bit<br/>only if that word was empty"| B
+  R["Root word<br/>5 bits used, one per level-2 word"] ==>|"FFS: first non-empty level-2 word"| M["Level 2: 5 words<br/>313 bits, one per leaf word"]
+  M ==>|"FFS: first non-empty leaf word"| L["Leaf level: 313 words<br/>20,000 bits, one per bucket"]
+  L ==>|"FFS: first non-empty bucket"| B["20,000 buckets of 100 µs<br/>each a first-in first-out list"]
+  B ==>|"head packet, when its bucket is due"| D["Device"]
+  style R fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 9.1 — The spine's queue as a hierarchical FFS queue, after the paper's Fig. 3 (p. 21) redrawn with 64-bit words.</b> Notice that a dequeue reads one word per level, three in all, whether ten packets wait below or a million. Enqueue runs the other way: it sets the bucket's bit, and touches a parent only when the word below had been empty.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Paper section</th><th>Pages</th><th>How</th><th>Look for</th></tr>
+        <tr><td>Abstract, §1 Introduction</td><td>pp. 17–18</td><td><span class="how skim">skim</span></td><td>The two claims: ranks are integers in a limited range, and \(O(m \log n)\) becomes \(O(m)\). The 3–40x figures return on p. 26.</td></tr>
+        <tr><td>§2 Efficient priority queuing: three properties of ranks, bucketed integer queues</td><td>pp. 18–19</td><td><span class="how close">close</span></td><td>Why integers in a moving window let you index instead of compare, and what a bucket gives up: order inside it.</td></tr>
+        <tr><td>§2 The timing-wheel paragraph, Table 1, the three flexibility axes</td><td>p. 19</td><td><span class="how close">close</span></td><td>What a <a href="index.html#g-timing-wheel">timing wheel</a> cannot do (find the minimum now), and the axes unit of scheduling, work conservation and ranking trigger. One word in the timing-wheel paragraph is wrong; the after half says which.</td></tr>
+        <tr><td>§2 PIFO and OpenQueue; §3 opening, Fig. 1</td><td>p. 20</td><td><span class="how later">skip</span></td><td>PIFO's limits (2,048 flows, no per-flow ranking) come back on p. 24, and the word list defines PIFO.</td></tr>
+        <tr><td>§3.1.1 FFS, hierarchical FFS, cFFS, Figs 2–4</td><td>p. 21 to p. 22, left column</td><td><span class="how close">close</span></td><td>One FFS per word, one word per level; why taking the rank modulo the queue size breaks the bitmap; the primary and secondary swap.</td></tr>
+        <tr><td>§3.1.2 The exact gradient queue, Fig. 5</td><td>p. 22, right column</td><td><span class="how skim">skim</span></td><td>The idea only. The algebra has a slip, which the after half works through in a toggle.</td></tr>
+        <tr><td>§3.1.2 The approximate gradient queue, soft heaps; §3.2 opening</td><td>p. 23</td><td><span class="how later">skip</span></td><td>The approximate queue is worth at most 9% (p. 27). Nothing later depends on its series.</td></tr>
+        <tr><td>§3.2.1 Eiffel's two PIFO additions; §3.2.2 Arbitrary shaping, Figs 6–7</td><td>p. 24</td><td><span class="how close">close</span></td><td>Per-flow ranking and ranking on dequeue; one shaper queue for every rate limit. Follow steps 1, 2.1 and 2.2 in Fig. 7.</td></tr>
+        <tr><td>§3.2.2 steps 3.1–3.2, §4 Implementation</td><td>p. 25</td><td><span class="how later">skip</span></td><td>Except the six-line "Kernel Implementation" paragraph: the qdisc arms its timer for the soonest deadline.</td></tr>
+        <tr><td>§5.1.1 Shaping in the kernel, Figs 8–9</td><td>p. 26</td><td><span class="how close">close</span></td><td>The set-up (20k buckets, 2 s, 20k flows, 24 Gbit/s), and the reason the authors give for each gap: fq's trees, Carousel's timer.</td></tr>
+        <tr><td>§5.1.2 pFabric, §5.2 set-up, Figs 10–13</td><td>pp. 26–27</td><td><span class="how later">skip</span></td><td>Glance at Fig. 10: a whole policy in two lines, one of them run on dequeue.</td></tr>
+        <tr><td>§5.2 Granularity, approximation in a network, Fig. 16</td><td>p. 28</td><td><span class="how close">close</span></td><td>"cannot insert gaps between packets that are smaller than 100 microseconds"; the 30% rule; the decision tree.</td></tr>
+        <tr><td>§5.2 end, §6, references, Appendices A–B</td><td>pp. 29–31</td><td><span class="how later">skip</span></td><td>The after half takes one number from p. 29 and Theorem 1 from p. 31.</td></tr>
+      </table>
+      <p class="note">The fence is about an hour on the pages marked close. The skipped pages are userspace-switch benchmarks and series algebra; the after half lifts the two facts from them that matter.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the paper</h4><ol>
+        <li>The authors name three properties of packet ranks. What are they, and what does a bucketed queue give up in return for its speed?</li>
+        <li>With 64-bit words, how many words must a hierarchical FFS queue read to find the first non-empty bucket among 20,000, and why does that number stay the same with ten packets queued or a million?</li>
+        <li>Eiffel's kernel qdisc used 14 times fewer cores than fq and 3 times fewer than Carousel (p. 26). The authors give a different reason for each gap. What are the two reasons?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="rank-as-integer">Ranks are integers in a moving window</li>
+          <li data-strand="ffs-levels">One find-first-set per level</li>
+          <li data-strand="moving-window">A window that moves</li>
+          <li data-strand="granularity">Bucket width against order</li>
+          <li data-strand="single-shaper">Every limit becomes a time</li>
+          <li data-strand="timer-and-tree">Where the cores went</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 9 "Eiffel" (A. Saeed, Y. Zhao, N. Dukkipati, M. Ammar, E. Zegura, K. Harras, A. Vahdat, "Eiffel: Efficient and Flexible Software Packet Scheduling", NSDI '19), printed pp. 17–31, selected pp. 18–19, 21–22, 24, 26, 28.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: rank-as-integer (Ranks are integers in a moving window), ffs-levels (One find-first-set per level), moving-window (A window that moves), granularity (Bucket width against order), single-shaper (Every limit becomes a time), timer-and-tree (Where the cores went).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch09.md.
+End with a reading plan: for each row of the reading guide in ch09.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read the paper</h2>
+      <p>Pages 18–19, 21–22, 24, 26 and 28 of <code>08-eiffel.pdf</code> (PDF pages 3–4, 6–7, 9, 11 and 13), with the skims in the reading guide, about an hour. Keep the three questions in mind and note the page where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 9 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. The authors name three properties of packet ranks. What are they, and what does a bucketed queue give up in return for its speed? <span class="pageref">pp. 18–19</span></p>
+        <details class="ans"><summary>Answer</summary><p>Ranks are integers, at any moment they fall inside a known range, and many packets share one (pp. 18–19). So the queue can be \(N\) buckets over the ranks 0 to \(C\), found by index (p. 19). It gives up order inside a bucket, where packets leave first-in first-out, and it allocates every bucket in advance, tens to hundreds of KB (p. 19). Near miss: "only the approximate queue loses order". The exact queues also lose every difference smaller than a bucket.</p></details>
+        <p>2. With 64-bit words, how many words must a hierarchical FFS queue read to find the first non-empty bucket among 20,000, and why does that number stay the same with ten packets queued or a million? <span class="pageref">p. 21</span></p>
+        <details class="ans"><summary>Answer</summary><p>Three. The 20,000 bucket bits fill 313 leaf words, one bit per leaf word fills 5 words, and those 5 bits fit in one root word: \(\lceil \log_{64} 20{,}000 \rceil = 3\) (p. 21). The count depends only on \(N\), fixed when the policy is configured, so it is "independent of the number of enqueued elements" (p. 21). Near miss: \(\log_2 20{,}000 \approx 14\), the depth of a balanced tree of 20,000 entries, which grows with the entries.</p></details>
+        <p>3. Eiffel's kernel qdisc used 14 times fewer cores than fq and 3 times fewer than Carousel. The authors give a different reason for each gap. What are the two reasons? <span class="pageref">pp. 25–26</span></p>
+        <details class="ans"><summary>Answer</summary><p>Against fq, the data structure: red-black trees reordered on every enqueue and dequeue, plus garbage collection of inactive flows (p. 26). Against Carousel, the timer: Carousel fires timers at constant intervals, Eiffel arms one for the soonest deadline (pp. 25–26); Fig. 9 puts the gap in softirq time. Near miss: crediting FFS for the Carousel gap. Carousel's timing wheel is \(O(1)\) too (Table 1, p. 19).</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p>The paper opens with cost. Software schedulers sort packets in comparison priority queues, red-black trees in qdiscs and binary heaps in C++, at \(O(\log n)\) per operation, or \(O(m \log n)\) for \(m\) ranking functions (pp. 17–18). Ranks are integers in a moving, bounded window, and many packets share one, so a bucketed integer queue fits (pp. 18–19). Table 1 sets fq, hClock, Carousel, OpenQueue and PIFO against two goals: \(O(1)\) queues and a way to express any policy (pp. 19–20).</p>
+      <p><b>The queues.</b> FFS finds the first non-empty bucket in a word; a tree of words makes the search \(O(\log_w N)\), a constant once \(N\) is set (p. 21). Ranks move, and a bitmap indexed modulo its size reports the wrong minimum, so cFFS keeps a primary and a secondary queue and swaps them (pp. 21–22). The gradient queue does FFS by arithmetic, and its approximate form answers in one step (pp. 22–23).</p>
+      <p><b>The policies.</b> Eiffel adds per-flow ranking and ranking on dequeue to the PIFO model, and enforces every rate limit in a hierarchy with a single shaper queue ordered by time (pp. 23–25).</p>
+      <p><b>The evidence.</b> As a kernel qdisc pacing 20,000 flows, Eiffel used 14 times fewer cores than fq and 3 times fewer than Carousel (p. 26). pFabric on cFFS carried 5 times more flows than on a heap (Fig. 11, p. 26). A queue of 100 µs buckets cannot make gaps under 100 µs (p. 28). Below about 1,000 priority levels the queue barely matters; above that, Fig. 16 picks one (pp. 28–29).</p>
+
+      <h3 class="strand" id="s-rank-as-integer">Ranks are integers in a moving window</h3>
+      <p>Sorting by comparison costs \(O(\log n)\) per insert or extract for \(n\) queued packets (p. 18). Eiffel's claim is that packet ranks need no comparisons (pp. 18–19). They are integers. At any moment they fall in a known range: 8 levels for 802.1Q, 50,000 for fairness over 50,000 flows, up to a million for a queue indexed by time. And many packets share a rank, since at 10 to 100 Gbit/s packets leave nanoseconds apart. So the queue is a bucketed integer queue (p. 19): insert is an array index, and moving a packet to another bucket is \(O(1)\).</p>
+      <p>Put numbers on the spine. A 2 s horizon over 20,000 buckets is \(2\ \text{s}/20{,}000 = 100\ \mu\text{s}\) per bucket. At 24 Gbit/s in total, 100 µs carries \(24 \times 10^9 \times 10^{-4} / 8 = 300\) KB, about 200 full-size packets. Each of the 20,000 flows gets 1.2 Mbit/s, one 1,500-byte packet every 10 ms, so one flow's packets sit 100 buckets apart. The order lost is among different flows' packets due in the same 100 µs. Memory: \(20{,}000 \times 16\ \text{B} = 320\) KB of bucket heads and tails plus 2.5 KB of bitmap, as p. 19 predicts.</p>
+      <p>The shapers chapter met ranks without the name. <a href="index.html#g-gps">Weighted fair queueing</a> sends the packet with the smallest finish number \(F = \max(F_\text{prev}, R(t)) + P\), approximating the fluid ideal behind <a href="index.html#g-max-min-fairness">max-min fairness</a>, and keeping finish numbers sorted cost \(O(\log n)\) per packet (DRR paper, p. 233). <a href="index.html#g-drr">DRR</a> reached \(O(1)\) by not sorting and paid in latency. Eiffel keeps the sort and makes the rank an array index. fq's throttled tree sorts the rank <code>time_next_packet</code> in a red-black tree (<code>sch_fq.c:220–239</code>).</p>
+
+      <h3 class="strand" id="s-ffs-levels">One find-first-set per level</h3>
+      <p>With one bit per bucket, FFS finds the first non-empty bucket among \(w\) in one instruction (p. 21, Fig. 2). More buckets means more words. Scanned in sequence they cost \(O(M)\) for \(M\) words, fine for Linux's real-time scheduler, whose 100 priorities fit in two 64-bit words. A tree of words, each bit summing up a word below, costs \(O(\log_w N)\) (p. 21, Fig. 3).</p>
+      <p>Walk Diagram 9.1. The root's FFS picks one of 5 level-2 words, that word's FFS one of 313 leaf words, the leaf's FFS the bucket: three words, \(\lceil \log_{64} 20{,}000 \rceil = 3\). An insert climbs only while the word it changed had been zero. A red-black tree of 20,000 throttled flows is about \(\log_2 20{,}000 \approx 14\) levels deep, up to twice that at worst, each level a pointer to follow. \(N\) is fixed, so the lookup is a constant, "independent of the number of enqueued elements" (p. 21). The hands-on race measured it:</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch09-race-->
+<svg viewBox="0 0 720 322" role="img" aria-label="Time per pop and push for four priority queues over 20,000 buckets as the number of queued packets grows, measured" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="540" y1="255.6" y2="255.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="259.6" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="540" y1="216.8" y2="216.8" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="220.8" text-anchor="end" fill="#898781">30</text>
+<line x1="58" x2="540" y1="174.4" y2="174.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="178.4" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="540" y1="135.6" y2="135.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="139.6" text-anchor="end" fill="#898781">300</text>
+<line x1="58" x2="540" y1="93.2" y2="93.2" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="97.2" text-anchor="end" fill="#898781">1k</text>
+<line x1="58" x2="540" y1="54.4" y2="54.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="58.4" text-anchor="end" fill="#898781">3k</text>
+<line x1="58" x2="540" y1="280.0" y2="280.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="155.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 155.0)">ns per pop + push</text>
+<polyline points="64.7,235.3 109.1,237.5 149.6,242.2 193.9,237.0 234.4,233.7 278.8,241.4 319.2,240.5 363.6,230.8 404.1,233.8 448.4,244.4 488.9,241.7 533.3,235.5" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="544" x2="556" y1="223.3" y2="223.3" stroke="#2a78d6" stroke-width="2"/>
+<text x="560" y="227.3" fill="#1b1f24">cFFS (two FFS trees)</text>
+<polyline points="64.7,267.1 109.1,244.2 149.6,231.4 193.9,222.7 234.4,216.6 278.8,209.9 319.2,205.3 363.6,198.8 404.1,194.3 448.4,188.0 488.9,182.3 533.3,167.2" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="544" x2="556" y1="167.4" y2="167.4" stroke="#eb6834" stroke-width="2"/>
+<text x="560" y="171.4" fill="#1b1f24">binary heap</text>
+<polyline points="64.7,219.4 109.1,236.3 149.6,243.5 193.9,245.1 234.4,253.3 278.8,256.1 319.2,252.2 363.6,238.7 404.1,239.5 448.4,251.1 488.9,249.5 533.3,234.7" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="544" x2="556" y1="240.1" y2="240.1" stroke="#1baf7a" stroke-width="2"/>
+<text x="560" y="244.1" fill="#1b1f24">wheel + one bit per slot</text>
+<polyline points="64.7,37.2 109.1,79.5 149.6,117.3 193.9,158.0 234.4,191.6 278.8,220.3 319.2,233.0 363.6,240.3 404.1,246.0 448.4,253.2 488.9,251.8 533.3,245.3" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="544" x2="556" y1="257.0" y2="257.0" stroke="#eda100" stroke-width="2"/>
+<text x="560" y="261.0" fill="#1b1f24">wheel, slot by slot</text>
+<circle cx="64.7" cy="235.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="109.1" cy="237.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="149.6" cy="242.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="193.9" cy="237.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="234.4" cy="233.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.8" cy="241.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.2" cy="240.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="363.6" cy="230.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.1" cy="233.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="448.4" cy="244.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.9" cy="241.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="533.3" cy="235.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="64.7" cy="267.1" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="109.1" cy="244.2" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="149.6" cy="231.4" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="193.9" cy="222.7" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="234.4" cy="216.6" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.8" cy="209.9" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.2" cy="205.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="363.6" cy="198.8" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.1" cy="194.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="448.4" cy="188.0" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.9" cy="182.3" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="533.3" cy="167.2" r="3" fill="#eb6834" stroke="#fff" stroke-width="1.5"/>
+<circle cx="64.7" cy="219.4" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="109.1" cy="236.3" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="149.6" cy="243.5" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="193.9" cy="245.1" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="234.4" cy="253.3" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.8" cy="256.1" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.2" cy="252.2" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="363.6" cy="238.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.1" cy="239.5" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="448.4" cy="251.1" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.9" cy="249.5" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="533.3" cy="234.7" r="3" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="64.7" cy="37.2" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="109.1" cy="79.5" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="149.6" cy="117.3" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="193.9" cy="158.0" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="234.4" cy="191.6" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="278.8" cy="220.3" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="319.2" cy="233.0" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="363.6" cy="240.3" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.1" cy="246.0" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="448.4" cy="253.2" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="488.9" cy="251.8" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<circle cx="533.3" cy="245.3" r="3" fill="#eda100" stroke="#fff" stroke-width="1.5"/>
+<text x="160.2" y="68.7" fill="#4a5560" text-anchor="start">20,000 buckets, as in the paper&#x27;s kernel queue; the window moves forward</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">cFFS (two FFS trees)</text>
+<line x1="232" x2="246" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="251" y="22" fill="#1b1f24">binary heap</text>
+<line x1="335" x2="349" y1="18" y2="18" stroke="#1baf7a" stroke-width="2"/>
+<text x="354" y="22" fill="#1b1f24">wheel + one bit per slot</text>
+<line x1="529" x2="543" y1="18" y2="18" stroke="#eda100" stroke-width="2"/>
+<text x="548" y="22" fill="#1b1f24">wheel, slot by slot</text>
+<text x="64.7" y="296.0" text-anchor="middle" fill="#898781">3</text>
+<text x="109.1" y="296.0" text-anchor="middle" fill="#898781">10</text>
+<text x="193.9" y="296.0" text-anchor="middle" fill="#898781">100</text>
+<text x="278.8" y="296.0" text-anchor="middle" fill="#898781">1k</text>
+<text x="363.6" y="296.0" text-anchor="middle" fill="#898781">10k</text>
+<text x="448.4" y="296.0" text-anchor="middle" fill="#898781">100k</text>
+<text x="533.3" y="296.0" text-anchor="middle" fill="#898781">1M</text>
+<text x="299.0" y="314.0" text-anchor="middle" fill="#4a5560">packets kept in the queue (log scale)</text>
+<g class="hit"><title>3 packets queued in 20,000 buckets · cFFS 17.8 ns (9.5 words) · heap 7.2 ns (2.0 comparisons) · one-bit scan 27.9 ns (55.2 words) · slot-by-slot wheel 4886 ns (3347 slots)</title><rect x="58.0" y="30" width="28.9" height="250.0" fill="transparent"/><line x1="64.7" x2="64.7" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>10 packets queued in 20,000 buckets · cFFS 16.7 ns (8.5 words) · heap 13.8 ns (6.1 comparisons) · one-bit scan 17.2 ns (18.6 words) · slot-by-slot wheel 1473 ns (1003 slots)</title><rect x="86.9" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="109.1" x2="109.1" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>30 packets queued in 20,000 buckets · cFFS 14.6 ns (8.0 words) · heap 19.8 ns (9.0 comparisons) · one-bit scan 14.1 ns (8.2 words) · slot-by-slot wheel 504 ns (335 slots)</title><rect x="129.3" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="149.6" x2="149.6" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>100 packets queued in 20,000 buckets · cFFS 16.9 ns (7.5 words) · heap 25.4 ns (12.7 comparisons) · one-bit scan 13.5 ns (4.6 words) · slot-by-slot wheel 159 ns (101 slots)</title><rect x="171.7" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="193.9" x2="193.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>300 packets queued in 20,000 buckets · cFFS 18.6 ns (6.9 words) · heap 30.1 ns (15.8 comparisons) · one-bit scan 10.7 ns (3.5 words) · slot-by-slot wheel 61 ns (34 slots)</title><rect x="214.2" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="234.4" x2="234.4" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>1,000 packets queued in 20,000 buckets · cFFS 14.9 ns (6.2 words) · heap 36.5 ns (18.9 comparisons) · one-bit scan 9.8 ns (3.1 words) · slot-by-slot wheel 27 ns (11 slots)</title><rect x="256.6" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="278.8" x2="278.8" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>3,000 packets queued in 20,000 buckets · cFFS 15.3 ns (5.8 words) · heap 41.6 ns (22.1 comparisons) · one-bit scan 11.0 ns (2.9 words) · slot-by-slot wheel 19 ns (4 slots)</title><rect x="299.0" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="319.2" x2="319.2" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>10,000 packets queued in 20,000 buckets · cFFS 20.2 ns (5.3 words) · heap 50.1 ns (25.5 comparisons) · one-bit scan 16.1 ns (2.6 words) · slot-by-slot wheel 15 ns (2 slots)</title><rect x="341.4" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="363.6" x2="363.6" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>30,000 packets queued in 20,000 buckets · cFFS 18.5 ns (4.6 words) · heap 56.9 ns (28.5 comparisons) · one-bit scan 15.8 ns (2.3 words) · slot-by-slot wheel 13 ns (1 slots)</title><rect x="383.8" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="404.1" x2="404.1" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>100,000 packets queued in 20,000 buckets · cFFS 13.7 ns (4.2 words) · heap 67.9 ns (32.0 comparisons) · one-bit scan 11.3 ns (2.1 words) · slot-by-slot wheel 11 ns (1 slots)</title><rect x="426.3" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="448.4" x2="448.4" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>300,000 packets queued in 20,000 buckets · cFFS 14.8 ns (4.1 words) · heap 79.8 ns (35.1 comparisons) · one-bit scan 11.9 ns (2.0 words) · slot-by-slot wheel 11 ns (1 slots)</title><rect x="468.7" y="30" width="42.4" height="250.0" fill="transparent"/><line x1="488.9" x2="488.9" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>1,000,000 packets queued in 20,000 buckets · cFFS 17.6 ns (4.0 words) · heap 122.6 ns (38.4 comparisons) · one-bit scan 18.1 ns (2.0 words) · slot-by-slot wheel 13 ns (1 slots)</title><rect x="511.1" y="30" width="28.9" height="250.0" fill="transparent"/><line x1="533.3" x2="533.3" y1="30" y2="280.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch09-race--></div>
+        <figcaption><b>Diagram 9.2 — One pop plus one push on four queues over 20,000 buckets, as the queue fills, measured.</b> Notice the blue line: cFFS stays at 14–20 ns from 3 packets to a million. The heap (orange) grows with \(\log n\), from 7 to 123 ns. A wheel that visits slot after slot (amber) spends 4.9 µs per packet when nearly empty; one bit per slot (green) reads 64 slots at a time. C, one core of a shared laptop, fastest of three 0.2 s runs, 2 October 2026. Data: <a href="labs/ch09-eiffel/data/race-vs-packets.csv">race-vs-packets.csv</a>. Hover for values.</figcaption></figure>
+      <p class="since"><b>Since the paper.</b> In v7.2 on x86, <code>__ffs()</code> is the <code>tzcnt</code> instruction (<code>arch/x86/include/asm/bitops.h:243–259</code>; spelled <code>rep; bsf</code> until v6.16, the same bytes) and <code>__fls()</code> is <code>bsr</code> (line 289). <code>find_first_bit()</code> is the paper's word-by-word \(O(M)\) scan (<code>lib/find_bit.c:29–42</code>), and the real-time scheduler the paper cites still picks its next task with two <code>__ffs()</code> calls (<code>include/asm-generic/bitops/sched.h:13–30</code>).</p>
+      <p class="erratum"><b>The paper's slip.</b> Page 21 writes "Bit-Scan-Forward (BSR)". On x86, BSF is bit scan forward and returns the lowest set bit; BSR is bit scan reverse and returns the highest. A minimum queue with bucket \(i\) at bit \(i\) needs the forward scan, which <code>__ffs()</code> compiles to. "Leftmost" on that page is a drawing convention: Fig. 2 puts bucket 0 on the left, a printed hex word puts bit 0 on the right. On p. 23 the gradient queue seeks the highest bucket, and there BSR fits.</p>
+
+      <h3 class="strand" id="s-moving-window">A window that moves</h3>
+      <p>Ranks indexed by send time grow with the clock, so the queue must move. The usual trick, bucket = rank modulo the queue size, breaks the bitmap: in Fig. 2's six buckets a packet of rank 6 lands in slot 0, and FFS reports it ahead of ranks 4 and 5 (p. 21). An overflow queue re-sorted as the range advances costs a pass over every waiting packet. cFFS makes the overflow a second FFS queue for the next range (p. 22, Fig. 4). When the primary empties, the two pointers swap and <code>h_index</code>, the primary's lowest rank, moves up one queue width; no bit is rewritten. A rank beyond the secondary goes into its last bucket, unsorted.</p>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  subgraph WR["One bitmap, bucket = rank mod 6"]
+    direction TB
+    W1["ranks 4 and 5 wait<br/>in buckets 4 and 5"] --> W2["rank 6 arrives:<br/>6 mod 6 = bucket 0"]
+    W2 --> W3["FFS finds bucket 0 first:<br/>rank 6 leaves before 4 and 5"]
+  end
+  subgraph CF["cFFS, after the paper's Fig. 4"]
+    direction TB
+    C1["primary FFS tree<br/>ranks 242 to 247"] -->|"primary empty:<br/>swap the two pointers"| C2["secondary FFS tree<br/>ranks 248 to 253"]
+    C3["rank above 253"] -.->|"last secondary bucket,<br/>unsorted"| C2
+  end
+  WR ~~~ CF
+  style W3 fill:#fdeef1,stroke:#be123c,stroke-width:2px
+  style C1 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+</div><figcaption><b>Diagram 9.3 — Why a bitmap cannot simply wrap, and how cFFS moves instead (p. 21).</b> Notice that the wrong order comes from where FFS starts, always at bit 0. cFFS never wraps a bitmap: the empty primary retires and the secondary takes its place.</figcaption></figure>
+      <p>The Carousel chapter's timing wheel is a bucketed queue indexed by time modulo its size. It needs no minimum, because it walks its slots in time order, one per tick, empty or not; p. 19 says it supports only non-<a href="index.html#g-work-conserving">work-conserving</a> schedules. Eiffel keeps the buckets and adds the bitmap, so the walk jumps to the next non-empty slot. In the race, with 3 packets in 20,000 buckets, the slot-by-slot wheel visited 3,347 slots per packet (4.9 µs); cFFS read 9.5 words (17.8 ns).</p>
+      <p>Linux had solved the wrap twice before. QFQ (Linux 3.0, 2011; the paper's reference [22]) shifts each group's slot bitmap so bit 0 is always the earliest slot (<code>net/sched/sch_qfq.c:939–955, 967–973</code>). The timer wheel searches from its cursor to the end of a level, then from the start up to the cursor (<code>kernel/time/timer.c:1837–1848</code>).</p>
+      <p class="erratum"><b>The paper's slip.</b> Page 19 says a timing wheel "supports only non-work conserving time-based schedules", then that it "does not support operations needed for non-work conserving schedules (i.e., ExtractMin or ExtractMax)". The second should read work-conserving: a work-conserving scheduler sends the smallest rank now, whatever its time, which is ExtractMin; a wheel releases only what is due.</p>
+
+      <h3 class="strand" id="s-granularity">Bucket width against order</h3>
+      <p>A bucket's width is the finest order the queue keeps: "a queue with a granularity of 100 microseconds cannot insert gaps between packets that are smaller than 100 microseconds" (p. 28). Finer buckets mean more of them, more empty, more memory; the authors suggest at least one packet per bucket, and coarser buckets once more than 30% sit empty (p. 28). It is the Carousel chapter's <a href="index.html#g-slot-granularity">slot granularity</a>, seen from the data structure.</p>
+      <p>On the spine, a 1.2 Mbit/s flow sends every 10 ms, 100 buckets apart, so a bucket moves each packet by at most 1% of its gap. One 10 Gbit/s flow sends a 1,500-byte packet every 1.2 µs, so \(100 / 1.2 \approx 83\) of its packets share a bucket and leave back to back. Many slow flows tolerate wide buckets; one fast flow does not.</p>
+      <p>The gradient queue (pp. 22–23) finds a bucket by arithmetic. Each non-empty bucket \(i\) adds \(2^i(x-i)^2\) to a sum, one parabola whose lowest point lies just below the highest non-empty bucket, so \(\lceil b/a \rceil\) names it (Theorem 1, p. 31). The approximate form covers hundreds of buckets in one sum, misses when buckets are empty, and gained at most 9% over cFFS (p. 27). Fig. 16 (p. 28) sums up: under about 1,000 levels any queue; a fixed range, FFS; a moving range with uneven use, cFFS; a moving range with every level busy, the approximate queue.</p>
+      <details class="deriv"><summary>Derivation · the critical point, on buckets 1, 3 and 4</summary>
+        <p>One bucket's term expands to \(2^i x^2 - 2\,i2^i\,x + i^2 2^i\). Summed over the non-empty buckets, the curvature is \(a x^2 - 2b x + c\) with \(a = \sum_i 2^i\) and \(b = \sum_i i2^i\). Its derivative \(2ax - 2b\) is zero at \(x = b/a\).</p>
+        <p>Buckets 1, 3 and 4: \(a = 2 + 8 + 16 = 26\), \(b = 2 + 24 + 64 = 90\), \(b/a = 3.46\), and \(\lceil 3.46 \rceil = 4\), the highest bucket.</p>
+        <p>Theorem 1's two extremes (p. 31), for buckets 1 to \(N\): all full gives \(a = 2^{N+1} - 2\) and \(b = N2^{N+1} - (2^{N+1} - 2)\), so \(b/a = N/(1 - 2^{-N}) - 1\), just above \(N - 1\); bucket \(N\) alone gives exactly \(N\). Emptying any lower bucket raises \(b/a\), so every pattern lies in \((N-1, N]\) and the ceiling is \(N\). For \(N = 4\) all full: \(4/(15/16) - 1 = 3.27\).</p>
+      </details>
+      <p class="erratum"><b>The paper's slip.</b> Page 22 writes the curvature as \(ax^2 - bx + c\) with its critical point at \(x = b/2a\), and then defines \(b = \sum_i i2^i\). With that \(b\) the linear term is \(2bx\), so the form is \(ax^2 - 2bx + c\) and the critical point is \(b/a\). The two slips cancel: the rule the paper uses, \(\lceil b/a \rceil\), and Appendix A are right. Taken literally, \(b/2a\) gives 1.73 for buckets 1, 3 and 4, and the wrong bucket, 2.</p>
+
+      <h3 class="strand" id="s-single-shaper">Every limit becomes a time</h3>
+      <p>The PIFO model builds a scheduler as a tree of scheduling transactions, each one ranking function over one PIFO, with shaping transactions on nodes (pp. 23–24). Eiffel adds per-flow ranking, one rank for a flow's whole queue, and ranking on dequeue, where sending a packet can re-rank its flow (p. 24). pFabric, which sends the flow with the fewest packets left, needs both; its policy is two lines (Fig. 10, p. 26).</p>
+      <p>The idea this reading list keeps is the <b>single shaper</b> (p. 24). A queue per rate limit costs CPU and memory. Carousel showed that any rate limit can become a timestamp per packet, so Eiffel keeps one shaper queue, ordered by time, for every limit in the hierarchy, and leaves the shares to work-conserving queues.</p>
+      <figure class="dia"><div class="mermaid">
+sequenceDiagram
+  participant P as Packet of the rightmost leaf
+  participant S as Single shaper, ordered by send time
+  participant Q2 as PQ2, shares 0.5 and 0.5
+  participant Q1 as PQ1 root, shares 0.7 and 0.3
+  participant W as Wire
+  P->>S: 1. stamp a send time for the 7 Mbit/s leaf limit
+  S->>Q2: 2.1 time reached: join PQ2
+  S->>S: 2.2 stamp again for the 10 Mbit/s limit of PQ2
+  S->>Q1: 3.1 time reached: join PQ1
+  S->>S: 3.2 stamp again at the pacing rate of the root
+  S->>W: pacing time reached: transmit
+</div><figcaption><b>Diagram 9.4 — One packet through three rate limits and one shaper queue, after the paper's Figs 6–7 (pp. 24–25).</b> Notice that every limit is a send time in the same queue, and each priority queue only orders packets the shaper has released. One queue, one timer, three limits.</figcaption></figure>
+      <p>With numbers: a 1,500-byte packet of the 7 Mbit/s leaf is stamped \(1{,}500 \times 8 / (7 \times 10^6) = 1.71\) ms after that leaf's previous packet; at that time it joins PQ2 and is stamped for 10 Mbit/s, 1.2 ms per packet; then PQ1 and the root's pacing rate. The shapers chapter asked what a timer and a queue per shaper cost with thousands of flows. HTB keeps a red-black tree of waiting classes per level (<code>sch_htb.c:146</code>); Eiffel keeps one queue ordered by time. The departure-timestamps chapter is the same idea in Linux: TCP writes the time into <a href="index.html#g-skb-tstamp"><code>skb-&gt;tstamp</code></a> (<a href="index.html#g-edt">EDT</a>) and fq waits for it.</p>
+
+      <h3 class="strand" id="s-timer-and-tree">Where the cores went</h3>
+      <p>In the kernel test (p. 26) Eiffel ran as a qdisc, shaper only, with 20,000 buckets over 2 s, on Linux 4.10, against 20,000 neper flows capped with <code>SO_MAX_PACING_RATE</code> to 24 Gbit/s in total. It used a median of 14 times fewer cores than fq and 3 times fewer than Carousel (Fig. 8). For fq the authors blame the data structure: red-black trees reordered on every enqueue and dequeue, and garbage collection of idle flows. Against Carousel the data structures cost about the same; Carousel fires timers at constant intervals, Eiffel arms one for the soonest deadline (Fig. 9, and p. 25).</p>
+      <p>The small-queues chapter's fq already arms one watchdog for its earliest throttled flow (<code>sch_fq.c:745</code>), Eiffel's timer policy. What it pays is the tree. 24 Gbit/s of 1,500-byte packets is 2 million packets a second; with every flow capped, nearly every packet sends its flow back into the tree, about 14 levels deep for 20,000 flows, where a cFFS lookup reads three words.</p>
+      <p>Read the numbers with their setting: Linux 4.10, before fq honoured departure times, and an Eiffel qdisc that kept per-flow state in <code>sock.h</code> (p. 26). The pFabric baseline is weak too: the paper charges its heap \(O(n)\) per re-rank (p. 27), but a heap that indexes each flow's position re-ranks in \(O(\log n)\).</p>
+      <p class="since"><b>Since the paper</b> (checked in v7.2, 2 October 2026). fq still keeps throttled flows in a red-black tree, <code>q-&gt;delayed</code> (<code>sch_fq.c:138</code>; insert 220–239, drain 664–690). Since v5.2 (2019) each flow also has one, <code>t_root</code>, for packets whose departure times arrive out of order, with an \(O(1)\) list for the rest (lines 66–71, 508–537). Since v6.16 (2025) a qdisc can be written in BPF, and the selftests' BPF fq keeps its throttled flows in a <code>bpf_rbtree</code> (<code>bpf_qdisc_fq.c:124, 430</code>). No Eiffel code is in the kernel source.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system back" id="sys-sch-fq-back" data-system="sch-fq">
+        <h4>Back to <code>sch_fq</code></h4>
+        <p>fq is the qdisc Eiffel's kernel test raced (p. 26), and its throttled tree is what an Eiffel queue would replace. In <code>tc -s qdisc</code>, the bracketed <code>throttled</code> counts flows in the tree, the later one counts inserts, each \(O(\log n)\), and <code>next_packet_delay</code> is when its one timer fires. More in <a href="ch05.html#sys-sch-fq">the full card in the small-queues chapter</a>.</p>
+      </div>
+
+      <div class="system" id="sys-linux-bpf-qdisc" data-system="linux-bpf-qdisc">
+        <h4>Meet the system · BPF qdiscs: <code>Qdisc_ops</code> written in BPF</h4>
+        <p><b>What it is.</b> Since Linux 6.16 a qdisc can be BPF programs: you fill a <code>struct Qdisc_ops</code> (enqueue, dequeue, init, reset, destroy) in a struct_ops map, register it, and <code>tc</code> attaches it by its <code>.id</code> like a built-in qdisc.</p>
+        <p><b>Why it exists.</b> A new scheduler used to mean a kernel module. The 2025 patch argues that BPF's objects, lists and red-black trees now suffice "to realize sophisticated packet scheduling algorithms" (commit <code>c8240344956e</code>): the programmability Eiffel's second half asks for.</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li>The <code>Qdisc_ops</code> struct_ops type and its <code>.id</code>, the name <code>tc</code> uses (<code>net/sched/bpf_qdisc.c:446–475</code>).</li>
+          <li>Kfuncs for what BPF may not touch directly: <code>bpf_qdisc_skb_drop</code>, <code>bpf_qdisc_watchdog_schedule</code>, <code>bpf_qdisc_bstats_update</code> (lines 192–287).</li>
+          <li>The queue itself, built from BPF objects: <code>bpf_rbtree</code>, <code>bpf_list</code>, maps, and pointers to held skbs.</li>
+          <li><code>bpftool struct_ops register</code> to load, which needs root here (<code>kernel.unprivileged_bpf_disabled = 2</code>).</li>
+        </ul>
+        <p class="here"><b>Where this chapter lives inside it.</b> Ranks: the selftest bpf_fq orders flows by <code>time_next_packet</code> and packets by <code>tstamp</code>, each in a <code>bpf_rbtree</code>, so it pays fq's \(O(\log n)\) (<code>bpf_qdisc_fq.c:144–164, 373, 430</code>). Cores: <code>bpf_qdisc_watchdog_schedule</code> is the soonest-deadline timer. FFS levels: an Eiffel queue would be BPF arrays of buckets and words, and BPF has no find-first-set instruction; clang 22 turns <code>__builtin_ctzll</code> into <code>x &amp; -x</code>, a multiply by a de Bruijn constant and a table lookup. The bits iterator kfunc (v6.11, <code>kernel/bpf/helpers.c:3522</code>) runs <code>find_next_bit()</code> over up to 511 words.</p>
+        <p><b>Try it</b> (~3 min, no sudo; needs clang, bpftool and a kernel tree at v6.16 or later):</p>
+        <pre><code>zcat /proc/config.gz | grep NET_SCH_BPF
+cat /proc/sys/kernel/unprivileged_bpf_disabled
+cd labs/ch09-eiffel                          # from the dossier folder
+./build-bpf-fq.sh ~/workspace/repos/linux</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026 (kernel 7.2.6, tree at v7.2; the section list cut to the programs and the map):</p>
+        <pre><code>CONFIG_NET_SCH_BPF=y
+2
+-rw-r--r-- 1 wazir wazir 1053752 Oct  2 14:40 bpf_qdisc_fq.bpf.o
+  4 struct_ops/bpf_fq_enqueue     000006c8 0000000000000000 TEXT
+  6 struct_ops/bpf_fq_dequeue     00000a48 0000000000000000 TEXT
+  8 struct_ops/bpf_fq_reset       000001a0 0000000000000000 TEXT
+ 10 struct_ops/bpf_fq_init        00000158 0000000000000000 TEXT
+ 14 .struct_ops                   000000b0 0000000000000000 DATA</code></pre>
+        <p>BPF qdiscs are built in and unprivileged BPF is off: building is rootless, loading is not. The object holds four programs and the <code>Qdisc_ops</code> map.</p>
+        <p><b>Clean up.</b> <code>rm vmlinux.h bpf_qdisc_fq.bpf.o</code> in the lab folder.</p>
+        <p class="drift">Stable: struct_ops as the way to fill a kernel ops table from BPF, and the five <code>Qdisc_ops</code> members. Drifting (as of October 2026, kernel 7.2, clang 22, bpftool 7.8): the kfunc list, the selftest's include paths (the build script adds <code>libarena/include</code>), and which further ops BPF may implement.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">Files in <code>labs/ch09-eiffel/</code>. Only the last step of the third lab needs sudo. Commands paste into fish or bash.</p>
+
+      <div class="lab" id="lab-ffs-walk">
+        <h4>Hands-on · Walk a two-level FFS lookup by hand</h4>
+        <p class="labmeta">~25 min · trace by hand · paper and pencil</p>
+        <p><b>Task.</b> 4,096 buckets of 100 µs in a two-level FFS queue: a 64-bit root and 64 leaf words; bit \(i\) (0 is least significant) of leaf \(j\) is bucket \(64j + i\). Root <code>0x0000000000000A00</code>, leaf 9 <code>0x0000000000400000</code>, leaf 11 <code>0x8000000000000001</code>, the rest zero. (a) Find the next bucket and its time; count words read. (b) Dequeue its only packet, update the bitmaps, find the next bucket; count reads and writes. (c) Compare a one-level scan from word 0 and a binary heap of 20,000 packets. (d) A packet due 410.6 ms ahead goes in bucket rank mod 4,096. What does the next lookup return?</p>
+        <p><b>Done when.</b> You have two bucket numbers with their times, the three counts side by side, and one sentence on what went wrong in (d).</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Diagram 9.1 with one level fewer: FFS on the root picks the leaf word, FFS on the leaf picks the bucket. Emptying a bucket clears bits upward while words become zero.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>FFS of a hex word: take the lowest non-zero hex digit, then its lowest set bit. In <code>0xA00</code>, digit 2 (counting from 0 on the right) is A, binary 1010, whose lowest set bit is bit 1, so the word's FFS is \(2 \times 4 + 1 = 9\).</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>(a) is bucket \(64 \times 9 + 22\). For (d): \(4{,}106 \bmod 4{,}096 = 10\). Which root bit does bucket 10 set, and is it lower than bit 9?</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>(a) FFS(root 0x...0A00) = 9; FFS(leaf 9 0x...400000) = 22
+    bucket 9*64 + 22 = 598, due in 59.8 ms             2 words read
+(b) clear bit 22 of leaf 9 -> 0; clear bit 9 of root -> 0x800
+    FFS(root) = 11; FFS(leaf 11 0x8000000000000001) = 0
+    bucket 11*64 + 0 = 704, due in 70.4 ms             2 written, 2 read
+(c) one-level scan from word 0: words 0..9 = 10 reads  (worst case 64; 313 at 20,000 buckets)
+    binary heap of 20,000: 14 levels, about 2 comparisons each = ~28 per pop
+(d) bucket 10 sets bit 10 of leaf 0 and bit 0 of the root
+    FFS(root) = 0; FFS(leaf 0) = 10: bucket 10, "due in 1.0 ms"
+    the packet due in 410.6 ms leaves 409.6 ms early</code></pre>
+          <p><b>Expected output.</b> The numbers above. The race's heap counted 25.5 comparisons per pop and push with 10,000 packets and 28.5 with 30,000 (<code>data/race-vs-packets.csv</code>), around the estimate.</p>
+          <p><b>What this shows.</b> The lookup read one word per level and would read the same two with 20,000 packets queued (the FFS learning, p. 21). The scan's cost is the distance from word 0 to the first packet, and the heap's is \(\log_2 n\). Part (d) is p. 21's wrap: FFS always starts at bit 0. cFFS would have put the packet in its secondary's bucket 10 (the moving-window learning).</p>
+          <p><b>Common wrong turn.</b> Reading the hex left to right, the way Fig. 2 draws bucket 0 on the left. The leftmost set bit of <code>0x0000000000000A00</code> as printed is bit 11, which skips bucket 598 and returns 704 first.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-race">
+        <h4>Hands-on · Build an FFS queue and race it against a heap</h4>
+        <p class="labmeta">~45 min · build, then measure · no sudo, needs Python 3 and cc</p>
+        <p><b>Task.</b> Copy <code>ffsq_starter.py</code> to <code>ffsq.py</code> and write <code>push()</code> and <code>pop_min()</code> for a hierarchical FFS queue. First predict, for 20,000 buckets and 10, 1,000 and 20,000 packets, the words your queue touches per pop and the comparisons heapq makes per pop. Then run the C race and read where, at 20,000 buckets, the heap and the slot-by-slot wheel each cross cFFS.</p>
+        <pre><code>cd labs/ch09-eiffel                          # from the dossier folder
+cp ffsq_starter.py ffsq.py                   # then write push() and pop_min()
+python3 ffsq.py --buckets 20000 --packets 1000
+./race.sh                                    # about two minutes; writes two CSVs here</code></pre>
+        <p><b>Done when.</b> Your queue drains in rank order (the script asserts it), you have words per pop beside comparisons per pop for three sizes, and you can name the two crossing points.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Diagram 9.1: an insert climbs from the leaf and stops at the first word that was already non-zero; a lookup descends from the root with one FFS per level.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p><code>push</code>: for each level from the leaf, <code>i = b &gt;&gt; 6</code>; set bit <code>b &amp; 63</code> of word <code>i</code>; stop if the old word was non-zero, else <code>b = i</code>. <code>pop_min</code>: start at <code>b = 0</code> and walk <code>reversed(self.levels)</code>.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p><code>b = (b &lt;&lt; 6) | ((w &amp; -w).bit_length() - 1)</code> descends one level. After <code>popleft()</code> empties a bucket, clear its bit, and keep clearing upward while the word you cleared is zero.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>    def push(self, rank, item):
+        if self.buckets[rank] is None:
+            self.buckets[rank] = deque()
+        self.buckets[rank].append(item)
+        b = rank
+        for words in self.levels:            # leaf first; stop at a word already non-zero
+            i = b &gt;&gt; 6
+            old = words[i]
+            words[i] = old | (1 &lt;&lt; (b &amp; 63))
+            self.touched += 1
+            if old:
+                break
+            b = i
+
+    def pop_min(self):
+        b = 0
+        for words in reversed(self.levels):  # root first: one find-first-set per level
+            w = words[b]
+            self.touched += 1
+            if not w:
+                raise IndexError('empty queue')
+            b = (b &lt;&lt; 6) | ((w &amp; -w).bit_length() - 1)
+        q = self.buckets[b]
+        item = q.popleft()
+        if not q:                            # bucket empty: clear bits upward while words empty
+            c = b
+            for words in self.levels:
+                i = c &gt;&gt; 6
+                words[i] &amp;= ~(1 &lt;&lt; (c &amp; 63))
+                self.touched += 1
+                if words[i]:
+                    break
+                c = i
+        return b, item</code></pre>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026, Python 3.14.7; all six in <code>data/ffsq-python.txt</code>):</p>
+          <pre><code>20000 buckets, 3 levels, 10 packets
+ffs queue: 2.50 words per push, 5.50 words per pop
+heapq:     1.40 comparisons per push, 2.00 per pop
+20000 buckets, 3 levels, 1000 packets
+ffs queue: 1.31 words per push, 4.28 words per pop
+heapq:     2.22 comparisons per push, 8.66 per pop
+ffs queue      973 ns per push+pop (fastest of 3)
+heapq          275 ns per push+pop (fastest of 3)
+20000 buckets, 3 levels, 20000 packets
+ffs queue: 1.02 words per push, 3.65 words per pop
+heapq:     2.29 comparisons per push, 13.01 per pop</code></pre>
+          <p>The C race at 20,000 buckets, ns per pop and push (<code>data/race-vs-packets.csv</code>):</p>
+          <pre><code>packets queued     3     10     30   1,000  3,000  10,000  1,000,000
+heap             7.2   13.8   19.8    36.5   41.6    50.1      122.6
+cffs            17.8   16.7   14.6    14.9   15.3    20.2       17.7
+wheel         4885.9 1473.2  504.4    27.2   19.0    15.4       13.4</code></pre>
+          <p><b>What this shows.</b> Words per pop stayed between 3.65 and 5.5 from 10 to 20,000 packets: three reads, plus clears that climb further when buckets are sparse (the FFS learning, p. 21). heapq's comparisons grew from 2 to 13, the \(\log_2 n\) of p. 18. In C the heap is faster below about 20 packets and slower above; the slot-by-slot wheel catches up only near 10,000 packets, when it visits about 2 slots per packet.</p>
+          <p><b>Common wrong turn.</b> Timing the Python version. heapq is written in C, so it wins on time while making more comparisons (275 against 973 ns at 1,000 packets). In Python you time the interpreter; count words, or time in C, which is why <code>race.c</code> exists.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-bpf-fq">
+        <h4>Hands-on · Find the trees in a qdisc written in BPF</h4>
+        <p class="labmeta">~35 min · read the source · builds as a normal user (clang, bpftool); loading needs sudo</p>
+        <p><b>Task.</b> In the kernel's <code>bpf_qdisc_fq.c</code>, find every red-black tree, what it is keyed by and where it is inserted, and say which one a cFFS of time buckets would replace. Compile one <code>__builtin_ctzll</code> for BPF and read how clang finds a set bit without an instruction. Then, with your sudo, register bpf_fq, attach it in the bench in place of fq, and send one capped flow through it.</p>
+        <pre><code>cd labs/ch09-eiffel                          # from the dossier folder
+grep -n 'bpf_rb_root\|bpf_rbtree_add\|_less(' ~/workspace/repos/linux/tools/testing/selftests/bpf/progs/bpf_qdisc_fq.c
+printf 'unsigned long long f(unsigned long long x){ return __builtin_ctzll(x); }\n' &gt; ctz.c
+clang -O2 -target bpf -c ctz.c -o ctz.o; llvm-objdump -d ctz.o</code></pre>
+        <p><b>Done when.</b> You can name both trees with their keys and line numbers, you have the BPF listing of the ctz, and (with sudo) <code>tc -s qdisc</code> in the bench names <code>bpf_fq</code> and counts packets sent.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>One tree orders flows and one orders a flow's packets. The comparators end in <code>_less</code>.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>For the ctz, <code>x &amp; -x</code> keeps only the lowest set bit; multiplying that single bit by a de Bruijn constant leaves a different 6-bit pattern on top for each of the 64 positions.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>The sudo commands are at the top of <code>bpf_qdisc_fq.c</code> (lines 13–24). Register once on the host: qdisc kinds are one global list (<code>net/sched/sch_api.c:360–376</code>), so <code>tc</code> inside the rootless bench should find <code>bpf_fq</code>.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>83:	struct bpf_rb_root queue __contains(skb_node, node);
+124:private(A) struct bpf_rb_root fq_delayed __contains(fq_flow_node, rb_node);
+144:static bool skbn_tstamp_less(struct bpf_rb_node *a, const struct bpf_rb_node *b)
+155:static bool fn_time_next_packet_less(struct bpf_rb_node *a, const struct bpf_rb_node *b)
+373:	bpf_rbtree_add(&amp;flow-&gt;queue, &amp;skbn-&gt;node, skbn_tstamp_less);
+430:	bpf_rbtree_add(&amp;fq_delayed, &amp;flow-&gt;rb_node, fn_time_next_packet_less);
+
+0000000000000000 &lt;f&gt;:
+       0:	r2 = r1
+       1:	r2 = -r2
+       2:	r1 &amp;= r2
+       3:	r2 = 0x218a392cd3d5dbf ll
+       5:	r1 *= r2
+       6:	r1 &gt;&gt;= 0x3a
+       7:	r2 = 0x0 ll
+       9:	r2 += r1
+      10:	w0 = *(u8 *)(r2 + 0x0)
+      11:	exit</code></pre>
+          <p><b>Expected output.</b> Above, real (2 October 2026; the listing without its raw bytes, in full in <code>data/bpf-fq-build.txt</code>). <code>fq_delayed</code> holds throttled flows keyed by <code>time_next_packet</code>, inserted in <code>fq_flow_set_throttled()</code>: that is the tree a cFFS replaces. Each flow's <code>queue</code> keys packets by <code>tstamp</code>, inserted on every enqueue; v7.2's sch_fq uses a list there for in-order packets. The sudo part was <b>not executed: it needs sudo</b>:</p>
+          <pre><code>./build-bpf-fq.sh ~/workspace/repos/linux
+sudo bpftool struct_ops register bpf_qdisc_fq.bpf.o /sys/fs/bpf
+../common/qnet.sh
+tc -n rtr qdisc del dev r1 root
+tc -n rtr qdisc add dev r1 root netem delay 20ms rate 10mbit limit 50
+tc -n snd qdisc del dev s0 root
+tc -n snd qdisc add dev s0 root handle 1: bpf_fq
+ip netns exec rcv python3 flow.py recv --once &amp;
+ip netns exec snd python3 flow.py send --dst 10.0.2.1 --seconds 10 --max-pacing-rate 5mbit &amp;
+sleep 5; tc -n snd -s qdisc show dev s0
+wait; exit
+sudo bpftool struct_ops unregister name fq</code></pre>
+          <p>Expected shape, from the source: a <code>qdisc bpf_fq 1: root</code> line with no parameters, and Sent and backlog counters, which bpf_fq keeps itself (<code>bpf_qdisc_fq.c:366, 608–609</code>). The flow holds about 5 Mbit/s. bpf_fq ignores the socket's pacing rate, so the spacing comes from TCP's own timer, switched on by <code>SO_MAX_PACING_RATE</code>, which also stamps each skb's time (<code>tcp_output.c:1555</code>); bpf_fq finds those times already due.</p>
+          <p><b>What this shows.</b> A qdisc written in BPF in 2025 still sorts by comparison, both trees \(O(\log n)\) (the ranks and cores learnings, pp. 18, 26). An Eiffel queue in BPF would need arrays and seven instructions per FFS step, or the bits iterator.</p>
+          <p><b>Common wrong turn.</b> Concluding from a steady 5 Mbit/s that bpf_fq paced the flow. It honours <code>skb-&gt;tstamp</code> only; the cap switched on TCP's internal pacing, as in the small-queues chapter's fq lab. To see bpf_fq hold packets, the times must come from somewhere else, such as a sender that stamps its own.</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: 10 µs buckets over a 2 s horizon, 64-bit words. How many buckets and FFS levels, and how much memory for bitmaps and for bucket heads and tails at 16 bytes each?</p>
+        <details class="ans"><summary>Answer</summary><p>200,000 buckets, 3 levels, about 25 KB of bitmap and 3.2 MB of buckets. \(2\ \text{s}/10\ \mu\text{s} = 200{,}000\); the leaf level is \(\lceil 200{,}000/64 \rceil = 3{,}125\) words, then 49, then one root, and \(64^3 = 262{,}144\) covers it (p. 21). Bitmap \(3{,}175 \times 8\ \text{B}\); buckets \(200{,}000 \times 16\ \text{B}\). Near miss: four levels. Ten times the spine's buckets adds no level; memory grows, the cost the paper names (p. 29).</p></details>
+        <p>2. Predict the value: page 29 says a cFFS with a billion buckets needs six bit operations to find the minimum. Which word width makes that true, and how many would 64-bit words need?</p>
+        <details class="ans"><summary>Answer</summary><p>32-bit words; 64-bit words need five. The levels are \(\lceil \log_w N \rceil\) (p. 21): \(32^5 = 3.4 \times 10^7\) falls short of \(10^9\) and \(32^6 = 1.07 \times 10^9\) covers it, so six; \(64^5 = 1.07 \times 10^9\) already covers it, so five. Near miss: thirty, from \(\log_2 10^9\). That is a binary tree's depth, one bit per level, which a word-wide FFS avoids.</p></details>
+        <p>3. Here is a symptom: a home-made pacer indexes 4,096 buckets of 100 µs by send time modulo 4,096 and finds the next packet with one FFS from bit 0. Tests pass. In production a few packets leave about 410 ms early, all from senders that stamp times far ahead. What happened?</p>
+        <details class="ans"><summary>Answer</summary><p>The window wrapped. A time more than 409.6 ms ahead lands in a low bucket, and FFS, which searches from bit 0, returns it before nearer packets: p. 21's rank 6 in slot 0. Fixes: cFFS's secondary queue (p. 22), a search from the cursor (the timer wheel), a shifted bitmap (QFQ), or dropping times beyond the horizon, as fq counts in <code>horizon_drops</code>. Near miss: clock skew between senders. The early packets are exactly those stamped past the window.</p></details>
+        <p>4. Here is a symptom: a 10 Gbit/s flow moves from fq to an Eiffel-style shaper of 20,000 buckets over 2 s. A capture now shows about 80 back-to-back packets every 100 µs where there was one every 1.2 µs. What happened?</p>
+        <details class="ans"><summary>Answer</summary><p>Granularity. Packets due within the same 100 µs share a bucket, and a bucket empties first-in first-out at line rate, so the queue cannot make gaps under 100 µs (p. 28). At 10 Gbit/s, 100 µs holds \(10^{10} \times 10^{-4} / 12{,}000 \approx 83\) packets. Narrower buckets fix it, at the price of more buckets, more of them empty (p. 28). Near miss: TSO. A 64 KB skb is 45 packets; 83 every 100 µs is several separately timed skbs leaving one bucket.</p></details>
+        <p>5. Choose and defend: a host caps each of 5,000 VMs and the whole host at 20 Gbit/s, and busy VMs share spare capacity by weight. HTB with a class per VM, or one shaper queue ordered by time plus weighted queues, as in Fig. 7?</p>
+        <details class="ans"><summary>Answer</summary><p>The single shaper, for CPU: every cap becomes a send time in one queue under one timer (p. 24), where HTB keeps a token bucket per class and a red-black tree of waiting classes per level (<code>sch_htb.c:146</code>). The trade is sharing: HTB's borrowing hands spare capacity to busy classes up to their ceil for free, while a single shaper needs separate work-conserving queues for the shares (PQ1 and PQ2 in Fig. 7). HTB ships today; Linux's nearest single shaper is per-packet departure times honoured by fq.</p></details>
+        <p>6. Choose and defend: a host paces at most about 50 flows, with send times up to 2 s ahead in 100 µs steps. A colleague wants to swap its binary heap for a cFFS because FFS is constant time. Do it?</p>
+        <details class="ans"><summary>Answer</summary><p>Probably not. Fifty entries make a heap about \(\log_2 50 \approx 6\) levels deep in a few cache lines; at 20,000 buckets the race measured the heap at 14–20 ns for 10–30 packets against cFFS's 15–17 ns (Diagram 9.2). "Constant" means independent of \(n\): three words plus clears, while the heap's \(\log n\) is small when \(n\) is. The paper draws the same line for levels: below about 1,000 the choice hardly matters (p. 28). Switch when thousands queue and the heap keeps climbing.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>Packet ranks are integers in a moving window, many packets share one, so a scheduler can bucket them and index instead of compare. A tree of 64-bit words finds the first non-empty bucket in \(\lceil \log_{64} N \rceil\) words, three for 20,000, whatever the queue holds. cFFS moves the window by swapping two trees; the bucket width is the order given up. Every rate limit can become a send time in one shaper queue. Eiffel beat fq on its trees and Carousel on timer policy; v7.2's fq still uses the tree, and a BPF qdisc is where an FFS queue could go.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> A. Sivaraman et al., "Programmable Packet Scheduling at Line Rate", SIGCOMM 2016, pp. 44–57, <a href="https://doi.org/10.1145/2934872.2934899">doi:10.1145/2934872.2934899</a>. The PIFO paper Eiffel extends; read after the single-shaper learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> G. Varghese, T. Lauck, "Hashed and Hierarchical Timing Wheels", SOSP '87, pp. 25–38, <a href="https://doi.org/10.1145/41457.37504">doi:10.1145/41457.37504</a>. The wheel behind Carousel and <code>kernel/time/timer.c</code>. Read with the moving-window learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> F. Checconi, L. Rizzo, P. Valente, "QFQ: Efficient Packet Scheduling With Tight Guarantees", IEEE/ACM Transactions on Networking 21(3), 2013, pp. 802–816, <a href="https://doi.org/10.1109/TNET.2012.2215881">doi:10.1109/TNET.2012.2215881</a>. FFS fair queueing that shipped as <code>sch_qfq</code>; read for the shifted bitmap.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> A. Saeed et al., "Eiffel: Efficient and Flexible Software Packet Scheduling", extended version, <a href="https://arxiv.org/abs/1810.03060">arXiv:1810.03060</a>. Adds hClock in userspace (footnote 2, p. 25).</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="rank-as-integer">Ranks are integers in a moving window</li>
+          <li data-strand="ffs-levels">One find-first-set per level</li>
+          <li data-strand="moving-window">A window that moves</li>
+          <li data-strand="granularity">Bucket width against order</li>
+          <li data-strand="single-shaper">Every limit becomes a time</li>
+          <li data-strand="timer-and-tree">Where the cores went</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 9 "Eiffel" (A. Saeed, Y. Zhao, N. Dukkipati, M. Ammar, E. Zegura, K. Harras, A. Vahdat, "Eiffel: Efficient and Flexible Software Packet Scheduling", NSDI '19), printed pp. 17–31, selected pp. 18–19, 21–22, 24, 26, 28.
+I have read the chapter and the after half of ch09.html. Lock in.
+Strands: rank-as-integer (Ranks are integers in a moving window), ffs-levels (One find-first-set per level), moving-window (A window that moves), granularity (Bucket width against order), single-shaper (Every limit becomes a time), timer-and-tree (Where the cores went).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch09.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch09.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch08.html">← Teaching NICs about time</a><a href="index.html">All chapters</a><a href="ch10.html">BBR →</a></nav>
+<footer>From a full buffer to BBR · chapter 9 reads A. Saeed, Y. Zhao, N. Dukkipati, M. Ammar, E. Zegura, K. Harras, A. Vahdat, "Eiffel: Efficient and Flexible Software Packet Scheduling", 16th USENIX Symposium on Networked Systems Design and Implementation (NSDI '19), printed pp. 17–31 (selected pages). Page references are to the proceedings' printed folios (printed = PDF + 15); the kernel is cited by file:line in v7.2. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

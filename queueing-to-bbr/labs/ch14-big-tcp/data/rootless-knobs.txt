@@ -1,0 +1,26 @@
+bigpair: snd:s0 gso_max_size 65536 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+bigpair: rcv:c0 gso_max_size 65536 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+bigpair: snd 10.0.14.1 fd14::1 -> rcv 10.0.14.2 fd14::2 | gro-path 0 | rate none
+$ id -u; ip -n snd -d link show s0   (inside bigpair.sh, before any change)
+0
+gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536
+$ ip -n snd link set s0 gso_max_size 185000 gro_max_size 185000
+exit 0
+$ ip -n snd link set s0 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000
+exit 0
+$ ip -n snd link set s0 gso_max_size 524280
+exit 0
+$ ip -n snd link set s0 gso_max_size 524281
+Error: too big gso_max_size.
+exit 2
+$ ip -n snd link set s0 gro_max_size 600000
+Error: too big gro_max_size.
+exit 2
+gso_max_size 524280 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 185000 gso_ipv4_max_size 185000 gro_ipv4_max_size 185000
+$ ip -n snd link set s0 gso_max_size 32000
+gso_max_size 32000 gso_ipv4_max_size 32000 
+$ ip -n snd link add d0 type dummy; ip -n snd link set d0 gso_max_size 185000
+Error: too big gso_max_size.
+exit 2
+$ cat /proc/sys/net/core/max_skb_frags
+cat: /proc/sys/net/core/max_skb_frags: No such file or directory

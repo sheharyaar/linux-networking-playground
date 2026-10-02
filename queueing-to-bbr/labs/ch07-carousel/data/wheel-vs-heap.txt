@@ -1,0 +1,12 @@
+# 2026-10-02T14:54:04+05:30 7.2.6-arch2-1; the solution wheel from the page's toggle, run through wheel_starter.py's driver
+# python3 wheel_starter.py --flows 100 1000 10000 100000 --releases 300000   (with TimingWheel written)
+g = 1 us, poll every 1 slot(s), 300000 releases per run, 12 Gbit/s in total
+   scheduler   flows  queued   horizon  released        error (us)  ops/pkt  ns/pkt
+        heap     100     200     0.8ms    300002      +0.0 .. +1.0      8.8     528
+       wheel     100     200     0.8ms    300002      -1.0 .. +0.9      4.1     529
+        heap    1000    2000     8.0ms    300000      +0.0 .. +1.0     12.1     645
+       wheel    1000    2000     8.0ms    300000      -1.0 .. +0.2      4.0     548
+        heap   10000   20000    80.0ms    300002      +0.0 .. +1.0     15.4     832
+       wheel   10000   20000    80.0ms    300002      -1.0 .. +0.9      4.0     586
+        heap  100000  200000   800.0ms    300001      +0.0 .. +1.0     18.8    2522
+       wheel  100000  200000   800.0ms    300001      -1.0 .. +1.0      4.0    1275

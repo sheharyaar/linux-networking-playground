@@ -1,0 +1,9 @@
+tcp_tso_rtt_log = 9
+-- after tc qdisc replace dev s0 root fq:
+maxrate 24Mbit
+== before (s0: qdisc fq maxrate 24Mbit cap 24 Mbit/s, tso_rtt_log left at 9)
+rtt:45.435/0.015 unacked:90 minrtt:0.037 
+bursts (packets < 30 us apart): 112 of 45 packets, 2 of 1 packets, 2 of 44 packets; median gap between bursts 22658 us
+== edt (s0: qdisc fq cap 24 Mbit/s, tso_rtt_log left at 9)
+rtt:0.162/0.029 unacked:90 minrtt:0.014 
+bursts (packets < 30 us apart): 118 of 45 packets, 1 of 25 packets; median gap between bursts 21666 us

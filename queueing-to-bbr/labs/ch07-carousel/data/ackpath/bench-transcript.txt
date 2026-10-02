@@ -1,0 +1,9 @@
+shapers.sh: htb-snd, 16 flows at 500kbit each
+mflow recv: listening on :5001-5016
+mflow send: 16 flows, goodput after 5 s (Mbit/s): min 0.478 median 0.478 max 0.479 total 7.65; RTT median 155 ms; retransmissions 0
+shapers.sh: fq-snd, 16 flows at 500kbit each
+mflow recv: listening on :5001-5016
+mflow send: 16 flows, goodput after 5 s (Mbit/s): min 0.478 median 0.478 max 0.479 total 7.65; RTT median 154 ms; retransmissions 0
+shapers.sh: htb-rtr, 16 flows at 500kbit each
+mflow recv: listening on :5001-5016
+mflow send: 16 flows, goodput after 5 s (Mbit/s): min 0.484 median 0.484 max 0.484 total 7.74; RTT median 1743 ms; retransmissions 1614

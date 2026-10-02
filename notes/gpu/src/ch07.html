@@ -1,0 +1,188 @@
+    <section id="ch7" class="chapter">
+      <span class="chnum">Chapter 7</span>
+      <h2>SASS: what the SM runs</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag ISA">ISA</span> — Last chapter we read <code>matvec_warp</code> as PTX, the virtual instruction set that is the same on every bench. Now <code>ptxas</code> turns it into SASS for one real SM, and the three benches finally stop looking alike. This is the code the warp scheduler of the SM chapter issues.</p>
+
+      <h3>What <code>ptxas</code> decides</h3>
+      <p>PTX left four decisions open, and <code>ptxas</code> makes all of them. It maps about 140 virtual registers onto real ones, a job called <b>register allocation</b>. It chooses the real instructions. It orders them so that slow operations start early. And it writes, into every instruction, the timing hints the scheduler needs. The result for Ada is <code>cuobjdump -sass</code>'s listing, and here is the start of <code>matvec_warp</code>:</p>
+<pre><code>/*0000*/        MOV R1, c[0x0][0x28] ;                    // stack pointer for local memory
+/*0010*/        S2R R9, SR_CTAID.X ;                      // %ctaid.x
+/*0020*/        S2R R2, SR_TID.X ;                        // %tid.x
+/*0030*/        IMAD R9, R9, c[0x0][0x0], R2 ;            // blockIdx.x * blockDim.x + threadIdx.x
+/*0040*/        SHF.R.U32.HI R9, RZ, 0x5, R9 ;            // / 32  -> warp
+/*0050*/        ISETP.GE.AND P0, PT, R9, c[0x0][0x17c], PT ; // warp >= d ?
+/*0060*/    @P0 EXIT ;
+/*0070*/        LOP3.LUT R2, R2, 0x1f, RZ, 0xc0, !PT ;     // % 32  -> lane
+/*0080*/        ULDC.64 UR4, c[0x0][0x118] ;
+/*0090*/        BSSY B0, 0xaf0 ;                          // reconvergence point for what follows</code></pre>
+      <p class="lcap">Listing 7.1 — the first instructions of <code>matvec_warp</code> for <code>sm_89</code>, from <code>cuobjdump -sass</code> (CUDA 13.4). Encodings removed, comments added.</p>
+      <p>Read it against listing 6.2 and every line has a twin. <code>S2R</code> reads a special register: <code>SR_TID.X</code> is <code>%tid.x</code>. <code>IMAD</code> is integer multiply-add, and <code>c[0x0][0x0]</code> is <code>blockDim.x</code>, which lives in constant bank 0 next to the kernel's arguments; <code>d</code> is at <code>c[0x0][0x17c]</code>. <code>ISETP</code> sets a predicate, and <code>@P0 EXIT</code> is the guarded early return. Registers are named <code>R0</code> to <code>R254</code>, predicates <code>P0</code> to <code>P6</code>, and <code>RZ</code> and <code>PT</code> are a register that always reads zero and a predicate that is always true.</p>
+      <p>Two kinds of names have no PTX twin. <code>ULDC</code> and the <code>UR4</code> it writes belong to the <b>uniform datapath</b>, which Turing introduced: a small set of registers and instructions for values that are the same in every lane of a warp, such as a base address. Computing such a value once per warp instead of 32 times saves ordinary registers and lane work. And <code>BSSY B0, 0xaf0</code> with its later partner <code>BSYNC B0</code> marks a <b>convergence barrier</b>: lanes that split up inside the region wait at <code>BSYNC</code> until all of them arrive. This is the reconvergence of the SIMT chapter, written as two instructions. Pascal SASS uses an older pair, <code>SSY</code> and <code>SYNC</code>, that pushes and pops the mask stack instead.</p>
+
+      <h3>The loop, as the SM sees it</h3>
+      <p>The PTX loop of listing 6.2 had four copies of "load, load, multiply-add". <code>ptxas</code> unrolled it again, to sixteen, and moved the loads up:</p>
+<pre><code>/*0450*/        LDG.E.CONSTANT R27, [R6.64+-0x100] ;      // W, copy 1
+/*0460*/        LDG.E.CONSTANT R28, [R4.64+-0x100] ;      // x, copy 1
+/*0470*/        LDG.E.CONSTANT R33, [R6.64+-0x80] ;
+        …                                                 // 22 loads in a row
+/*05a0*/        LDG.E.CONSTANT R15, [R4.64+0x400] ;
+/*05b0*/        FFMA R28, R27, R28, R22 ;                 // first multiply-add
+/*05c0*/        LDG.E.CONSTANT R22, [R6.64+0x480] ;
+        …                                                 // loads and FFMAs interleaved
+/*06d0*/        IADD3 R6, P2, R6, 0x800, RZ ;             // W pointer += 2,048 bytes
+        …
+/*07a0*/        FFMA R22, R29, R30, R24 ;                 // sixteenth multiply-add
+/*07b0*/   @!P1 BRA 0x450 ;</code></pre>
+      <p class="lcap">Listing 7.2 — the main loop of <code>matvec_warp</code> for <code>sm_89</code>, abridged from 55 instructions.</p>
+      <p>This is latency hiding done by the compiler inside one warp. Twenty-two loads leave before the first multiply-add needs any of them, so each warp has many requests in flight at once, which is what the SM chapter said warps alone could not provide. <code>LDG</code> is a global load; <code>.E</code> means a 64-bit address; <code>.CONSTANT</code> is the read-only path that <code>ld.global.nc</code> asked for. <code>FFMA</code> is the FP32 fused multiply-add, one per lane, which on Ada fills one sub-partition's 32 lanes for a cycle. The pointer steps by <code>0x800</code>, 2,048 bytes: 16 copies × 32 lanes × 4 bytes.</p>
+      <p>The tail is the shuffle tree of diagram 4.3, one instruction per step:</p>
+<pre><code>/*0af0*/        SHFL.DOWN PT, R3, R22, 0x10, 0x1f ;
+/*0b10*/        FADD R3, R3, R22 ;
+/*0b20*/        SHFL.DOWN PT, R0, R3, 0x8, 0x1f ;
+/*0b30*/        FADD R0, R3, R0 ;
+        …                                                 // offsets 4, 2, 1
+/*0b90*/    @P0 EXIT ;                                    // every lane but lane 0 leaves
+/*0bd0*/        STG.E [R2.64], R7 ;                       // lane 0 stores y[warp]
+/*0be0*/        EXIT ;</code></pre>
+      <p class="lcap">Listing 7.3 — the reduction and the store, <code>sm_89</code>.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  subgraph P["PTX, from cicc"]
+    direction LR
+    p1["4 copies of: ld.global.nc, ld.global.nc, fma.rn.f32"]
+    p2["pointer += 512"]
+    p3["about 140 virtual registers"]
+  end
+  subgraph X["ptxas, at build time or as the driver's JIT"]
+    direction LR
+    x1["unroll again"] --> x2["hoist the loads"] --> x3["allocate registers"] --> x4["write the timing hints"]
+  end
+  subgraph S["SASS for sm_89"]
+    direction LR
+    s1["22 LDG.E.CONSTANT, then FFMA and LDG interleaved, 16 FFMA in all"]
+    s2["pointer += 0x800"]
+    s3["40 real registers"]
+  end
+  P -.-> X -.-> S
+  style s1 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 7.1 — What <code>ptxas</code> did to the matvec loop.</b> Notice that the same work comes out with four times the unrolling and the loads moved to the front. The highlighted box is the instruction-level latency hiding the SM chapter asked for. It costs registers, which is the reason for the next section.</figcaption>
+      </figure>
+
+      <h3>Timing hints and scoreboards</h3>
+      <p>A CPU core discovers at run time which instructions are ready, with large out-of-order hardware. An SM does very little of that, because the compiler has already written the answer down. Each SASS instruction on Volta and later carries <b>control codes</b> in spare bits of its 128-bit encoding. They are not shown by <code>cuobjdump</code>; the microbenchmark papers in the reading list decoded them. They say how many cycles to wait before this warp's next instruction can issue, whether the scheduler should prefer to switch warps here, and which <b>scoreboard</b> to use.</p>
+      <p>A scoreboard is a small counter the hardware keeps per warp for operations whose latency is not fixed, such as memory loads and shuffles. The instruction that starts such an operation names a scoreboard to set. The instruction that needs its result names the scoreboards to wait on. Until the data arrives, that warp is not ready, and the scheduler issues from another one. Fixed-latency arithmetic like <code>FFMA</code> needs no scoreboard: the compiler knows it takes a few cycles and writes a stall count instead.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+sequenceDiagram
+  participant WS as Warp scheduler
+  participant W0 as Warp 0
+  participant W1 as Warp 1
+  participant LSU as Load/store unit and memory
+  WS->>W0: issue LDG R27, sets scoreboard 0
+  W0->>LSU: request a sector of W
+  WS->>W0: issue 21 more loads, same scoreboard
+  WS->>W0: next is FFMA, which waits on scoreboard 0
+  Note over W0: not ready: data still in flight
+  WS->>W1: issue W1's next instruction instead
+  LSU-->>W0: data arrives, scoreboard 0 clears
+  WS->>W0: issue FFMA R28, R27, R28, R22
+        </div>
+        <figcaption><b>Diagram 7.2 — How one load becomes a wait without anyone polling.</b> Notice that warp 0 never spins. Its instruction carries "wait on scoreboard 0", the scheduler skips it until the counter clears, and warp 1 fills the gap. This is diagram 2.2, with the mechanism named.</figcaption>
+      </figure>
+
+      <h3>Registers, spills and occupancy</h3>
+      <p>Every register a thread holds is multiplied by every resident thread. Using more registers can make one warp faster, through more unrolling and more loads in flight, and the SM slower, through fewer resident warps. Diagram 7.3 draws the rule from the SM chapter for every register count from 16 to 128.</p>
+
+      <figure class="dia">
+        @@SVG:regocc@@
+        <figcaption><b>Diagram 7.3 — Registers per thread against resident warps per SM.</b> Notice the flat part on the left, where the SM's warp cap binds and extra registers are free, then the stairs. Our three kernels on Ada sit at the orange points: the naive and warp kernels are still on the flat part, and the float4 kernel has stepped down to 36 warps.</figcaption>
+      </figure>
+
+      <p>You can push back. <code>-maxrregcount=N</code> caps the registers of every kernel in a file. <code>__launch_bounds__(threads, blocks)</code> on one kernel tells <code>ptxas</code> to fit that many blocks of that size per SM. If the code needs more registers than allowed, <code>ptxas</code> stores some values in local memory and reloads them later. That is a <b>spill</b>, and spills go to DRAM, through the caches. Capping the lab kernels at 24 registers shows it:</p>
+<pre><code>$ nvcc -O3 -cubin -arch=sm_89 -maxrregcount=24 -Xptxas -v matvec.cu -o out/matvec.r24.sm_89.cubin
+ptxas info : Compiling entry function '_Z12matvec_warp4PKfS0_Pfii' for 'sm_89'
+    88 bytes stack frame, 128 bytes spill stores, 128 bytes spill loads
+ptxas info : Used 24 registers, used 0 barriers, 88 bytes cumulative stack size, 384 bytes cmem[0]
+ptxas info : Compiling entry function '_Z11matvec_warpPKfS0_Pfii' for 'sm_89'
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+$ cuobjdump -sass -fun _Z12matvec_warp4PKfS0_Pfii out/matvec.r24.sm_89.cubin | grep -E 'STL|LDL' | head -3
+        STL [R1+0x18], R8 ;
+        STL [R1+0x18], R4 ;
+        LDL.LU R16, [R1+0x18] ;</code></pre>
+      <p class="lcap">Listing 7.4 — a forced spill, on this laptop. <code>STL</code> and <code>LDL</code> are stores and loads to local memory, addressed from the stack pointer <code>R1</code> that listing 7.1 set up first.</p>
+      <p>The warp kernel unrolled less and fitted into 24 registers. The float4 kernel did not, and now carries 55 local-memory instructions per thread. For a memory-bound kernel that is extra traffic on exactly the resource that sets its speed.</p>
+
+      <h3>The same source on Hopper</h3>
+      <p>Compile for <code>sm_90</code> and the same loop is recognisable but not identical. Kernel arguments sit at different offsets, starting at <code>c[0x0][0x210]</code> instead of <code>c[0x0][0x160]</code>. Loads carry a memory descriptor, <code>LDG.E.CONSTANT R17, desc[UR4][R6.64+-0x100]</code>, a uniform register that holds the access policy. And register counts drop: 29, 32 and 44 against 38, 40 and 53. That is the whole reason SASS is per architecture. The meaning of the program is fixed in PTX; how well it fits the hardware is decided again for each SM design.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026. Ada and Hopper columns from this laptop's <code>cuobjdump</code>; Pascal from NVIDIA's instruction-set reference in the CUDA 12 binary utilities and the microbenchmark papers</caption>
+        <tr><th></th><th>Pascal (sm_61)</th><th>Ada (sm_89)</th><th>Hopper (sm_90)</th></tr>
+        <tr><td>Instruction encoding</td><td>64-bit instructions, with a separate control word for each group of three</td><td>128-bit, control codes inside each instruction</td><td>128-bit, control codes inside each instruction</td></tr>
+        <tr><td>Reconvergence</td><td><code>SSY</code> / <code>SYNC</code>, a mask stack</td><td><code>BSSY</code> / <code>BSYNC</code>, convergence barriers</td><td><code>BSSY</code> / <code>BSYNC</code></td></tr>
+        <tr><td>Uniform datapath (<code>UR</code>, <code>ULDC</code>)</td><td>no</td><td>yes</td><td>yes</td></tr>
+        <tr><td>Kernel arguments in constant bank 0 from</td><td>not read on this laptop</td><td><code>c[0x0][0x160]</code></td><td><code>c[0x0][0x210]</code></td></tr>
+        <tr><td>Registers: naive / warp / float4</td><td>needs a CUDA 12 <code>ptxas</code></td><td>38 / 40 / 53</td><td>29 / 32 / 44</td></tr>
+        <tr><td>Tool to read it on this laptop</td><td>CUDA 12.x <code>cuobjdump</code>; 13.x lists Turing and later</td><td><code>cuobjdump</code>, <code>nvdisasm</code> 13.4</td><td>same</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+<pre><code>cuobjdump -sass -fun _Z11matvec_warpPKfS0_Pfii out/matvec.sm_89.cubin | grep -cE 'LDG'   # 58
+cuobjdump -sass -fun _Z11matvec_warpPKfS0_Pfii out/matvec.sm_90.cubin | grep -m3 LDG
+nvdisasm -c -g out/matvec.sm_89.cubin | less          # control flow with labels</code></pre>
+        <p>Then build with <code>-lineinfo</code> and run <code>nvdisasm -g -c</code> on the cubin: each SASS instruction is tagged with the <code>matvec.cu</code> line it came from. Profilers use the same table to show a stall against a source line, and the tooling chapter leans on it.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p><code>ptxas</code> turns PTX into SASS for one SM design. It allocates real registers, picks real instructions, orders them so that slow ones start early, and writes control codes into each instruction: stall counts for fixed-latency arithmetic, and scoreboards that variable-latency loads set and their consumers wait on. For our matvec on Ada it unrolled the loop sixteen times and issued twenty-two loads before the first <code>FFMA</code>, reconverged divergent paths with <code>BSSY</code> and <code>BSYNC</code>, and used the uniform datapath for warp-wide values. More registers mean fewer resident warps, and capping them causes spills to local memory, visible as <code>STL</code> and <code>LDL</code>. The same PTX on Hopper becomes different SASS with fewer registers.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>register allocation</dt><dd>Mapping virtual registers onto the SM's real ones; done by <code>ptxas</code>.</dd>
+          <dt>uniform datapath</dt><dd>Registers (<code>UR</code>) and instructions for values shared by every lane of a warp; Turing and later.</dd>
+          <dt>convergence barrier</dt><dd><code>BSSY</code> / <code>BSYNC</code>: where divergent lanes wait for each other to reconverge (Volta and later).</dd>
+          <dt>control codes</dt><dd>Bits in each SASS instruction, written by the compiler, giving stall counts, yield hints and scoreboards.</dd>
+          <dt>scoreboard</dt><dd>A per-warp counter set by a variable-latency instruction and waited on by the instruction that needs its result.</dd>
+          <dt><code>-maxrregcount</code> / <code>__launch_bounds__</code></dt><dd>Cap registers for a whole file / for one kernel, by block size and blocks per SM.</dd>
+          <dt>spill</dt><dd>A value moved from registers to local memory because the register budget ran out (<code>STL</code>, <code>LDL</code>).</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: in listing 7.2 each <code>LDG</code> loads one 4-byte float per lane. How many bytes does one warp have in flight just before the first <code>FFMA</code> issues, and how many such warps would one Ada SM need to have about 64 KB of loads outstanding?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>2,816 bytes per warp, and about 24 warps. Twenty-two loads × 32 lanes × 4 bytes = 2,816 bytes, and 65,536 / 2,816 ≈ 23.3, so 24 warps.</p>
+          <p>That fits inside Ada's cap of 48, and this kernel can be fully resident (diagram 7.3), so there is room to spare. Why bytes in flight matter: to keep memory busy, a GPU must have outstanding at once roughly bandwidth × latency bytes, so deep load batches and many warps both count. The near-miss is to count only the 11 loads of W and forget the 11 of x. In this kernel x is loaded alongside W at every step, although it is tiny and nearly always comes from cache.</p>
+        </details>
+        <p>2. A colleague adds <code>__launch_bounds__(1024, 2)</code> to a kernel to "raise occupancy". It gets slower, and <code>-Xptxas -v</code> now reports spill stores and loads. Explain the chain from the attribute to the slowdown.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Two blocks of 1,024 threads is 2,048 threads per SM, so <code>ptxas</code> must fit every thread into 65,536 / 2,048 = 32 registers. If the code wants more, it spills the excess to local memory (listing 7.4). Local memory is DRAM, so a memory-bound kernel gains extra traffic on the resource that limits it, and the extra warps cannot make up for that.</p>
+          <p>On Ada there is a second problem: the SM holds at most 1,536 threads (48 warps), so the second block cannot be resident anyway, and the cap buys nothing. The near-miss is "more occupancy is always better". Occupancy only helps if latency was the limit and it does not add bytes.</p>
+        </details>
+        <p>3. "Reading SASS is pointless, because PTX already says what the program does." Name two things in this chapter that only the SASS shows, and why each matters to someone writing probes.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>First, register counts and spills, and so occupancy. An injected probe adds code to the kernel and can push it over a register boundary (diagram 7.3), costing warps or causing spills that the PTX gives no sign of. Second, the real order of instructions: loads hoisted twenty-two deep, the loop unrolled sixteen times. A probe's timing and the kernel's own timing are both shaped by it.</p>
+          <p>Others count too: kernel arguments at architecture-specific constant-bank offsets, <code>BSSY</code>/<code>BSYNC</code> regions, and Hopper's memory descriptors. The sentence is right that the meaning is fixed in PTX. It is wrong that the cost is.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html#instruction-set-reference">CUDA Binary Utilities: Instruction set reference</a>, with the tables for <a href="https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html#nvidia-ampere-gpu-and-ada-instruction-set">Ampere and Ada</a> and <a href="https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html#hopper-instruction-set">Hopper</a>. One line per opcode. Keep it open while reading any SASS.</li>
+          <li class="ref" data-layer="ISA"><span class="tag ISA">ISA</span><a href="https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html#nvdisasm">CUDA Binary Utilities: nvdisasm</a>, for control-flow graphs and line information, the two features <code>cuobjdump</code> lacks.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://arxiv.org/abs/1804.06826">Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking</a> (Jia et al., 2018). Decodes the control codes, measures instruction latencies, and compares against Pascal. The best public account of what is in those encoding bits.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://arxiv.org/abs/2402.13499">Benchmarking and Dissecting the Nvidia Hopper GPU Architecture</a> (Luo et al., 2024). The same kind of study for Hopper, against Ada and Ampere.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy">CUDA Best Practices Guide: Occupancy</a>, including the register arithmetic of diagram 7.3 and <code>__launch_bounds__</code>.</li>
+        </ul>
+      </div>
+    </section>

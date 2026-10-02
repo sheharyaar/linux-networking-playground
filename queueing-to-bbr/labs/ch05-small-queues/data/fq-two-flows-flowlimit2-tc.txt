@@ -1,0 +1,17 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+flow recv: listening on :5001
+flow recv: listening on :5002
+qdisc fq 808b: root refcnt 17 limit 10000p flow_limit 2p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 2644192 bytes 1756 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 12112b 4p requeues 0
+  flows 2 (inactive 0 throttled 2) band0_pkts 0 band1_pkts 4 band2_pkts 0 next_packet_delay 4.41ms
+  gc 0 highprio 0 fastpath 23 throttled 862 latency 11.2us
+flow send: cc=reno max_pacing_rate=2Mbit 1514609 bytes acked in 6.1 s = 1.99 Mbit/s, total_retrans=0, rows=602
+flow send: cc=reno max_pacing_rate=5Mbit 3851681 bytes acked in 6.2 s = 4.95 Mbit/s, total_retrans=0, rows=617
+flow recv: 10.0.1.1 sent 4128768 bytes in 6.62 s = 4.99 Mbit/s
+flow recv: 10.0.1.1 sent 1703936 bytes in 6.79 s = 2.01 Mbit/s
+qdisc fq 808b: root refcnt 17 limit 10000p flow_limit 2p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us 
+ Sent 6099544 bytes 4042 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  flows 2 (inactive 2 throttled 0) band0_pkts 0 band1_pkts 0 band2_pkts 0
+  gc 0 highprio 0 fastpath 26 throttled 2002 latency 11.5us

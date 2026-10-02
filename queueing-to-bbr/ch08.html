@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teaching NICs about time · chapter 8 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 8 of 14</p>
+    <h1>Teaching NICs about time</h1>
+    <p class="sub">After this chapter you can explain why Linux stopped deriving each packet's send time from a rate and started writing the time into the packet, read that time off TCP, fq and a capture on kernel 7.2, and stamp, cap or drop your own packets' times with <code>SO_TXTIME</code>, fq and ETF.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The readings</h2>
+    <ol><li><a href="#book">19 slides, a cover letter, the source</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-afap">AFAP: the queue decides when</a></li>
+        <li><a href="#s-tcp-stamps-departure">TCP writes the departure time</a></li>
+        <li><a href="#s-rtt-from-departure">The RTT clock starts at departure</a></li>
+        <li><a href="#s-fq-honours-stamp">fq honours the stamp</a></li>
+        <li><a href="#s-so-txtime">Any socket can stamp, on fq's clock</a></li>
+        <li><a href="#s-etf-launch-time">ETF: a launch time that can be missed</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 8 · before you read</span>
+      <h2>Teaching NICs about time</h2>
+      <p class="chmeta">~6 min before · Jacobson's 19 slides, Dumazet's cover letter and about 250 lines of kernel source (~1 h) · ~22 min after · <span class="tag HOST">HOST</span><br>
+        <span class="spine">A 24 Mbit/s flow whose RTT drops from 2.195 ms to 0.165 ms (the cover letter's two <code>ss</code> lines): the same flow, the same pacing rate, and one change in who decides when each packet leaves.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>On 21 September 2018 Eric Dumazet posted nine patches. The cover letter shows one TCP flow on a LAN, capped at 24 Mbit/s with <code>SO_MAX_PACING_RATE</code>, before and after the patches. Before: <code>rtt:2.195</code>. After: <code>rtt:0.165</code>. Both lines show the same <a href="index.html#g-cwnd">cwnd</a> (20), the same 4 unacknowledged packets, and the same 24 Mbit/s pacing rate. The network did not change. The sender changed where each packet's send time is decided, and with it the moment TCP starts the clock that measures its RTT.</p>
+      <p>The small-queues chapter left Linux in the 2013 arrangement. TCP computes a <a href="index.html#g-pacing-rate">pacing rate</a>. fq turns that rate into gaps and parks each <a href="index.html#g-fq-flow">fq flow</a> in its <a href="index.html#g-throttled-tree">throttled tree</a> until the next packet is due. TCP hands an skb down and forgets it; fq alone decides when it leaves. Two months before the patches, Van Jacobson's netdev keynote called this split the old model of networking in miniature: the sender says what to send, and a queue decides when. His fix is to tell the queue, and in the end the network card, the time each packet should leave.</p>
+      <p>The readings are short: 19 slides, a one-page cover letter, and about 250 lines of v7.2 source. The slides give the reason, the cover letter gives the change and its measurement, and the source shows the mechanism in TCP, in fq, in the socket layer, and in a second qdisc, ETF, built for cards that can send at an exact instant.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-afap">AFAP (as fast as possible)</dt><dd>Jacobson's name for the contract between a protocol and its device queue: the sender says what to send and how much, and the queue's drain rate decides how fast (slide 7). His footnote calls it <a href="index.html#g-work-conserving">work-conserving</a>. The opposite is AFAN, "as fast as necessary".</dd>
+        <dt id="w-edt">earliest departure time (EDT)</dt><dd>A time written into each packet before which it must not leave. A qdisc or a network card holds the packet until then; it may leave later.</dd>
+        <dt id="w-skb-tstamp">skb->tstamp</dt><dd>The 64-bit field of an skb that carries the departure time on the way out (on the way in, it holds the arrival time). TCP reads the same bits under the name <code>skb_mstamp_ns</code>.</dd>
+        <dt id="w-clock-tai">CLOCK_TAI</dt><dd>International Atomic Time: a clock with no leap seconds, 37 s ahead of UTC once the system has been told the offset. Network cards that keep time with PTP, the Precision Time Protocol, count TAI.</dd>
+        <dt id="w-so-txtime">SO_TXTIME</dt><dd>A socket option, since Linux 4.19, that lets a socket attach a departure time to each packet it sends, in a control message called <code>SCM_TXTIME</code>, on a clock the socket names.</dd>
+        <dt id="w-etf">ETF (earliest txtime first) qdisc</dt><dd>A qdisc that sorts packets by departure time, releases each one a fixed <code>delta</code> before its time, and drops any packet whose time has passed. It is made for cards that can launch a packet at a given instant.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  subgraph S["Timestamp model, since Linux 4.20"]
+    direction LR
+    T2["TCP<br/>writes the departure time<br/>into the skb and starts<br/>its RTT clock there"] -->|"skb with a time"| F2["fq or ETF<br/>holds the skb<br/>until its time"]
+    U["UDP application<br/>with SO_TXTIME"] -->|"skb with a time"| F2
+    F2 ==> W2["Network card, then wire"]
+  end
+  subgraph R["Rate model, 2013 to 2018"]
+    direction LR
+    T1["TCP<br/>sets the pacing rate,<br/>starts its RTT clock now"] -->|"skb, no time"| F1["fq<br/>derives the next gap<br/>from the rate"]
+    F1 ==> W1["Wire"]
+  end
+  R ~~~ S
+  style F2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 8.1 — Who decides when a packet leaves, before and after the 2018 change.</b> Notice where TCP's RTT clock starts. In the rate model it starts when TCP hands the skb down, so any time the skb spends waiting in fq counts as network delay. In the timestamp model it starts at the departure time TCP wrote, which is when fq lets the skb go. The UDP arrow is the socket option this chapter's system card follows.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Reading, part</th><th>Where</th><th>How</th><th>Look for</th></tr>
+        <tr><td>Jacobson, "Evolving from AFAP": the history</td><td>slides 1–6</td><td><span class="how skim">skim</span></td><td>One idea: IP and TCP say nothing about application, efficiency or network structure (slide 6).</td></tr>
+        <tr><td>AFAP defined</td><td>slide 7</td><td><span class="how close">close</span></td><td>"'How fast' is implicit in queue drain rate", and the footnote "a.k.a. work conserving".</td></tr>
+        <tr><td>Why AFAP stopped working</td><td>slides 8–13</td><td><span class="how close">close</span></td><td>Slide 9's curve is the <a href="index.html#g-md1">M/D/1</a> argument the queueing chapter measured. Then the claim on slide 13: the enforcement must sit just in front of, or in, the card.</td></tr>
+        <tr><td>Carousel's two pieces, and what qdiscs become</td><td>slides 14–18</td><td><span class="how close">close</span></td><td>A departure time in every skb and a <a href="index.html#g-timing-wheel">timing wheel</a>. Its <a href="index.html#g-horizon">horizon</a>, "ETooFar", and "qdiscs become purely computational". The Carousel chapter read the paper behind slide 14.</td></tr>
+        <tr><td>Session page abstract</td><td>one page</td><td><span class="how skim">skim</span></td><td>AFAN, and "we tell the NIC what to send but not when to send it".</td></tr>
+        <tr><td>Dumazet, "tcp: switch to Early Departure Time model", cover letter (merge <code>a88e24f270eb</code>; LWN mirrors it)</td><td>§1–§10</td><td><span class="how close">close</span></td><td>The four "early days" points (§1), the side effect on RTT (§2), the two <code>ss</code> lines (§9). Skip the diffstat.</td></tr>
+        <tr><td>Kernel v7.2, <code>net/ipv4/tcp_output.c</code>: <code>tcp_update_skb_after_send()</code>, <code>__tcp_transmit_skb()</code>, <code>tcp_pacing_check()</code></td><td>lines 1446–1468, 1553–1555, 2815–2832</td><td><span class="how close">close</span></td><td>Where the departure time is written, and how it moves forward after each send.</td></tr>
+        <tr><td><code>net/sched/sch_fq.c</code>: <code>fq_enqueue()</code>, <code>flow_queue_add()</code>, <code>fq_dequeue()</code></td><td>lines 594–662, 508–538, 761–766</td><td><span class="how close">close</span></td><td>What fq does with a stamp that is missing, in the past, out of order, or too far ahead.</td></tr>
+        <tr><td><code>net/core/sock.c</code>: <code>SO_TXTIME</code> and <code>SCM_TXTIME</code></td><td>lines 1613–1644, 3054–3090</td><td><span class="how close">close</span></td><td>Which clocks need <code>CAP_NET_ADMIN</code>, and the comment that says why.</td></tr>
+        <tr><td><code>net/sched/sch_etf.c</code>, the whole file</td><td>517 lines</td><td><span class="how skim">skim</span></td><td>Read <code>validate_input_params()</code>, <code>is_packet_valid()</code> and the dequeue (lines 44–106, 253–294). Skip the offload setup.</td></tr>
+      </table>
+      <p class="note">The cover letter has no page numbers, so this page cites paragraphs: §n is the nth paragraph, counting a bullet list or a quoted <code>ss</code> output with the paragraph that introduces it. It has ten. The LWN copy (article 766564) is the same text, mirrored on LWN's announcements page.</p>
+
+      <div class="carry" id="carry"><h4>Carry these into the readings</h4><ol>
+        <li>The cover letter's flow kept the same pacing rate, cwnd and unacknowledged count, yet its RTT fell from 2.195 to 0.165 ms. What did the RTT sample include before, and why not after?</li>
+        <li>Slide 14 says Carousel replaces a stack of queues with an EDT timestamp in every skb and a timing wheel. Which of the two did Linux adopt for fq, and what does fq do with a stamp too far in the future?</li>
+        <li>ETF accepts only <code>CLOCK_TAI</code>, while <code>SO_TXTIME</code> lets any user pick <code>CLOCK_MONOTONIC</code> but needs <code>CAP_NET_ADMIN</code> for any other clock. Why the difference?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="afap">AFAP: the queue decides when</li>
+          <li data-strand="tcp-stamps-departure">TCP writes the departure time</li>
+          <li data-strand="rtt-from-departure">The RTT clock starts at departure</li>
+          <li data-strand="fq-honours-stamp">fq honours the stamp</li>
+          <li data-strand="so-txtime">Any socket can stamp, on fq's clock</li>
+          <li data-strand="etf-launch-time">ETF: a launch time that can be missed</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 8 "Teaching NICs about time" (V. Jacobson, "Evolving from AFAP: Teaching NICs about time", netdev 0x12 keynote slides, July 2018; E. Dumazet, "tcp: switch to Early Departure Time model", cover letter of merge a88e24f270eb, September 2018; Linux v7.2 tcp_output.c, sch_fq.c, sock.c, sch_etf.c), cited by slide 1–19, cover-letter paragraph §1–§10 and file:line.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: afap (AFAP: the queue decides when), tcp-stamps-departure (TCP writes the departure time), rtt-from-departure (The RTT clock starts at departure), fq-honours-stamp (fq honours the stamp), so-txtime (Any socket can stamp, on fq's clock), etf-launch-time (ETF: a launch time that can be missed).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch08.md.
+End with a reading plan: for each row of the reading guide in ch08.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read</h2>
+      <p>The 19 slides (<code>web/07a-netdev0x12-afap-slides.pdf</code>; the abstract is in <code>web/07a-netdev0x12-afap-session.md</code>), the cover letter (<code>web/07b-edt-cover-letter.from-merge-a88e24f270eb.txt</code>, which ends with the nine commits), and the kernel functions in the reading guide, about an hour in all. Keep the three questions in mind and note the slide, paragraph or line where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 8 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. The cover letter's flow kept the same pacing rate, cwnd and unacknowledged count, yet its RTT fell from 2.195 to 0.165 ms. What did the RTT sample include before, and why not after? <span class="pageref">cover letter §2, §9</span></p>
+        <details class="ans"><summary>Answer</summary><p>The time each skb waited in fq. TCP's RTT sample is the ack's arrival minus the skb's stamp (<code>tcp_input.c:3647, 3714</code>). Before the series the stamp was the hand-down time, and fq then held the skb for two 1.009 ms gaps: TSQ keeps two 2-segment skbs below TCP. After it, the stamp is TCP's departure time (<code>tcp_output.c:1553–1555</code>), so the wait falls outside the sample (§2). Near miss: nothing got faster.</p></details>
+        <p>2. Slide 14 says Carousel replaces a stack of queues with an EDT timestamp in every skb and a timing wheel. Which of the two did Linux adopt for fq, and what does fq do with a stamp too far in the future? <span class="pageref">slides 14–16; <code>sch_fq.c</code></span></p>
+        <details class="ans"><summary>Answer</summary><p>The timestamp. fq kept its per-flow queues, sorted by stamp when needed (<code>sch_fq.c:508–538</code>), and its throttled tree under one timer (lines 761–766). A stamp beyond the horizon, 10 s by default, is dropped into <code>horizon_drops</code>, or with <code>horizon_cap</code> moved to now plus the horizon (lines 615–623). The wheel exists only as a card offload no v7.2 driver offers.</p></details>
+        <p>3. ETF accepts only <code>CLOCK_TAI</code>, while <code>SO_TXTIME</code> lets any user pick <code>CLOCK_MONOTONIC</code> but needs <code>CAP_NET_ADMIN</code> for any other clock. Why the difference? <span class="pageref"><code>sock.c:1625–1632</code>, <code>sch_etf.c:62–65</code></span></p>
+        <details class="ans"><summary>Answer</summary><p>Each clock has a different consumer. ETF feeds cards whose clocks follow PTP, which counts TAI (<code>sch_etf.c:62–65</code>). fq runs on <code>CLOCK_MONOTONIC</code> and, since v5.8, has a horizon that bounds what a bad stamp can do, so any socket may use that clock: fq "has enough safe guards" (<code>sock.c:1625–1626</code>). Near miss: TAI is no more precise; it only skips leap seconds.</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p>Jacobson starts from the contract IP and TCP inherited. Reliable delivery limits how much is sent, never how fast, so the speed is whatever a device queue drains (slide 7). That runs the bottleneck at 100%, which queueing theory calls fragile (slides 8–9). Fat buffers and host links slower than the fabric hid the cost until about 2012 (slides 10–11). The thing that decides when now sits upstream of the wire and sees only local traffic (slides 12–13).</p>
+      <p>The cure is Carousel's pair: a departure time in every skb, and a time-ordered scheduler in front of or in the card (slide 14). A timing wheel with an event horizon is cheap, can answer "ETooFar", and turns qdiscs into pure computation (slides 15–18).</p>
+      <p>Dumazet's series took the first half. From 2013 to 2018 fq derived each flow's gaps from its pacing rate, which inflated TCP's RTT samples by the time packets sat in fq and added a quantum artifact to RPC latency (§1, §2, §10). From 4.20 TCP writes its own departure time into <code>skb->tstamp</code> and fq honours it (§6), a role <code>SO_TXTIME</code> and ETF had given the field a release earlier (§5). The 24 Mbit/s flow's RTT fell from 2.195 to 0.165 ms (§9). In v7.2 fq also drops or caps stamps beyond a 10 s horizon, any socket may stamp on <code>CLOCK_MONOTONIC</code>, and ETF wants <code>CLOCK_TAI</code> and drops late packets.</p>
+
+      <h3 class="strand" id="s-afap">AFAP: the queue decides when</h3>
+      <p>TCP's reliable delivery limits how much is sent and says nothing about how fast (slide 7). So the contract between a protocol and its device is a queue, and the speed is whatever it drains. Jacobson calls this AFAP and footnotes it as work-conserving, a virtue of DRR and fq_codel in the shapers chapter. A work-conserving link never idles while a packet waits, so a sender that keeps it full runs the <a href="index.html#g-bottleneck">bottleneck</a> at 100% <a href="index.html#g-utilisation">utilisation</a>.</p>
+      <p>Slide 9 is the price, and the queueing chapter measured it on the bench's 10 Mbit/s link: the M/D/1 wait is 0.61 ms at \(\rho = 0.5\), 5.45 ms at 0.9 and 11.5 ms at 0.95. Slides 10–11: small bandwidth-delay products hid it until about 1995, then fat buffers and host links slower than the fabric until about 2012.</p>
+      <p class="erratum"><b>The slide's slip.</b> Slide 9's right panel is labelled M/D/1, but its curve is \(\rho/(1-\rho)\), the M/M/1 wait. At 300 dpi it reads 0.34, 1.00, 3.01 and 8.9 packet times at 25, 50, 75 and 90% load, against \(\rho/(1-\rho) = 0.33,\ 1,\ 3,\ 9\). The M/D/1 wait is half that (Bertsekas and Gallager, Eq. 3.45, p. 187), as the queueing chapter's netem points show. The argument stands: both curves grow without limit as \(\rho \to 1\).</p>
+      <p>Slides 12–13 give the fix: "AFAP isn't working for us now because it's local and our problems aren't." Whatever decides when must see every outgoing packet, so it belongs just in front of the card or in it, and the card must be told when as well as what. In the spine, TCP knew the 24 Mbit/s it wanted but could only hand fq a rate. Spacing packets by time lets a sender sit at the queueing chapter's <a href="index.html#g-operating-point">operating point</a>, a full pipe with nothing queued.</p>
+
+      <h3 class="strand" id="s-tcp-stamps-departure">TCP writes the departure time</h3>
+      <p>Since Linux 4.20 every TCP socket keeps a departure clock, <code>tcp_wstamp_ns</code>, the "departure time for next sent data packet" (<code>include/linux/tcp.h:283</code>). Each transmission stamps the skb with the clock, or with now if the clock is behind (cover letter §6):</p>
+      <pre><code>/* __tcp_transmit_skb(), tcp_output.c:1553–1555; the last line writes skb->tstamp */
+prior_wstamp = tp->tcp_wstamp_ns;
+tp->tcp_wstamp_ns = max(tp->tcp_wstamp_ns, tp->tcp_clock_cache);
+skb_set_delivery_time(skb, tp->tcp_wstamp_ns, SKB_CLOCK_MONOTONIC);</code></pre>
+      <p><code>skb->tstamp</code> and TCP's <code>skb_mstamp_ns</code> are one union (<code>include/linux/skbuff.h:909–912</code>): the qdisc's departure time and the start of TCP's RTT sample are the same 64 bits. After each send, <code>tcp_update_skb_after_send()</code> (lines 1446–1468) adds \(\text{len}/\text{rate}\). At the 24 Mbit/s cap a two-segment skb holds 2,896 bytes of payload, so the clock moves \(2896 / (3 \times 10^6) = 965\) µs; the TCP lab's capture shows pairs 964 µs apart.</p>
+      <p>If a send was late, the clock was pulled forward to now, and the difference becomes a credit that shortens the next step by up to half (lines 1460–1464). A send 300 µs late gives the next skb a 665 µs step, and the flow is back on schedule. The commit calls it "a token bucket with a depth of half an skb" (<code>a7a2563064e9</code>), the shapers chapter's <a href="index.html#g-token-bucket">token bucket</a>.</p>
+      <p>The stamp does not enforce itself. fq marks the socket fq-paced (<code>sch_fq.c:399–401</code>) and holds each skb until its stamp. Without fq, <code>tcp_pacing_check()</code> arms TCP's own hrtimer at <code>tcp_wstamp_ns</code> (lines 2815–2832), so the fallback with "very different behavior" (§3) enforces the same time: fq and fq_codel sent the same 964 µs pairs.</p>
+      <p class="since"><b>Since the cover letter.</b> The series moved TCP and fq to <code>CLOCK_TAI</code> to match ETF. A week later, before 4.20 shipped, Dumazet moved them back to <code>CLOCK_MONOTONIC</code> (<code>fb420d5d91c1</code>, 28 September 2018) because TAI jumped forward by almost 50 years on systems that set the offset late. v7.2 stamps TCP on <code>SKB_CLOCK_MONOTONIC</code> (line 1555).</p>
+
+      <h3 class="strand" id="s-rtt-from-departure">The RTT clock starts at departure</h3>
+      <p>TCP's RTT sample is the ack's arrival minus the stamp of the oldest skb it newly acknowledges (<code>tcp_clean_rtx_queue()</code>, <code>tcp_input.c:3647, 3714</code>). Before 4.20 the stamp meant "handed to the qdisc"; since, "allowed to leave". That is the spine.</p>
+      <p>Take the "before" line apart (§9). At 24 Mbit/s, <a href="index.html#g-tso-autosizing">TSO autosizing</a> gives \(3 \times 10^6 \gg 10 = 2929\) bytes: two segments, 3,028 bytes on the wire. <a href="index.html#g-tsq">TSQ</a> allows two such skbs below TCP. The 2013 fq gave each skb a gap of \(\max(\text{length}, \text{quantum})/\text{rate}\) as it left, with a 3,028-byte <a href="index.html#g-quantum">quantum</a>: \(3028 \times 8 / (24 \times 10^6) = 1.009\) ms. A new skb waits behind the other one, two gaps: 2.02 ms, which is <a href="index.html#g-littles-law">Little's law</a> with two skbs queued and one leaving every 1.009 ms. Add the after line's 0.165 ms: 2.18 ms, against the printed 2.195. The after line still shows <code>unacked:4</code>, because the same two skbs still wait. Their stamps now start the clock, so the <a href="index.html#g-sojourn-time">sojourn time</a> in fq (§2) stops counting as path delay.</p>
+      <figure class="dia"><div class="mermaid">
+sequenceDiagram
+  participant T as TCP
+  participant F as fq on the sender
+  participant R as Receiver
+  Note over T,R: Rate model. Two skbs below TCP, fq gives each a 1.009 ms gap
+  T->>F: skb C handed down, RTT clock starts
+  Note over F: C waits behind skb B, then for its own gap
+  F->>R: C leaves 2.02 ms later
+  R-->>T: ack after 0.03 ms, sample 2.05 ms
+  Note over T,R: Timestamp model. TCP stamps C with the time it may leave
+  T->>F: skb C stamped 1.93 ms ahead, RTT clock starts at the stamp
+  Note over F: C waits for its stamp in the throttled tree
+  F->>R: C leaves at its stamp
+  R-->>T: ack after 0.03 ms, sample 0.03 ms
+</div><figcaption><b>Diagram 8.2 — One skb's RTT sample under each model, with the bench's numbers (after the cover letter's §2 and §9).</b> Notice that skb C waits in fq for about 2 ms in both halves. Only the point where the RTT clock starts moves.</figcaption></figure>
+      <p>The goodput, <code>bytes_acked</code> over <code>busy</code>, is \(36{,}897{,}937 \times 8 / 12.851\ \text{s} = 22.97\) Mbit/s before and 24.00 after: the old fq paced wire bytes, TCP paces payload, and \(24 \times 2896/3028 = 22.95\). <code>send</code> is \(\text{cwnd} \times \text{MSS} \times 8/\text{srtt}\): 105.5, then 1,404 Mbit/s, arithmetic on the RTT.</p>
+      <p>The bench replays both lines. fq's <code>maxrate</code> still gives each skb a gap of its wire length over the rate from the moment it leaves (<code>sch_fq.c:796–833</code>). Under <code>fq maxrate 24mbit</code> plus the socket cap, those 1.009 ms gaps outrun TCP's 965 µs steps, so TCP's stamps collapse to hand-down times: the old model. <code>ss</code> printed <code>rtt:2.031/0.01 … minrtt:0.023</code> at 22.955 Mbit/s; with plain fq, <code>rtt:0.027/0.002 … cwnd:20 ssthresh:20 … unacked:4</code> at 24.001.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch08-ratemodel-->
+<svg viewBox="0 0 720 438" role="img" aria-label="RTT TCP measures on a 0.03 ms path when fq derives each gap from the rate, against when TCP stamps each departure time" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="240.0" y2="240.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="244.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="193.3" y2="193.3" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="197.3" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="570" y1="146.7" y2="146.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="150.7" text-anchor="end" fill="#898781">4</text>
+<line x1="58" x2="570" y1="100.0" y2="100.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="104.0" text-anchor="end" fill="#898781">6</text>
+<line x1="58" x2="570" y1="53.3" y2="53.3" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="57.3" text-anchor="end" fill="#898781">8</text>
+<line x1="58" x2="570" y1="240.0" y2="240.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="135.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 135.0)">RTT, rate model (ms)</text>
+<polyline points="72.1,34.5 72.3,38.1 72.6,41.7 72.8,45.1 73.1,48.4 73.4,51.6 73.6,54.7 73.9,57.7 74.1,60.6 74.4,63.4 74.6,66.1 74.9,68.7 75.2,71.3 75.4,73.8 75.7,76.2 75.9,78.5 76.2,80.8 76.4,83.0 76.7,85.1 76.9,87.2 77.2,89.3 77.5,91.3 77.7,93.2 78.0,95.1 78.2,96.9 78.5,98.7 78.7,100.4 79.0,102.1 79.2,103.8 79.5,105.4 79.8,107.0 80.0,108.6 80.3,110.1 80.5,111.5 80.8,113.0 81.0,114.4 81.3,115.8 81.6,117.1 81.8,118.4 82.1,119.7 82.3,121.0 82.6,122.2 82.8,123.5 83.1,124.6 83.3,125.8 83.6,127.0 83.9,128.1 84.1,129.2 84.4,130.2 84.6,131.3 84.9,132.3 85.1,133.4 85.4,134.4 85.6,135.3 85.9,136.3 86.2,137.2 86.4,138.2 86.7,139.1 86.9,140.0 87.2,140.8 87.4,141.7 87.7,142.5 88.0,143.4 88.2,144.2 88.5,145.0 88.7,145.8 89.0,146.6 89.2,147.3 89.5,148.1 89.7,148.8 90.0,149.6 90.3,150.3 90.5,151.0 90.8,151.7 91.0,152.4 91.3,153.0 91.5,153.7 91.8,154.4 92.0,155.0 92.3,155.6 92.6,156.3 92.8,156.9 93.1,157.5 93.3,158.1 93.6,158.7 93.8,159.3 94.1,159.8 94.4,160.4 94.6,160.9 94.9,161.5 95.1,162.0 95.4,162.6 95.6,163.1 95.9,163.6 96.1,164.1 96.4,164.6 96.7,165.1 96.9,165.6 97.2,166.1 97.4,166.6 97.7,167.1 97.9,167.5 98.2,168.0 98.4,168.5 98.7,168.9 99.0,169.3 99.2,169.8 99.5,170.2 99.7,170.6 100.0,171.1 100.2,171.5 100.5,171.9 100.8,172.3 101.0,172.7 101.3,173.1 101.5,173.5 101.8,173.9 102.0,174.3 102.3,174.7 102.5,175.0 102.8,175.4 103.1,175.8 103.3,176.1 103.6,176.5 103.8,176.8 104.1,177.2 104.3,177.5 104.6,177.9 104.8,178.2 105.1,178.6 105.4,178.9 105.6,179.2 105.9,179.5 106.1,179.9 106.4,180.2 106.6,180.5 106.9,180.8 107.2,181.1 107.4,181.4 107.7,181.7 107.9,182.0 108.2,182.3 108.4,182.6 108.7,182.9 108.9,183.2 109.2,183.5 109.5,183.8 109.7,184.0 110.0,184.3 110.2,184.6 110.5,184.9 110.7,185.1 111.0,185.4 111.2,185.7 111.5,185.9 111.8,186.2 112.0,186.4 112.3,186.7 112.5,186.9 112.8,187.2 113.0,187.4 113.3,187.7 113.6,187.9 113.8,188.1 114.1,188.4 114.3,188.6 114.6,188.8 114.8,189.1 115.1,189.3 115.3,189.5 115.6,189.8 115.9,190.0 116.1,190.2 116.4,190.4 116.6,190.6 116.9,190.8 117.1,191.1 117.4,191.3 117.6,191.5 117.9,191.7 118.2,191.9 118.4,192.1 118.7,192.3 118.9,192.5 119.2,192.7 119.4,192.9 119.7,193.1 120.0,193.3 120.2,193.5 120.5,193.7 120.7,193.9 121.0,194.0 121.2,194.2 121.5,194.4 121.7,194.6 122.0,194.8 122.3,195.0 122.5,195.1 122.8,195.3 123.0,195.5 123.3,195.7 123.5,195.8 123.8,196.0 124.0,196.2 124.3,196.4 124.6,196.5 124.8,196.7 125.1,196.9 125.3,197.0 125.6,197.2 125.8,197.3 126.1,197.5 126.4,197.7 126.6,197.8 126.9,198.0 127.1,198.1 127.4,198.3 127.6,198.4 127.9,198.6 128.1,198.7 128.4,198.9 128.7,199.0 128.9,199.2 129.2,199.3 129.4,199.5 129.7,199.6 129.9,199.8 130.2,199.9 130.4,200.1 130.7,200.2 131.0,200.3 131.2,200.5 131.5,200.6 131.7,200.7 132.0,200.9 132.2,201.0 132.5,201.2 132.8,201.3 133.0,201.4 133.3,201.5 133.5,201.7 133.8,201.8 134.0,201.9 134.3,202.1 134.5,202.2 134.8,202.3 135.1,202.4 135.3,202.6 135.6,202.7 135.8,202.8 136.1,202.9 136.3,203.1 136.6,203.2 136.8,203.3 137.1,203.4 137.4,203.5 137.6,203.7 137.9,203.8 138.1,203.9 138.4,204.0 138.6,204.1 138.9,204.2 139.2,204.3 139.4,204.5 139.7,204.6 139.9,204.7 140.2,204.8 140.4,204.9 140.7,205.0 140.9,205.1 141.2,205.2 141.5,205.3 141.7,205.4 142.0,205.5 142.2,205.6 142.5,205.7 142.7,205.8 143.0,206.0 143.2,206.1 143.5,206.2 143.8,206.3 144.0,206.4 144.3,206.5 144.5,206.6 144.8,206.7 145.0,206.8 145.3,206.8 145.6,206.9 145.8,207.0 146.1,207.1 146.3,207.2 146.6,207.3 146.8,207.4 147.1,207.5 147.3,207.6 147.6,207.7 147.9,207.8 148.1,207.9 148.4,208.0 148.6,208.1 148.9,208.2 149.1,192.4 149.4,192.5 149.6,192.6 149.9,192.8 150.2,192.9 150.4,193.0 150.7,193.2 150.9,193.3 151.2,193.4 151.4,193.5 151.7,193.7 152.0,193.8 152.2,193.9 152.5,194.0 152.7,194.2 153.0,194.3 153.2,194.4 153.5,194.5 153.7,194.7 154.0,194.8 154.3,194.9 154.5,195.0 154.8,195.1 155.0,195.3 155.3,195.4 155.5,195.5 155.8,195.6 156.0,195.7 156.3,195.8 156.6,196.0 156.8,196.1 157.1,196.2 157.3,196.3 157.6,196.4 157.8,196.5 158.1,196.6 158.4,196.7 158.6,196.9 158.9,197.0 159.1,197.1 159.4,197.2 159.6,197.3 159.9,197.4 160.1,197.5 160.4,197.6 160.7,197.7 160.9,197.8 161.2,197.9 161.4,198.0 161.7,198.1 161.9,198.2 162.2,198.3 162.4,198.4 162.7,198.5 163.0,198.6 163.2,198.7 163.5,198.8 163.7,198.9 164.0,199.0 164.2,199.1 164.5,199.2 164.8,199.3 165.0,199.4 165.3,199.5 165.5,199.6 165.8,199.7 166.0,199.8 166.3,199.9 166.5,200.0 166.8,200.1 167.1,200.2 167.3,200.3 167.6,200.4 167.8,200.5 168.1,200.6 168.3,200.7 168.6,200.7 168.8,200.8 169.1,200.9 169.4,201.0 169.6,201.1 169.9,201.2 170.1,201.3 170.4,201.4 170.6,201.5 170.9,201.5 171.2,201.6 171.4,201.7 171.7,201.8 171.9,201.9 172.2,202.0 172.4,202.1 172.7,202.2 172.9,202.2 173.2,202.3 173.5,202.4 173.7,202.5 174.0,202.6 174.2,202.7 174.5,202.7 174.7,202.8 175.0,202.9 175.2,203.0 175.5,203.1 175.8,203.1 176.0,203.2 176.3,203.3 176.5,203.4 176.8,203.5 177.0,203.5 177.3,203.6 177.6,203.7 177.8,203.8 178.1,203.8 178.3,203.9 178.6,204.0 178.8,204.1 179.1,204.2 179.3,204.2 179.6,192.4 179.9,192.5 180.1,192.6 180.4,192.7 180.6,192.8 180.9,192.9 181.1,193.0 181.4,193.1 181.6,193.2 181.9,193.3 182.2,193.4 182.4,193.5 182.7,193.6 182.9,193.7 183.2,193.8 183.4,193.9 183.7,194.0 184.0,194.0 184.2,194.1 184.5,194.2 184.7,194.3 185.0,194.4 185.2,194.5 185.5,194.6 185.7,194.7 186.0,194.8 186.3,194.9 186.5,195.0 186.8,195.1 187.0,195.1 187.3,195.2 187.5,195.3 187.8,195.4 188.0,195.5 188.3,195.6 188.6,195.7 188.8,195.8 189.1,195.8 189.3,195.9 189.6,196.0 189.8,196.1 190.1,196.2 190.4,196.3 190.6,196.4 190.9,196.4 191.1,196.5 191.4,196.6 191.6,196.7 191.9,196.8 192.1,196.9 192.4,196.9 192.7,197.0 192.9,197.1 193.2,197.2 193.4,197.3 193.7,197.3 193.9,197.4 194.2,197.5 194.4,197.6 194.7,197.7 195.0,197.7 195.2,197.8 195.5,197.9 195.7,198.0 196.0,198.1 196.2,198.1 196.5,198.2 196.8,198.3 197.0,198.4 197.3,198.4 197.5,198.5 197.8,198.6 198.0,198.7 198.3,198.7 198.5,198.8 198.8,198.9 199.1,199.0 199.3,199.0 199.6,199.1 199.8,199.2 200.1,199.3 200.3,199.3 200.6,199.4 200.8,199.5 201.1,199.6 201.4,199.6 201.6,199.7 201.9,199.8 202.1,199.8 202.4,199.9 202.6,200.0 202.9,200.1 203.2,200.1 203.4,200.2 203.7,200.3 203.9,200.3 204.2,200.4 204.4,200.5 204.7,200.5 204.9,200.6 205.2,200.7 205.5,200.7 205.7,200.8 206.0,200.9 206.2,201.0 206.5,201.0 206.7,201.1 207.0,201.2 207.2,201.2 207.5,201.3 207.8,201.4 208.0,201.4 208.3,201.5 208.5,201.5 208.8,201.6 209.0,201.7 209.3,201.7 209.6,201.8 209.8,201.9 210.1,192.4 210.3,192.5 210.6,192.6 210.8,192.7 211.1,192.7 211.3,192.8 211.6,192.9 211.9,193.0 212.1,193.1 212.4,193.1 212.6,193.2 212.9,193.3 213.1,193.4 213.4,193.4 213.6,193.5 213.9,193.6 214.2,193.7 214.4,193.7 214.7,193.8 214.9,193.9 215.2,194.0 215.4,194.0 215.7,194.1 216.0,194.2 216.2,194.3 216.5,194.3 216.7,194.4 217.0,194.5 217.2,194.6 217.5,194.6 217.7,194.7 218.0,194.8 218.3,194.9 218.5,194.9 218.8,195.0 219.0,195.1 219.3,195.1 219.5,195.2 219.8,195.3 220.0,195.4 220.3,195.4 220.6,195.5 220.8,195.6 221.1,195.6 221.3,195.7 221.6,195.8 221.8,195.8 222.1,195.9 222.4,196.0 222.6,196.0 222.9,196.1 223.1,196.2 223.4,196.3 223.6,196.3 223.9,196.4 224.1,196.5 224.4,196.5 224.7,196.6 224.9,196.7 225.2,196.7 225.4,196.8 225.7,196.9 225.9,196.9 226.2,197.0 226.4,197.0 226.7,197.1 227.0,197.2 227.2,197.2 227.5,197.3 227.7,197.4 228.0,197.4 228.2,197.5 228.5,197.6 228.8,197.6 229.0,197.7 229.3,197.8 229.5,197.8 229.8,197.9 230.0,197.9 230.3,198.0 230.5,198.1 230.8,198.1 231.1,198.2 231.3,198.3 231.6,198.3 231.8,198.4 232.1,198.4 232.3,198.5 232.6,198.6 232.8,198.6 233.1,198.7 233.4,198.7 233.6,198.8 233.9,198.9 234.1,198.9 234.4,199.0 234.6,199.0 234.9,199.1 235.2,199.2 235.4,199.2 235.7,199.3 235.9,199.3 236.2,199.4 236.4,199.5 236.7,199.5 236.9,199.6 237.2,199.6 237.5,199.7 237.7,199.7 238.0,199.8 238.2,199.9 238.5,199.9 238.7,200.0 239.0,200.0 239.2,200.1 239.5,200.1 239.8,200.2 240.0,200.3 240.3,192.4 240.5,192.4 240.8,192.5 241.0,192.6 241.3,192.6 241.6,192.7 241.8,192.8 242.1,192.8 242.3,192.9 242.6,193.0 242.8,193.0 243.1,193.1 243.3,193.2 243.6,193.2 243.9,193.3 244.1,193.4 244.4,193.4 244.6,193.5 244.9,193.5 245.1,193.6 245.4,193.7 245.6,193.7 245.9,193.8 246.2,193.9 246.4,193.9 246.7,194.0 246.9,194.0 247.2,194.1 247.4,194.2 247.7,194.2 248.0,194.3 248.2,194.4 248.5,194.4 248.7,194.5 249.0,194.5 249.2,194.6 249.5,194.7 249.7,194.7 250.0,194.8 250.3,194.8 250.5,194.9 250.8,195.0 251.0,195.0 251.3,195.1 251.5,195.1 251.8,195.2 252.0,195.3 252.3,195.3 252.6,195.4 252.8,195.4 253.1,195.5 253.3,195.6 253.6,195.6 253.8,195.7 254.1,195.7 254.4,195.8 254.6,195.8 254.9,195.9 255.1,196.0 255.4,196.0 255.6,196.1 255.9,196.1 256.1,196.2 256.4,196.2 256.7,196.3 256.9,196.4 257.2,196.4 257.4,196.5 257.7,196.5 257.9,196.6 258.2,196.6 258.4,196.7 258.7,196.7 259.0,196.8 259.2,196.9 259.5,196.9 259.7,197.0 260.0,197.0 260.2,197.1 260.5,197.1 260.8,197.2 261.0,197.2 261.3,197.3 261.5,197.3 261.8,197.4 262.0,197.4 262.3,197.5 262.5,197.6 262.8,197.6 263.1,197.7 263.3,197.7 263.6,197.8 263.8,197.8 264.1,197.9 264.3,197.9 264.6,198.0 264.8,198.0 265.1,198.1 265.4,198.1 265.6,198.2 265.9,198.2 266.1,198.3 266.4,198.3 266.6,198.4 266.9,198.4 267.2,198.5 267.4,198.5 267.7,198.6 267.9,198.6 268.2,198.7 268.4,198.7 268.7,198.8 268.9,198.8 269.2,198.9 269.5,198.9 269.7,199.0 270.0,199.0 270.2,199.1 270.5,199.1 270.7,192.4 271.0,192.4 271.2,192.5 271.5,192.6 271.8,192.6 272.0,192.7 272.3,192.7 272.5,192.8 272.8,192.8 273.0,192.9 273.3,193.0 273.6,193.0 273.8,193.1 274.1,193.1 274.3,193.2 274.6,193.2 274.8,193.3 275.1,193.3 275.3,193.4 275.6,193.5 275.9,193.5 276.1,193.6 276.4,193.6 276.6,193.7 276.9,193.7 277.1,193.8 277.4,193.8 277.6,193.9 277.9,193.9 278.2,194.0 278.4,194.0 278.7,194.1 278.9,194.2 279.2,194.2 279.4,194.3 279.7,194.3 280.0,194.4 280.2,194.4 280.5,194.5 280.7,194.5 281.0,194.6 281.2,194.6 281.5,194.7 281.7,194.7 282.0,194.8 282.3,194.8 282.5,194.9 282.8,194.9 283.0,195.0 283.3,195.0 283.5,195.1 283.8,195.1 284.0,195.2 284.3,195.2 284.6,195.3 284.8,195.3 285.1,195.4 285.3,195.4 285.6,195.5 285.8,195.5 286.1,195.6 286.4,195.6 286.6,195.7 286.9,195.7 287.1,195.8 287.4,195.8 287.6,195.9 287.9,195.9 288.1,196.0 288.4,196.0 288.7,196.1 288.9,196.1 289.2,196.2 289.4,196.2 289.7,196.3 289.9,196.3 290.2,196.4 290.4,196.4 290.7,196.5 291.0,196.5 291.2,196.6 291.5,196.6 291.7,196.7 292.0,196.7 292.2,196.8 292.5,196.8 292.8,196.9 293.0,196.9 293.3,196.9 293.5,197.0 293.8,197.0 294.0,197.1 294.3,197.1 294.5,197.2 294.8,197.2 295.1,197.3 295.3,197.3 295.6,197.4 295.8,197.4 296.1,197.5 296.3,197.5 296.6,197.5 296.8,197.6 297.1,197.6 297.4,197.7 297.6,197.7 297.9,197.8 298.1,197.8 298.4,197.9 298.6,197.9 298.9,198.0 299.2,198.0 299.4,198.0 299.7,198.1 299.9,198.1 300.2,198.2 300.4,198.2 300.7,198.3 300.9,192.4 301.2,192.4 301.5,192.5 301.7,192.5 302.0,192.6 302.2,192.6 302.5,192.7 302.7,192.7 303.0,192.8 303.2,192.8 303.5,192.8 303.8,192.9 304.0,192.9 304.3,193.0 304.5,193.0 304.8,193.1 305.0,193.1 305.3,193.2 305.6,193.2 305.8,193.3 306.1,193.3 306.3,193.4 306.6,193.4 306.8,193.5 307.1,193.5 307.3,193.6 307.6,193.6 307.9,193.7 308.1,193.7 308.4,193.8 308.6,193.8 308.9,193.9 309.1,193.9 309.4,194.0 309.6,194.0 309.9,194.0 310.2,194.1 310.4,194.1 310.7,194.2 310.9,194.2 311.2,194.3 311.4,194.3 311.7,194.4 312.0,194.4 312.2,194.5 312.5,194.5 312.7,194.6 313.0,194.6 313.2,194.6 313.5,194.7 313.7,194.7 314.0,194.8 314.3,194.8 314.5,194.9 314.8,194.9 315.0,195.0 315.3,195.0 315.5,195.1 315.8,195.1 316.0,195.1 316.3,195.2 316.6,195.2 316.8,195.3 317.1,195.3 317.3,195.4 317.6,195.4 317.8,195.5 318.1,195.5 318.4,195.5 318.6,195.6 318.9,195.6 319.1,195.7 319.4,195.7 319.6,195.8 319.9,195.8 320.1,195.8 320.4,195.9 320.7,195.9 320.9,196.0 321.2,196.0 321.4,196.1 321.7,196.1 321.9,196.1 322.2,196.2 322.4,196.2 322.7,196.3 323.0,196.3 323.2,196.4 323.5,196.4 323.7,196.4 324.0,196.5 324.2,196.5 324.5,196.6 324.8,196.6 325.0,196.6 325.3,196.7 325.5,196.7 325.8,196.8 326.0,196.8 326.3,196.9 326.5,196.9 326.8,196.9 327.1,197.0 327.3,197.0 327.6,197.1 327.8,197.1 328.1,197.1 328.3,197.2 328.6,197.2 328.8,197.3 329.1,197.3 329.4,197.3 329.6,197.4 329.9,197.4 330.1,197.5 330.4,197.5 330.6,197.5 330.9,197.6 331.2,197.6 331.4,192.4 331.7,192.4 331.9,192.5 332.2,192.5 332.4,192.5 332.7,192.6 332.9,192.6 333.2,192.7 333.5,192.7 333.7,192.8 334.0,192.8 334.2,192.9 334.5,192.9 334.7,192.9 335.0,193.0 335.2,193.0 335.5,193.1 335.8,193.1 336.0,193.2 336.3,193.2 336.5,193.2 336.8,193.3 337.0,193.3 337.3,193.4 337.6,193.4 337.8,193.5 338.1,193.5 338.3,193.5 338.6,193.6 338.8,193.6 339.1,193.7 339.3,193.7 339.6,193.8 339.9,193.8 340.1,193.8 340.4,193.9 340.6,193.9 340.9,194.0 341.1,194.0 341.4,194.0 341.6,194.1 341.9,194.1 342.2,194.2 342.4,194.2 342.7,194.3 342.9,194.3 343.2,194.3 343.4,194.4 343.7,194.4 344.0,194.5 344.2,194.5 344.5,194.5 344.7,194.6 345.0,194.6 345.2,194.7 345.5,194.7 345.7,194.7 346.0,194.8 346.3,194.8 346.5,194.9 346.8,194.9 347.0,194.9 347.3,195.0 347.5,195.0 347.8,195.1 348.0,195.1 348.3,195.1 348.6,195.2 348.8,195.2 349.1,195.3 349.3,195.3 349.6,195.3 349.8,195.4 350.1,195.4 350.4,195.5 350.6,195.5 350.9,195.5 351.1,195.6 351.4,195.6 351.6,195.6 351.9,195.7 352.1,195.7 352.4,195.8 352.7,195.8 352.9,195.8 353.2,195.9 353.4,195.9 353.7,196.0 353.9,196.0 354.2,196.0 354.4,196.1 354.7,196.1 355.0,196.1 355.2,196.2 355.5,196.2 355.7,196.3 356.0,196.3 356.2,196.3 356.5,196.4 356.8,196.4 357.0,196.4 357.3,196.5 357.5,196.5 357.8,196.6 358.0,196.6 358.3,196.6 358.5,196.7 358.8,196.7 359.1,196.7 359.3,196.8 359.6,196.8 359.8,196.9 360.1,196.9 360.3,196.9 360.6,197.0 360.8,197.0 361.1,197.0 361.4,197.1 361.6,197.1 361.9,192.4 362.1,192.4 362.4,192.5 362.6,192.5 362.9,192.5 363.2,192.6 363.4,192.6 363.7,192.7 363.9,192.7 364.2,192.7 364.4,192.8 364.7,192.8 364.9,192.9 365.2,192.9 365.5,192.9 365.7,193.0 366.0,193.0 366.2,193.1 366.5,193.1 366.7,193.1 367.0,193.2 367.2,193.2 367.5,193.2 367.8,193.3 368.0,193.3 368.3,193.4 368.5,193.4 368.8,193.4 369.0,193.5 369.3,193.5 369.6,193.6 369.8,193.6 370.1,193.6 370.3,193.7 370.6,193.7 370.8,193.7 371.1,193.8 371.3,193.8 371.6,193.9 371.9,193.9 372.1,193.9 372.4,194.0 372.6,194.0 372.9,194.0 373.1,194.1 373.4,194.1 373.6,194.2 373.9,194.2 374.2,194.2 374.4,194.3 374.7,194.3 374.9,194.3 375.2,194.4 375.4,194.4 375.7,194.5 376.0,194.5 376.2,194.5 376.5,194.6 376.7,194.6 377.0,194.6 377.2,194.7 377.5,194.7 377.7,194.7 378.0,194.8 378.3,194.8 378.5,194.9 378.8,194.9 379.0,194.9 379.3,195.0 379.5,195.0 379.8,195.0 380.0,195.1 380.3,195.1 380.6,195.1 380.8,195.2 381.1,195.2 381.3,195.2 381.6,195.3 381.8,195.3 382.1,195.4 382.4,195.4 382.6,195.4 382.9,195.5 383.1,195.5 383.4,195.5 383.6,195.6 383.9,195.6 384.1,195.6 384.4,195.7 384.7,195.7 384.9,195.7 385.2,195.8 385.4,195.8 385.7,195.8 385.9,195.9 386.2,195.9 386.4,195.9 386.7,196.0 387.0,196.0 387.2,196.0 387.5,196.1 387.7,196.1 388.0,196.1 388.2,196.2 388.5,196.2 388.8,196.3 389.0,196.3 389.3,196.3 389.5,196.4 389.8,196.4 390.0,196.4 390.3,196.5 390.5,196.5 390.8,196.5 391.1,196.6 391.3,196.6 391.6,196.6 391.8,196.7 392.1,192.4 392.3,192.4 392.6,192.4 392.8,192.5 393.1,192.5 393.4,192.5 393.6,192.6 393.9,192.6 394.1,192.6 394.4,192.7 394.6,192.7 394.9,192.8 395.2,192.8 395.4,192.8 395.7,192.9 395.9,192.9 396.2,192.9 396.4,193.0 396.7,193.0 396.9,193.0 397.2,193.1 397.5,193.1 397.7,193.1 398.0,193.2 398.2,193.2 398.5,193.3 398.7,193.3 399.0,193.3 399.2,193.4 399.5,193.4 399.8,193.4 400.0,193.5 400.3,193.5 400.5,193.5 400.8,193.6 401.0,193.6 401.3,193.6 401.6,193.7 401.8,193.7 402.1,193.7 402.3,193.8 402.6,193.8 402.8,193.8 403.1,193.9 403.3,193.9 403.6,193.9 403.9,194.0 404.1,194.0 404.4,194.0 404.6,194.1 404.9,194.1 405.1,194.1 405.4,194.2 405.6,194.2 405.9,194.2 406.2,194.3 406.4,194.3 406.7,194.4 406.9,194.4 407.2,194.4 407.4,194.5 407.7,194.5 408.0,194.5 408.2,194.6 408.5,194.6 408.7,194.6 409.0,194.6 409.2,194.7 409.5,194.7 409.7,194.7 410.0,194.8 410.3,194.8 410.5,194.8 410.8,194.9 411.0,194.9 411.3,194.9 411.5,195.0 411.8,195.0 412.0,195.0 412.3,195.1 412.6,195.1 412.8,195.1 413.1,195.2 413.3,195.2 413.6,195.2 413.8,195.3 414.1,195.3 414.4,195.3 414.6,195.4 414.9,195.4 415.1,195.4 415.4,195.5 415.6,195.5 415.9,195.5 416.1,195.6 416.4,195.6 416.7,195.6 416.9,195.7 417.2,195.7 417.4,195.7 417.7,195.7 417.9,195.8 418.2,195.8 418.4,195.8 418.7,195.9 419.0,195.9 419.2,195.9 419.5,196.0 419.7,196.0 420.0,196.0 420.2,196.1 420.5,196.1 420.8,196.1 421.0,196.2 421.3,196.2 421.5,196.2 421.8,196.2 422.0,196.3 422.3,196.3 422.5,192.4 422.8,192.4 423.1,192.4 423.3,192.5 423.6,192.5 423.8,192.5 424.1,192.6 424.3,192.6 424.6,192.6 424.8,192.7 425.1,192.7 425.4,192.7 425.6,192.8 425.9,192.8 426.1,192.8 426.4,192.9 426.6,192.9 426.9,192.9 427.2,193.0 427.4,193.0 427.7,193.0 427.9,193.1 428.2,193.1 428.4,193.1 428.7,193.2 428.9,193.2 429.2,193.2 429.5,193.3 429.7,193.3 430.0,193.3 430.2,193.4 430.5,193.4 430.7,193.4 431.0,193.4 431.2,193.5 431.5,193.5 431.8,193.5 432.0,193.6 432.3,193.6 432.5,193.6 432.8,193.7 433.0,193.7 433.3,193.7 433.6,193.8 433.8,193.8 434.1,193.8 434.3,193.9 434.6,193.9 434.8,193.9 435.1,194.0 435.3,194.0 435.6,194.0 435.9,194.0 436.1,194.1 436.4,194.1 436.6,194.1 436.9,194.2 437.1,194.2 437.4,194.2 437.6,194.3 437.9,194.3 438.2,194.3 438.4,194.4 438.7,194.4 438.9,194.4 439.2,194.4 439.4,194.5 439.7,194.5 440.0,194.5 440.2,194.6 440.5,194.6 440.7,194.6 441.0,194.7 441.2,194.7 441.5,194.7 441.7,194.8 442.0,194.8 442.3,194.8 442.5,194.8 442.8,194.9 443.0,194.9 443.3,194.9 443.5,195.0 443.8,195.0 444.0,195.0 444.3,195.1 444.6,195.1 444.8,195.1 445.1,195.1 445.3,195.2 445.6,195.2 445.8,195.2 446.1,195.3 446.4,195.3 446.6,195.3 446.9,195.3 447.1,195.4 447.4,195.4 447.6,195.4 447.9,195.5 448.1,195.5 448.4,195.5 448.7,195.6 448.9,195.6 449.2,195.6 449.4,195.6 449.7,195.7 449.9,195.7 450.2,195.7 450.4,195.8 450.7,195.8 451.0,195.8 451.2,195.8 451.5,195.9 451.7,195.9 452.0,195.9 452.2,196.0 452.5,196.0 452.8,196.0 453.0,192.4 453.3,192.4 453.5,192.4 453.8,192.5 454.0,192.5 454.3,192.5 454.5,192.6 454.8,192.6 455.1,192.6 455.3,192.7 455.6,192.7 455.8,192.7 456.1,192.7 456.3,192.8 456.6,192.8 456.8,192.8 457.1,192.9 457.4,192.9 457.6,192.9 457.9,193.0 458.1,193.0 458.4,193.0 458.6,193.0 458.9,193.1 459.2,193.1 459.4,193.1 459.7,193.2 459.9,193.2 460.2,193.2 460.4,193.3 460.7,193.3 460.9,193.3 461.2,193.3 461.5,193.4 461.7,193.4 462.0,193.4 462.2,193.5 462.5,193.5 462.7,193.5 463.0,193.6 463.2,193.6 463.5,193.6 463.8,193.6 464.0,193.7 464.3,193.7 464.5,193.7 464.8,193.8 465.0,193.8 465.3,193.8 465.6,193.8 465.8,193.9 466.1,193.9 466.3,193.9 466.6,194.0 466.8,194.0 467.1,194.0 467.3,194.0 467.6,194.1 467.9,194.1 468.1,194.1 468.4,194.2 468.6,194.2 468.9,194.2 469.1,194.2 469.4,194.3 469.6,194.3 469.9,194.3 470.2,194.4 470.4,194.4 470.7,194.4 470.9,194.4 471.2,194.5 471.4,194.5 471.7,194.5 472.0,194.6 472.2,194.6 472.5,194.6 472.7,194.6 473.0,194.7 473.2,194.7 473.5,194.7 473.7,194.8 474.0,194.8 474.3,194.8 474.5,194.8 474.8,194.9 475.0,194.9 475.3,194.9 475.5,194.9 475.8,195.0 476.0,195.0 476.3,195.0 476.6,195.1 476.8,195.1 477.1,195.1 477.3,195.1 477.6,195.2 477.8,195.2 478.1,195.2 478.4,195.3 478.6,195.3 478.9,195.3 479.1,195.3 479.4,195.4 479.6,195.4 479.9,195.4 480.1,195.4 480.4,195.5 480.7,195.5 480.9,195.5 481.2,195.5 481.4,195.6 481.7,195.6 481.9,195.6 482.2,195.7 482.4,195.7 482.7,195.7 483.0,195.7 483.2,192.4 483.5,192.4 483.7,192.4 484.0,192.4 484.2,192.5 484.5,192.5 484.8,192.5 485.0,192.6 485.3,192.6 485.5,192.6 485.8,192.6 486.0,192.7 486.3,192.7 486.5,192.7 486.8,192.8 487.1,192.8 487.3,192.8 487.6,192.8 487.8,192.9 488.1,192.9 488.3,192.9 488.6,193.0 488.8,193.0 489.1,193.0 489.4,193.0 489.6,193.1 489.9,193.1 490.1,193.1 490.4,193.1 490.6,193.2 490.9,193.2 491.2,193.2 491.4,193.3 491.7,193.3 491.9,193.3 492.2,193.3 492.4,193.4 492.7,193.4 492.9,193.4 493.2,193.5 493.5,193.5 493.7,193.5 494.0,193.5 494.2,193.6 494.5,193.6 494.7,193.6 495.0,193.6 495.2,193.7 495.5,193.7 495.8,193.7 496.0,193.8 496.3,193.8 496.5,193.8 496.8,193.8 497.0,193.9 497.3,193.9 497.6,193.9 497.8,193.9 498.1,194.0 498.3,194.0 498.6,194.0 498.8,194.0 499.1,194.1 499.3,194.1 499.6,194.1 499.9,194.2 500.1,194.2 500.4,194.2 500.6,194.2 500.9,194.3 501.1,194.3 501.4,194.3 501.6,194.3 501.9,194.4 502.2,194.4 502.4,194.4 502.7,194.4 502.9,194.5 503.2,194.5 503.4,194.5 503.7,194.5 504.0,194.6 504.2,194.6 504.5,194.6 504.7,194.7 505.0,194.7 505.2,194.7 505.5,194.7 505.7,194.8 506.0,194.8 506.3,194.8 506.5,194.8 506.8,194.9 507.0,194.9 507.3,194.9 507.5,194.9 507.8,195.0 508.0,195.0 508.3,195.0 508.6,195.0 508.8,195.1 509.1,195.1 509.3,195.1 509.6,195.1 509.8,195.2 510.1,195.2 510.4,195.2 510.6,195.2 510.9,195.3 511.1,195.3 511.4,195.3 511.6,195.3 511.9,195.4 512.1,195.4 512.4,195.4 512.7,195.4 512.9,195.5 513.2,195.5 513.4,195.5 513.7,192.4 513.9,192.4 514.2,192.4 514.4,192.4 514.7,192.5 515.0,192.5 515.2,192.5 515.5,192.6 515.7,192.6 516.0,192.6 516.2,192.6 516.5,192.7 516.8,192.7 517.0,192.7 517.3,192.7 517.5,192.8 517.8,192.8 518.0,192.8 518.3,192.8 518.5,192.9 518.8,192.9 519.1,192.9 519.3,193.0 519.6,193.0 519.8,193.0 520.1,193.0 520.3,193.1 520.6,193.1 520.8,193.1 521.1,193.1 521.4,193.2 521.6,193.2 521.9,193.2 522.1,193.2 522.4,193.3 522.6,193.3 522.9,193.3 523.2,193.3 523.4,193.4 523.7,193.4 523.9,193.4 524.2,193.4 524.4,193.5 524.7,193.5 524.9,193.5 525.2,193.5 525.5,193.6 525.7,193.6 526.0,193.6 526.2,193.6 526.5,193.7 526.7,193.7 527.0,193.7 527.2,193.7 527.5,193.8 527.8,193.8 528.0,193.8 528.3,193.8 528.5,193.9 528.8,193.9 529.0,193.9 529.3,193.9 529.6,194.0 529.8,194.0 530.1,194.0 530.3,194.0 530.6,194.1 530.8,194.1 531.1,194.1 531.3,194.1 531.6,194.2 531.9,194.2 532.1,194.2 532.4,194.2 532.6,194.3 532.9,194.3 533.1,194.3 533.4,194.3 533.6,194.4 533.9,194.4 534.2,194.4 534.4,194.4 534.7,194.5 534.9,194.5 535.2,194.5 535.4,194.5 535.7,194.6 536.0,194.6 536.2,194.6 536.5,194.6 536.7,194.7 537.0,194.7 537.2,194.7 537.5,194.7 537.7,194.8 538.0,194.8 538.3,194.8 538.5,194.8 538.8,194.9 539.0,194.9 539.3,194.9 539.5,194.9 539.8,195.0 540.0,195.0 540.3,195.0 540.6,195.0 540.8,195.0 541.1,195.1 541.3,195.1 541.6,195.1 541.8,195.1 542.1,195.2 542.4,195.2 542.6,195.2 542.9,195.2 543.1,195.3 543.4,195.3 543.6,195.3 543.9,192.4 544.1,192.4 544.4,192.4 544.7,192.4 544.9,192.5 545.2,192.5 545.4,192.5 545.7,192.5 545.9,192.6 546.2,192.6 546.4,192.6 546.7,192.6 547.0,192.7 547.2,192.7 547.5,192.7 547.7,192.7 548.0,192.8 548.2,192.8 548.5,192.8 548.8,192.8 549.0,192.8 549.3,192.9 549.5,192.9 549.8,192.9 550.0,192.9 550.3,193.0 550.5,193.0 550.8,193.0 551.1,193.0 551.3,193.1 551.6,193.1 551.8,193.1 552.1,193.1 552.3,193.2 552.6,193.2 552.8,193.2 553.1,193.2 553.4,193.3 553.6,193.3 553.9,193.3 554.1,193.3 554.4,193.4 554.6,193.4 554.9,193.4 555.2,193.4 555.4,193.5 555.7,193.5 555.9,193.5 556.2,193.5 556.4,193.6 556.7,193.6 556.9,193.6 557.2,193.6 557.5,193.6 557.7,193.7 558.0,193.7 558.2,193.7 558.5,193.7 558.7,193.8 559.0,193.8 559.2,193.8 559.5,193.8 559.8,193.9 560.0,193.9 560.3,193.9 560.5,193.9 560.8,194.0 561.0,194.0 561.3,194.0 561.6,194.0 561.8,194.0 562.1,194.1 562.3,194.1 562.6,194.1 562.8,194.1 563.1,194.2 563.3,194.2 563.6,194.2 563.9,194.2 564.1,194.3 564.4,194.3 564.6,194.3 564.9,194.3 565.1,194.3 565.4,194.4 565.6,194.4 565.9,194.4 566.2,194.4 566.4,194.5 566.7,194.5 566.9,194.5 567.2,194.5 567.4,194.6 567.7,194.6 568.0,194.6 568.2,194.6 568.5,194.6 568.7,194.7 569.0,194.7 569.2,194.7 569.5,194.7 569.7,194.8 570.0,194.8" fill="none" stroke="#2a78d6" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="192.2" y2="192.2" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="196.2" fill="#1b1f24">model: two gaps in fq</text>
+<circle cx="73.4" cy="51.2" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="81.0" cy="114.1" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="88.7" cy="145.5" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="104.1" cy="177.0" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="119.4" cy="192.7" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="134.8" cy="202.2" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="145.0" cy="206.6" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="150.2" cy="192.7" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="165.5" cy="199.5" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="178.3" cy="203.8" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="180.9" cy="192.8" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="211.6" cy="192.8" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="303.8" cy="192.8" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="549.5" cy="192.7" r="3.5" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<path d="M115.4,184.8L123.4,192.8M115.4,192.8L123.4,184.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<text x="127.1" y="167.7" fill="#4a5560" text-anchor="start">cover letter, before: 2.195 ms</text>
+<text x="129.7" y="222.5" fill="#4a5560" text-anchor="start">34 Mbit/s: still 2-segment skbs, 0.71 ms apart</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">model</text>
+<circle cx="133" cy="18" r="4" fill="#2a78d6"/>
+<text x="146" y="22" fill="#1b1f24">bench, fq maxrate plus the socket cap</text>
+<path d="M414,14L422,22M414,22L422,14" stroke="#eb6834" stroke-width="2"/>
+<text x="431" y="22" fill="#1b1f24">cover letter</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="400.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="341.0" y2="341.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="345.0" text-anchor="end" fill="#898781">0.1</text>
+<line x1="58" x2="570" y1="286.0" y2="286.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="290.0" text-anchor="end" fill="#898781">0.2</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="341.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 341.0)">RTT, EDT (ms)</text>
+<circle cx="73.4" cy="363.0" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="81.0" cy="367.9" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="88.7" cy="368.5" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="104.1" cy="378.9" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="119.4" cy="383.4" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="134.8" cy="382.2" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="145.0" cy="381.7" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="150.2" cy="380.6" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="165.5" cy="379.5" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="178.3" cy="379.5" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="180.9" cy="380.1" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="211.6" cy="378.4" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="303.8" cy="376.2" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<circle cx="549.5" cy="366.9" r="3.5" fill="#1baf7a" stroke="#fff" stroke-width="1.5"/>
+<path d="M115.4,301.2L123.4,309.2M115.4,309.2L123.4,301.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<text x="127.1" y="303.6" fill="#4a5560" text-anchor="start">cover letter, after: 0.165 ms</text>
+<circle cx="72" cy="274" r="4" fill="#1baf7a"/>
+<text x="85" y="278" fill="#1b1f24">bench, fq plus the socket cap</text>
+<path d="M297,270L305,278M297,278L305,270" stroke="#eb6834" stroke-width="2"/>
+<text x="314" y="278" fill="#1b1f24">cover letter</text>
+<text x="58.0" y="412.0" text-anchor="middle" fill="#898781">0</text>
+<text x="119.4" y="412.0" text-anchor="middle" fill="#898781">24</text>
+<text x="180.9" y="412.0" text-anchor="middle" fill="#898781">48</text>
+<text x="303.8" y="412.0" text-anchor="middle" fill="#898781">96</text>
+<text x="426.6" y="412.0" text-anchor="middle" fill="#898781">144</text>
+<text x="549.5" y="412.0" text-anchor="middle" fill="#898781">192</text>
+<text x="314.0" y="430.0" text-anchor="middle" fill="#4a5560">pacing cap, SO_MAX_PACING_RATE (Mbit/s)</text>
+<g class="hit"><title>6 Mbit/s cap · rate model: RTT 8.093 ms measured, 8.075 ms model, 2-segment skbs 4033 us apart · EDT: RTT 0.060 ms, 2-segment skbs 3858 us apart</title><rect x="58.0" y="30" width="19.2" height="366.0" fill="transparent"/><line x1="73.4" x2="73.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>9 Mbit/s cap · rate model: RTT 5.396 ms measured, 5.383 ms model, 2-segment skbs 2690 us apart · EDT: RTT 0.051 ms, 2-segment skbs 2572 us apart</title><rect x="77.2" y="30" width="7.7" height="366.0" fill="transparent"/><line x1="81.0" x2="81.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>12 Mbit/s cap · rate model: RTT 4.051 ms measured, 4.037 ms model, 2-segment skbs 2017 us apart · EDT: RTT 0.050 ms, 2-segment skbs 1928 us apart</title><rect x="84.9" y="30" width="11.5" height="366.0" fill="transparent"/><line x1="88.7" x2="88.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>18 Mbit/s cap · rate model: RTT 2.699 ms measured, 2.692 ms model, 2-segment skbs 1344 us apart · EDT: RTT 0.031 ms, 2-segment skbs 1285 us apart</title><rect x="96.4" y="30" width="15.4" height="366.0" fill="transparent"/><line x1="104.1" x2="104.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>24 Mbit/s cap · rate model: RTT 2.026 ms measured, 2.019 ms model, 2-segment skbs 1008 us apart · EDT: RTT 0.023 ms, 2-segment skbs 964 us apart</title><rect x="111.8" y="30" width="15.4" height="366.0" fill="transparent"/><line x1="119.4" x2="119.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>30 Mbit/s cap · rate model: RTT 1.621 ms measured, 1.615 ms model, 2-segment skbs 806 us apart · EDT: RTT 0.025 ms, 2-segment skbs 771 us apart</title><rect x="127.1" y="30" width="12.8" height="366.0" fill="transparent"/><line x1="134.8" x2="134.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>34 Mbit/s cap · rate model: RTT 1.431 ms measured, 1.425 ms model, 2-segment skbs 711 us apart · EDT: RTT 0.026 ms, 2-segment skbs 680 us apart</title><rect x="139.9" y="30" width="7.7" height="366.0" fill="transparent"/><line x1="145.0" x2="145.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>36 Mbit/s cap · rate model: RTT 2.026 ms measured, 2.019 ms model, 3-segment skbs 1007 us apart · EDT: RTT 0.028 ms, 3-segment skbs 962 us apart</title><rect x="147.6" y="30" width="10.2" height="366.0" fill="transparent"/><line x1="150.2" x2="150.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>42 Mbit/s cap · rate model: RTT 1.736 ms measured, 1.730 ms model, 3-segment skbs 862 us apart · EDT: RTT 0.030 ms, 3-segment skbs 824 us apart</title><rect x="157.8" y="30" width="14.1" height="366.0" fill="transparent"/><line x1="165.5" x2="165.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>47 Mbit/s cap · rate model: RTT 1.553 ms measured, 1.546 ms model, 3-segment skbs 771 us apart · EDT: RTT 0.030 ms, 4-segment skbs 982 us apart</title><rect x="171.9" y="30" width="7.7" height="366.0" fill="transparent"/><line x1="178.3" x2="178.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>48 Mbit/s cap · rate model: RTT 2.025 ms measured, 2.019 ms model, 4-segment skbs 1006 us apart · EDT: RTT 0.029 ms, 4-segment skbs 962 us apart</title><rect x="179.6" y="30" width="16.6" height="366.0" fill="transparent"/><line x1="180.9" x2="180.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>60 Mbit/s cap · rate model: RTT 2.025 ms measured, 2.019 ms model, 5-segment skbs 1005 us apart · EDT: RTT 0.032 ms, 5-segment skbs 961 us apart</title><rect x="196.2" y="30" width="61.4" height="366.0" fill="transparent"/><line x1="211.6" x2="211.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>96 Mbit/s cap · rate model: RTT 2.023 ms measured, 2.019 ms model, 8-segment skbs 1001 us apart · EDT: RTT 0.036 ms, 8-segment skbs 957 us apart</title><rect x="257.7" y="30" width="169.0" height="366.0" fill="transparent"/><line x1="303.8" x2="303.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>192 Mbit/s cap · rate model: RTT 2.027 ms measured, 2.019 ms model, 16-segment skbs 993 us apart · EDT: RTT 0.053 ms, 16-segment skbs 949 us apart</title><rect x="426.6" y="30" width="143.4" height="366.0" fill="transparent"/><line x1="549.5" x2="549.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch08-ratemodel--></div>
+        <figcaption><b>Diagram 8.3 — The RTT TCP measures on a 0.03 ms path at 14 pacing caps, when fq derives each gap from the rate (top) and when TCP stamps each departure (bottom).</b> Notice the sawtooth: the model is two gaps of \(\text{segs} \times 1514\) wire bytes at the cap. At 34 Mbit/s the skbs are still two segments and the gap shrinks to 0.71 ms; at 36 they grow to three and the gap returns to 1.009 ms. Bench points sit 4–18 µs above the model; under EDT the RTT stays at 0.02–0.06 ms. Crosses: the cover letter. Rootless bench, kernel 7.2.6, CUBIC, <code>tcp_tso_rtt_log=0</code>, 6 s per point, 2 October 2026. Data: <a href="labs/ch08-edt/data/rate-model-sweep.csv">rate-model-sweep.csv</a>. Hover for values.</figcaption></figure>
+      <p>Where it matters: an RTT inflated by the sender's own qdisc misleads the retransmit timer and any controller that models the path from its minimum RTT.</p>
+
+      <h3 class="strand" id="s-fq-honours-stamp">fq honours the stamp</h3>
+      <p>fq reads <code>skb->tstamp</code> as "not before". At enqueue it converts the stamp to its monotonic clock, checks the horizon, and files the skb in its fq flow in stamp order (<code>fq_enqueue()</code>, <code>sch_fq.c:594–662</code>). A flow may send once the later of its head's stamp and its <code>time_next_packet</code> has passed (lines 761–766); until then it waits in the throttled tree, as in the small-queues chapter. fq never drops a packet for being late. The UDP lab's datagrams, stamped 1 ms apart, showed four cases:</p>
+      <ul>
+        <li>On time: 1,000 stamps left a median 13 µs late (p99 25 µs); <code>throttled 1000</code>.</li>
+        <li>Out of order: groups of eight handed down in reverse left in stamp order. A stamp that goes backwards enters a per-flow red-black tree; in-order ones stay on an O(1) list (<code>flow_queue_add()</code>, lines 508–538).</li>
+        <li>In the past: stamps 45 ms old left at once.</li>
+        <li>Too far ahead: beyond <code>horizon</code> (10 s, line 1250) the packet is dropped and counted in <code>horizon_drops</code>, or with <code>horizon_cap</code> restamped to now plus the horizon and counted in <code>horizon_caps</code> (lines 615–623). Under <code>horizon 2s horizon_cap</code>, 20 stamps 5 s ahead and 1 ms apart became one time and left 0.9 µs apart.</li>
+      </ul>
+      <p>Here Linux parted from Carousel: it kept fq's red-black trees and single timer, \(O(\log n)\) per waiting flow, over the Carousel chapter's O(1) timing wheel, and took only the wheel's horizon rule, with its two choices, drop or clamp. The wheel came back as a card feature, <code>offload_horizon</code> (v6.13, <code>f26080d47007</code>, whose commit cites Carousel). No v7.2 driver sets <code>max_pacing_offload_horizon</code>, so the bench prints <code>offload_horizon 0us</code>.</p>
+      <p>For TCP, EDT replaced the small-queues chapter's per-flow arithmetic: a stamped skb sets <code>time_next_packet</code> from a rate only under <code>maxrate</code> (lines 795–801). That removed the quantum artifact (§10), a gap of at least one quantum however small the packet; the EDT commit (<code>ab408b6dc744</code>) saw request-response p99 latency fall from 3,825 to 63 µs.</p>
+      <p class="since"><b>Since the talk.</b> The per-flow tree came in v5.2 (<code>eeb84aa0d0af</code>) and the horizon in v5.8 (<code>39d010504e6b</code>), both for QUIC. v7.2 moves a throttled flow's time earlier when an earlier stamp arrives (<code>fabcf8cad67b</code>, lines 654–656) and converts <code>CLOCK_TAI</code> and <code>CLOCK_REALTIME</code> stamps to monotonic (<code>c4f796c4f16b</code>, lines 564–582).</p>
+
+      <h3 class="strand" id="s-so-txtime">Any socket can stamp, on fq's clock</h3>
+      <p><code>SO_TXTIME</code> names a clock and two flags, deadline mode and error reporting (<code>sock.c:1613–1644</code>). Each <code>sendmsg()</code> then carries an <code>SCM_TXTIME</code> control message with a 64-bit time in nanoseconds (lines 3054–3090; 0 means none), which the IP layer copies into <code>skb->tstamp</code> with the socket's clock (<code>ip_output.c:1471–1474</code>).</p>
+      <p>The clock rule is one <code>if</code> (lines 1628–1632): <code>CLOCK_MONOTONIC</code> is open to everyone, while <code>CLOCK_REALTIME</code> and <code>CLOCK_TAI</code> need <code>CAP_NET_ADMIN</code> in the user namespace that owns the socket's network namespace. The comment gives the reason: "CLOCK_MONOTONIC is only used by sch_fq, and this packet scheduler has enough safe guards", the horizon. As a normal user on this laptop, <code>CLOCK_TAI</code> fails with <code>EPERM</code>. In the rootless bench we own the user namespace, so it works, and fails again after <code>setpriv --bounding-set=-net_admin</code>.</p>
+      <p>The cover letter's user is QUIC (§8): write a burst of stamped datagrams and let fq space them, bounded only by fq's 100-packet flow limit, since UDP has no TSQ. BPF programs can write the stamp too, which is how the pods chapter holds a pod to a rate.</p>
+      <p class="since"><b>Since the cover letter.</b> <code>SO_TXTIME</code> arrived in 4.19 (<code>80b14dee2bea</code>, Richard Cochran) with every clock privileged; 5.8 opened <code>CLOCK_MONOTONIC</code> "now sch_fq has horizon feature" (<code>790709f24972</code>). Until v7.2, fq read a TAI stamp as monotonic, decades ahead, so the horizon dropped it.</p>
+
+      <h3 class="strand" id="s-etf-launch-time">ETF: a launch time that can be missed</h3>
+      <p>ETF came with <code>SO_TXTIME</code> (cover letter §5; <code>25db26a91364</code>, Vinicius Costa Gomes and Jesus Sanchez-Palencia) for time-sensitive networking. It keeps one red-black tree of packets ordered by stamp and arms its watchdog at the earliest stamp minus <code>delta</code>. fq says "not before"; ETF says "between \(\text{stamp} - \delta\) and the stamp, or never".</p>
+      <p><code>validate_input_params()</code> accepts only <code>clockid CLOCK_TAI</code> (<code>sch_etf.c:62–65</code>). <code>is_packet_valid()</code> (lines 75–106) wants a full socket with <code>SO_TXTIME</code> on the same clock and deadline mode, and a stamp no earlier than now or the last packet sent; anything else is dropped with <code>TXTIME_INVALID_PARAM</code> on the error queue. At dequeue (lines 253–294) a packet whose stamp has passed is dropped with <code>TXTIME_MISSED</code> and counted as an overlimit (line 224).</p>
+      <p>It attaches on the bench's veth without sudo; with no launch-time hardware a packet leaves on release, about <code>delta</code> early. 1,000 stamps 1 ms apart:</p>
+      <table>
+        <tr><th><code>delta</code></th><th>left, against the stamp (median)</th><th>dropped as missed, of 1,000</th></tr>
+        <tr><td>500 µs</td><td>497 µs early</td><td>0</td></tr>
+        <tr><td>20 µs</td><td>17 µs early</td><td>0</td></tr>
+        <tr><td>10 µs</td><td>7 µs early</td><td>30 (5 in an earlier run)</td></tr>
+        <tr><td>0</td><td>nothing left</td><td>1,000, <code>overlimits 1000</code></td></tr>
+      </table>
+      <p>The release comes about 3 µs after \(\text{stamp} - \delta\), the timer's lateness, so a small <code>delta</code> misses. With <code>offload</code> the card launches at the stamp (igb, igc, ice, stmmac and enetc implement it in v7.2). ETF also drops everything without an <code>SO_TXTIME</code> socket: ping, ARP (hence a permanent neighbour entry), and 6 kernel-sent IPv6 packets in 8 idle seconds. So tc-etf(8) puts it "under another qdisc", one queue of an <code>mqprio</code>.</p>
+      <figure class="dia"><div class="mermaid">
+flowchart TB
+  P["A stamped skb reaches the qdisc"]
+  subgraph FQ["fq, on CLOCK_MONOTONIC"]
+    A1{"stamp beyond the horizon?"} -->|"yes"| A2["drop, counted in horizon_drops,<br/>or cap to now plus the horizon"]
+    A1 -->|"no"| A3["file in its fq flow,<br/>sorted by stamp"]
+    A3 --> A4["leave once the stamp has passed,<br/>however late"]
+  end
+  subgraph ETF["ETF, on CLOCK_TAI"]
+    B1{"SO_TXTIME socket on CLOCK_TAI,<br/>stamp still ahead?"} -->|"no"| B2["drop, TXTIME_INVALID_PARAM"]
+    B1 -->|"yes"| B3["insert in one tree,<br/>sorted by stamp"]
+    B3 --> B4{"timer fires<br/>before the stamp?"}
+    B4 -->|"yes"| B5["leave at stamp minus delta"]
+    B4 -->|"no"| B6["drop, TXTIME_MISSED"]
+  end
+  P --> A1
+  P --> B1
+  style A4 fill:#e6f4f1,stroke:#0f7b6c,stroke-width:2px
+  style B6 fill:#fdeef1,stroke:#be123c,stroke-width:2px
+</div><figcaption><b>Diagram 8.4 — What fq and ETF do with a stamped skb, from <code>sch_fq.c:608–625, 761–766</code> and <code>sch_etf.c:75–106, 253–294</code>.</b> Notice the green box and the red one. fq's only drop is for a stamp too far ahead; every ETF drop is for a stamp that is late or becomes late.</figcaption></figure>
+      <p class="since"><b>Since the sources</b> (October 2026). On this laptop <code>CLOCK_TAI</code> equals <code>CLOCK_REALTIME</code>: systemd-timesyncd never sets the kernel's TAI offset. The 37 s matter once a card's PTP clock counts real TAI.</p>
+
+      <h3 id="systems">Real systems</h3>
+      <div class="system" id="sys-so-txtime" data-system="so-txtime">
+        <h4>Meet the system · <code>SO_TXTIME</code> and the ETF qdisc</h4>
+        <p><b>What it is.</b> A socket option and a qdisc, both added in Linux 4.19 (2018). <code>SO_TXTIME</code> lets an application put a departure time on each packet it sends; ETF holds such packets in time order and hands each to the card just before its time. fq honours the same time.</p>
+        <p><b>Why it exists.</b> Time-sensitive networking: industrial and audio-video streams need frames on the wire at planned instants, and some cards can launch a frame at a time on their PTP clock (tc-etf(8), DESCRIPTION). TCP and QUIC servers came later (cover letter §5, §8).</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li><code>setsockopt(SOL_SOCKET, SO_TXTIME, {clockid, flags})</code>, with the flags <code>SOF_TXTIME_DEADLINE_MODE</code> and <code>SOF_TXTIME_REPORT_ERRORS</code>.</li>
+          <li>An <code>SCM_TXTIME</code> control message on each <code>sendmsg()</code>: 64 bits of nanoseconds, copied into <code>skb->tstamp</code>.</li>
+          <li>A qdisc that honours it: fq on <code>CLOCK_MONOTONIC</code>, or ETF on <code>CLOCK_TAI</code>, optionally offloaded to the card.</li>
+          <li>The error queue (<code>MSG_ERRQUEUE</code>): an ETF drop arrives as <code>SO_EE_ORIGIN_TXTIME</code> with its code and stamp (<code>sch_etf.c:135–160</code>).</li>
+        </ul>
+        <p class="here"><b>Where this chapter lives inside it.</b> AFAP is the world before the field: an skb with <code>tstamp</code> 0, whose time a queue decides. TCP's departure clock writes the field <code>SCM_TXTIME</code> writes, so TCP is a built-in user on <code>CLOCK_MONOTONIC</code>. The RTT learning lives in the union: the bits the qdisc honours are the bits TCP measures from. fq honouring the stamp shows in <code>tc -s</code> as <code>throttled</code>, <code>horizon_drops</code> and <code>horizon_caps</code>. The clock rule is the <code>clockid</code> argument and its <code>EPERM</code>. ETF shows as <code>dropped</code> and <code>overlimits</code>, and on the error queue.</p>
+        <p><b>Try it</b> (~5 min, no sudo, from the dossier folder):</p>
+        <pre><code>cd labs/ch08-edt
+../common/qnet.sh
+ip netns exec rcv python3 txtime.py --listen &
+tc -n snd qdisc del dev s0 root
+tc -n snd qdisc add dev s0 root fq
+ip netns exec snd python3 txtime.py --dst 10.0.2.1 --count 20 --burst --offset-ms 11000
+tc -n snd -s qdisc show dev s0 | tail -1
+tc -n snd qdisc del dev s0 root
+tc -n snd qdisc add dev s0 root etf clockid CLOCK_TAI delta 500000
+ip netns exec snd python3 txtime.py --dst 10.0.2.1 --clock tai --count 50 --offset-ms -50 --report-errors</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026:</p>
+        <pre><code>txtime: clock=mono sent 20 of 20 datagrams of 200 B, stamps 1000 us apart, first 11005 ms after start, all handed down at once
+ horizon_drops 20
+txtime: clock=tai sent 0 of 50 datagrams of 200 B, stamps 1000 us apart, first -45 ms after start
+txtime: 50 sendmsg() calls failed: ['ENOBUFS']
+txtime: 50 SO_EE_ORIGIN_TXTIME errors on the error queue
+  EINVAL TXTIME_INVALID_PARAM: 50</code></pre>
+        <p>fq dropped all 20 at enqueue, 11 s being beyond its 10 s horizon. ETF refused all 50 past stamps, and the sender heard twice: <code>ENOBUFS</code>, and one error per packet with its stamp.</p>
+        <p><b>Clean up.</b> <code>exit</code> the lab shell; the listener stops by itself after 60 s.</p>
+        <p class="drift">Stable: the control message, the error codes, ETF's clock rule and its drop when late. Drifting (as of October 2026, kernel 7.2, iproute2 7.2.0): the clocks fq converts, the <code>CAP_NET_ADMIN</code> rule, the drivers with ETF offload, and <code>offload_horizon</code>. tc-fq(8) omits <code>horizon</code>; <code>tc qdisc add dev lo root fq help</code> lists it.</p>
+      </div>
+
+      <div class="system back" id="sys-sch-fq-back" data-system="sch-fq">
+        <h4>Back to <code>sch_fq</code></h4>
+        <p>This chapter adds <code>horizon 10s horizon_drop</code> on the parameter line and <code>horizon_drops</code> and <code>horizon_caps</code>, printed when non-zero. In the capped run fq showed <code>flows 3 (inactive 2 throttled 1) … band1_pkts 20 … next_packet_delay 1.79s</code>: 20 packets in one throttled flow, waiting for one shared time. The rest is read in <a href="ch05.html#sys-sch-fq">the full card in the small-queues chapter</a>.</p>
+      </div>
+
+      <div class="system back" id="sys-linux-tcp-back" data-system="linux-tcp">
+        <h4>Back to Linux TCP, read through <code>ss -ti</code></h4>
+        <p>Since 4.20 <code>rtt</code> runs from each skb's departure stamp, so waiting for the stamp is not counted, and waiting beyond it, as under fq's <code>maxrate</code>, still is. <code>pacing_rate 24000000bps/24000000bps</code> is the rate over the <code>SO_MAX_PACING_RATE</code> cap, which prints only when set. The rest is read in <a href="ch01.html#sys-linux-tcp">the full card in the congestion-avoidance chapter</a>.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing; the others use the rootless bench and the tools in <code>labs/ch08-edt/</code>. Commands paste into fish or bash.</p>
+
+      <div class="lab" id="lab-departure-clock">
+        <h4>Hands-on · Trace the departure clock, then predict the old model's RTT</h4>
+        <p class="labmeta">~30 min · trace by hand · paper and pencil, then one CSV to check against</p>
+        <p><b>Task.</b> (a) A socket capped at 24 Mbit/s sends 2,896-byte skbs: skb 1 at \(t = 0\) with the clock at 0, skb 2 at 0.1 ms, skb 3 at 2.4 ms (a late wake-up), skb 4 at 2.45 ms. Write each stamp and the clock after each send; then redo it with skb 3 at 3.0 ms. (b) Under the old model on a LAN, predict the RTT at caps of 12, 34 and 36 Mbit/s.</p>
+        <p><b>Done when.</b> You can say how much time the flow loses in each case of (a), and your three RTTs are within 0.05 ms of <code>labs/ch08-edt/data/rate-model-sweep.csv</code>.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The clock never lags behind now: the stamp is the larger of the clock and now. The step after a send is the skb's length at the rate, minus a credit for lateness. For (b), use the RTT learning's decomposition: TSQ's two skbs, one gap each.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>The step is \(2896 \times 10^9 / (3 \times 10^6) = 965{,}333\) ns. The credit is the stamp minus the clock before the send, and the step loses \(\min(\text{step}/2, \text{credit})\). For (b), \(\text{segs} = \max(2, \lfloor (\text{cap}/8 \gg 10)/1448 \rfloor)\) and the gap is \(\text{segs} \times 1514 \times 8 / \text{cap}\).</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>skb 3 in the first case: the clock is 1.931 ms and now is 2.4 ms, so the stamp is 2.4, the credit 0.469 ms, the step \(0.965 - 0.469 = 0.496\) ms, and the clock 2.896 ms. At 34 Mbit/s, \(4.25 \times 10^6 \gg 10 = 4150\) bytes is still two segments, so the gap shrinks.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>(a) all times in ms
+skb  sent at  clock before  stamp  credit  step   clock after
+ 1   0.000    0.000         0.000  0       0.965  0.965
+ 2   0.100    0.965         0.965  0       0.965  1.931
+ 3   2.400    1.931         2.400  0.469   0.496  2.896
+ 4   2.450    2.896         2.896  0       0.965  3.861
+skb 3 at 3.000: stamp 3.000, credit 1.069,
+                step 0.965 - min(0.483, 1.069) = 0.483, clock 3.483
+skb 4 then gets 3.483 instead of 2.896: 0.587 ms lost for good
+
+(b) cap  rate&gt;&gt;10  segs  gap       RTT predicted  bench
+    12   1,464 B   2     2.019 ms  4.04 ms        4.051 ms
+    34   4,150 B   2     0.712 ms  1.42 ms        1.431 ms
+    36   4,394 B   3     1.009 ms  2.02 ms        2.026 ms
+payload at 36: 36 x 1448/1514 = 34.43 Mbit/s (bench 34.438)</code></pre>
+          <p><b>Expected output.</b> The table above. In the first case skb 4's stamp, 2.896 ms, is exactly three steps after skb 1, so the late send cost nothing. In the second, the lateness (1.069 ms) is more than half a step (0.483 ms), and the excess, 0.587 ms, is gone.</p>
+          <p><b>What this shows.</b> The credit lets TCP make up lateness of up to half a step and no more, which is the half-skb token bucket in the learning on writing the departure time (<code>tcp_output.c:1460–1464</code>). Part (b) is the RTT learning's decomposition: the inflation is two gaps, and a gap is the skb's wire size over the cap, so a cap with the same skb size and a higher rate shows a smaller RTT. 34 Mbit/s shows less than either 24 or 36 (cover letter §9).</p>
+          <p><b>Common wrong turn.</b> Computing the old model's gap from payload, 2,896 bytes. That gives 1.93 ms at 24 Mbit/s and a goodput of exactly 24 Mbit/s, so it cannot explain the cover letter's 22.97. The 2013 fq paced the bytes it put on the wire.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-stamp-udp">
+        <h4>Hands-on · Stamp UDP datagrams through fq, then through ETF</h4>
+        <p class="labmeta">~45 min · measure, then break a real one · no sudo, needs Python 3 and tcpdump</p>
+        <p><b>Task.</b> Send 1,000 datagrams stamped 1 ms apart through fq on <code>s0</code>, capture them at <code>rtr:r0</code>, and measure each one's lateness. Then predict and test three bad stamps: groups handed down in reverse, stamps 50 ms old, and stamps 11 s ahead (then 5 s ahead under <code>horizon 2s horizon_cap</code>). Last, swap fq for ETF and find the smallest <code>delta</code> that drops nothing.</p>
+        <pre><code>cd labs/ch08-edt                            # from the dossier folder
+../common/qnet.sh                           # opens a shell inside the lab
+ip netns exec rcv python3 txtime.py --listen --seconds 900 &
+tc -n snd qdisc del dev s0 root
+tc -n snd qdisc add dev s0 root fq
+tc -n rcv qdisc del dev c0 root
+tc -n rcv qdisc add dev c0 root netem delay 40ms limit 100000
+ip netns exec rtr timeout 3 tcpdump -i r0 -n -s 96 --time-stamp-precision nano -w f.pcap udp &
+sleep 0.5; ip netns exec snd python3 txtime.py --dst 10.0.2.1 --count 1000 --csv f.csv
+sleep 2; python3 txgaps.py f.pcap f.csv; tc -n snd -s qdisc show dev s0</code></pre>
+        <p><b>Done when.</b> You have fq's median lateness, the reversed run's wire order, both horizon counters, and ETF's missed count at <code>delta</code> 500, 20 and 10 µs.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>fq's rule is "not before", with one drop, for stamps too far ahead. ETF's rule is a window that closes at the stamp. Before each run, say which qdisc drops which bad stamp.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Rerun the capture and send lines with <code>--reverse 8 --lead-ms 10</code>, then <code>--offset-ms -50</code>. For the horizon: <code>--burst --count 20 --offset-ms 11000</code>; then <code>tc -n snd qdisc change dev s0 root fq horizon 2s horizon_cap</code> and <code>--burst --count 20 --offset-ms 5000</code>, with a 4 s capture. For ETF, delete the root, add <code>etf clockid CLOCK_TAI delta 500000</code>, and send with <code>--clock tai --report-errors</code>.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>ETF drops ARP, so pin the router's address first. Read its MAC with <code>ip -n rtr -br link show r0</code>, then <code>ip -n snd neigh replace 10.0.1.2 lladdr MAC dev s0 nud permanent</code>. ETF has no change operation, so delete and add for each <code>delta</code>.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026; full transcript in <code>labs/ch08-edt/data/udp-transcript.txt</code>):</p>
+          <pre><code>fq, in order     lateness (captured - stamped): median 13.2 us, p1 12.1, p99 24.9, max 122.1 us
+                 gap between packets: captured median 1000.0 us, stamped median 1000.0 us
+                 gc 0 highprio 0 fastpath 7 throttled 1000 latency 11.2us
+fq, reversed     order on the wire: stamp order, not send order        (median 12.9 us late)
+fq, 45 ms past   lateness median 45060.1 us: left at once
+fq, 11 s ahead   horizon_drops 20
+fq, capped       horizon_caps 20; next_packet_delay 1.79s; captured gap median 0.9 us
+ETF 500 us       median -497.0 us, 0 dropped as missed
+ETF 20 us        median -17.2 us, 0 dropped as missed
+ETF 10 us        median -6.9 us, 30 x ECANCELED TXTIME_MISSED (overlimits 30)
+ETF 0            Sent 0 bytes 0 pkt (dropped 1000, overlimits 1000 requeues 0)</code></pre>
+          <p><b>What this shows.</b> fq never drops a packet for lateness, sorts stamps that arrive out of order, and drops only beyond the horizon; a cap keeps the packets and loses their spacing (the learning on honouring the stamp; slides 15–16). Software ETF releases each packet <code>delta</code> early and needs <code>delta</code> above the timer's lateness: 20 µs was enough here and 10 µs was not (the ETF learning).</p>
+          <p><b>Common wrong turn.</b> Skipping the permanent neighbour entry. Every <code>sendmsg()</code> then succeeds, <code>tc -s</code> shows <code>Sent 0 bytes</code>, and <code>ip -n snd neigh</code> shows <code>10.0.1.2 FAILED</code>: ETF dropped the ARP requests, which have no socket, and the datagrams waited for a neighbour that never answered. A second one: <code>tc qdisc replace</code> to change <code>delta</code> fails with "Change operation not supported by specified qdisc".</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-replay-cover-letter">
+        <h4>Hands-on · Replay the cover letter's two <code>ss</code> lines</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3 and tcpdump</p>
+        <p><b>Task.</b> On a path with no delay, pace one CUBIC flow at 24 Mbit/s three ways, each with the socket cap: <code>fq maxrate 24mbit</code> (fq derives the gaps), plain <code>fq</code> (fq honours TCP's stamps), and <code>fq_codel</code> (TCP's own timer). Predict the RTT, pair gap and payload rate for each, then read <code>ss -tin</code> and a capture.</p>
+        <pre><code>cd labs/ch08-edt                            # from the dossier folder
+../common/qnet.sh
+tc -n rtr qdisc del dev r1 root
+tc -n rcv qdisc del dev c0 root
+tc -n snd qdisc del dev s0 root
+ip netns exec snd sysctl -w net.ipv4.tcp_tso_rtt_log=0
+tc -n snd qdisc add dev s0 root fq maxrate 24mbit
+ip netns exec rcv python3 flow.py recv --once &
+ip netns exec rtr timeout 11 tcpdump -i r0 -n -s 128 --time-stamp-precision nano -w t.pcap tcp &
+ip netns exec snd python3 flow.py send --dst 10.0.2.1 --cc cubic --seconds 10 --max-pacing-rate 24mbit --csv t.csv &
+sleep 6; ip netns exec snd ss -tin dst 10.0.2.1
+sleep 5; python3 gaps.py t.pcap --skip 2</code></pre>
+        <p><b>Done when.</b> You have three rows next to your predictions and can say which row is the cover letter's "before" line, and why.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The RTT learning: which stamp does each setup's RTT sample start from, and how long does an skb wait in fq beyond that stamp?</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>For the next run, <code>tc -n snd qdisc del dev s0 root</code>, then <code>tc -n snd qdisc add dev s0 root fq</code> (or <code>fq_codel</code>), and rerun the last five lines with new file names. Under <code>maxrate</code> a gap is 3,028 wire bytes at the rate; under TCP's clock it is 2,896 payload bytes.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>Predictions: <code>fq maxrate</code>: \(2 \times 1.009 = 2.02\) ms, pairs 1,009 µs apart, \(24 \times 2896/3028 = 22.95\) Mbit/s. TCP's stamps: the path's 0.03 ms, 965 µs, 24.00 Mbit/s.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026; <code>labs/ch08-edt/data/tcp24-transcript.txt</code> has the full <code>ss</code> lines and <code>tc -s</code>):</p>
+          <pre><code>s0 root            ss rtt       median   unacked  pair gap  Mbit/s
+fq maxrate 24mbit  2.031/0.01   2.026 ms  4       1008 us   22.955
+fq                 0.027/0.002  0.028 ms  4       964 us    24.001
+fq_codel           0.019/0.005  0.016 ms  0       964 us    24.001
+(median rtt and unacked over seconds 2-10 of TCP_INFO; payload rate)</code></pre>
+          <p><b>What this shows.</b> The <code>maxrate</code> row is the 2018 "before": fq derives each gap from wire bytes when the skb leaves, TCP's stamps fall behind and become hand-down times, and two TSQ skbs wait two gaps inside every RTT sample. The fq row is the "after" line, down to <code>cwnd:20 ssthresh:20 … unacked:4</code>. The fq_codel row is TCP's own timer enforcing the same clock: it holds each skb itself, so nothing waits below TCP and each pair is acked before the next is due (the RTT learning; cover letter §2, §3, §9).</p>
+          <p><b>Common wrong turn.</b> Leaving <code>tcp_tso_rtt_log</code> at its default of 9. On a 0.03 ms path, TSO autosizing's RTT bonus makes 64 KB skbs of 45 segments, so the <code>maxrate</code> run shows <code>rtt:45.435</code> and EDT sends 45-packet bursts every 21.7 ms. And do not switch qdiscs with <code>tc qdisc replace dev s0 root fq</code>: on an existing fq, replace keeps the <code>maxrate</code> you did not name.</p>
+        </details>
+      </div>
+
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: under the old model, a flow capped at 48 Mbit/s on a 0.03 ms LAN path. Segments per skb, RTT in <code>ss</code>, payload rate?</p>
+        <details class="ans"><summary>Answer</summary><p>Four segments, about 2.03 ms, 45.9 Mbit/s. \(6 \times 10^6 \gg 10 = 5859\) bytes and \(\lfloor 5859/1448 \rfloor = 4\), so each skb is 6,056 wire bytes and each gap \(6056 \times 8 / (48 \times 10^6) = 1.009\) ms; TSQ's two skbs make 2.02 ms. Payload: \(48 \times 1448/1514 = 45.9\). The bench: 2.025 ms and 45.906 (<code>rate-model-sweep.csv</code>). Near miss: twice the rate, half the wait. At multiples of 12 Mbit/s the gap is 1.009 ms.</p></details>
+        <p>2. Predict the value: at 96 Mbit/s TCP's skbs are 11,584 bytes, and one send happens 2 ms late. How long is the clock's next step, and how much time is lost for good?</p>
+        <details class="ans"><summary>Answer</summary><p>0.483 ms, and 1.517 ms lost. The full step is \(11{,}584 \times 8 / (96 \times 10^6) = 0.965\) ms. The 2 ms credit may cut at most half the step (<code>tcp_output.c:1460–1464</code>), so \(2 - 0.483 = 1.517\) ms is never made up. Near miss: "it sends 2 ms of data at once to catch up". The half-skb bucket (<code>a7a2563064e9</code>) stops that burst.</p></details>
+        <p>3. Here is a symptom: an operator caps uploads with <code>fq maxrate 24mbit</code> on the uplink. A LAN flow's <code>ss -ti</code> shows <code>rtt:7.076/0.005 … pacing_rate 88400920bps … unacked:14 … minrtt:0.03</code>, and an RTT alert fires. The network is idle. What is going on?</p>
+        <details class="ans"><summary>Answer</summary><p>fq derives each gap from <code>maxrate</code> as the skb leaves, so TCP's stamps are only hand-down times and the wait in fq lands in every RTT sample. With no socket cap, TCP paces at its own 88 Mbit/s, so autosizing builds 7-segment skbs (\(11.05 \times 10^6 \gg 10 = 10{,}791\) bytes) and TSQ keeps two in fq: \(2 \times 7 \times 1514 \times 8 / (24 \times 10^6) = 7.07\) ms. The bench printed this line. With <code>SO_MAX_PACING_RATE</code> TCP stamps at the cap: 0.03 ms. Near miss: a network queue; <code>minrtt</code> rules it out.</p></details>
+        <p>4. Here is a symptom: after a clock bug, a UDP sender's <code>SO_TXTIME</code> stamps run 15 s ahead. With fq's defaults its packets vanish and <code>horizon_drops</code> climbs. With <code>horizon_cap</code> they arrive 10 s late, in bursts that overflow the receiver. Explain both.</p>
+        <details class="ans"><summary>Answer</summary><p>Both are fq's horizon rule (<code>sch_fq.c:615–623</code>). A stamp more than 10 s ahead is dropped unless <code>horizon_cap</code> is set (line 1251). A capped stamp becomes now plus 10 s, so it takes its time from the moment it was handed down: datagrams written together get one time and leave together. On the bench, 20 datagrams stamped 1 ms apart left 0.9 µs apart. Near miss: fq's per-flow limit, which shows as <code>flows_plimit</code>.</p></details>
+        <p>5. Here is a symptom: someone puts <code>etf clockid CLOCK_TAI delta 0</code> on a host's root to send "exactly on time". Every packet of the timed application is dropped, <code>ping</code> prints "No buffer space available", and <code>overlimits</code> equals the application's packet count. What happened, and what fixes it?</p>
+        <details class="ans"><summary>Answer</summary><p>With <code>delta 0</code> the watchdog fires at the stamp, so any lateness expires the packet: dropped as <code>TXTIME_MISSED</code> and counted as an overlimit (<code>sch_etf.c:265–270, 224</code>). Ping has no <code>SO_TXTIME</code> socket, so ETF drops it at enqueue and <code>sendmsg()</code> returns <code>ENOBUFS</code> (lines 85–89). On the bench <code>delta 0</code> dropped 1,000 of 1,000. Fix: a <code>delta</code> above the timer's lateness (20 µs held here), and ETF on one <code>mqprio</code> queue (tc-etf(8)). Near miss: blaming the clock.</p></details>
+        <p>6. Choose and defend: a user-space media sender wants packets 1 ms apart from a laptop with an ordinary card. <code>CLOCK_MONOTONIC</code> through fq, or <code>CLOCK_TAI</code> through ETF?</p>
+        <details class="ans"><summary>Answer</summary><p>fq. It needs no privilege on <code>CLOCK_MONOTONIC</code> (<code>sock.c:1628–1632</code>), a late packet still leaves, ARP and other traffic pass, and the bench's packets left a median 13 µs after their stamps. ETF needs <code>CAP_NET_ADMIN</code> and its own queue, drops whatever misses its window, and without launch-time hardware sends <code>delta</code> early. The trade-off: fq promises "not before", never an instant. Choose ETF when the card launches at a PTP time.</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>Under AFAP a queue decides when, running the bottleneck at 100% with only local traffic in view. Jacobson's cure, after Carousel, is a departure time in every skb. Since 4.20 TCP writes its departure clock into <code>skb->tstamp</code> on <code>CLOCK_MONOTONIC</code>, advancing it by length over rate with a half-skb credit, and fq honours it as "not before" up to a 10 s horizon. TCP's RTT sample starts at that stamp, so the cover letter's 2.195 ms, two TSQ skbs of 1.009 ms each, became 0.165 ms. <code>SO_TXTIME</code> lets any socket stamp on fq's clock; ETF wants <code>CLOCK_TAI</code> and drops what misses its window.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> V. Jacobson, "Evolving from AFAP: Teaching NICs about time", netdev 0x12 keynote, July 2018, <a href="https://youtu.be/MAni0_lN7zE">video</a>. The talk behind the slides; watch it if they felt terse.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> J. Evans, "netdev day 2: moving away from 'as fast as possible' in networking code", 12 July 2018, <a href="https://jvns.ca/blog/2018/07/12/netdev-day-2--moving-away-from--as-fast-as-possible/">jvns.ca</a>. An attendee's notes on the keynote, in plain words.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> E. Dumazet, "tcp/fq: move back to CLOCK_MONOTONIC", commit <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=fb420d5d91c1">fb420d5d91c1</a>, September 2018. Why TCP and fq left ETF's clock; read after the TCP learning.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> TSN Documentation Project for Linux, "Configuring TSN Qdiscs", <a href="https://tsn.readthedocs.io/qdiscs.html">tsn.readthedocs.io</a>. ETF under <code>mqprio</code> with offload and PTP, for cards with launch time.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="afap">AFAP: the queue decides when</li>
+          <li data-strand="tcp-stamps-departure">TCP writes the departure time</li>
+          <li data-strand="rtt-from-departure">The RTT clock starts at departure</li>
+          <li data-strand="fq-honours-stamp">fq honours the stamp</li>
+          <li data-strand="so-txtime">Any socket can stamp, on fq's clock</li>
+          <li data-strand="etf-launch-time">ETF: a launch time that can be missed</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 8 "Teaching NICs about time" (V. Jacobson, "Evolving from AFAP: Teaching NICs about time", netdev 0x12 keynote slides, July 2018; E. Dumazet, "tcp: switch to Early Departure Time model", cover letter of merge a88e24f270eb, September 2018; Linux v7.2 tcp_output.c, sch_fq.c, sock.c, sch_etf.c), cited by slide 1–19, cover-letter paragraph §1–§10 and file:line.
+I have read the chapter and the after half of ch08.html. Lock in.
+Strands: afap (AFAP: the queue decides when), tcp-stamps-departure (TCP writes the departure time), rtt-from-departure (The RTT clock starts at departure), fq-honours-stamp (fq honours the stamp), so-txtime (Any socket can stamp, on fq's clock), etf-launch-time (ETF: a launch time that can be missed).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch08.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch08.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch07.html">← Carousel</a><a href="index.html">All chapters</a><a href="ch09.html">Eiffel →</a></nav>
+<footer>From a full buffer to BBR · chapter 8 reads V. Jacobson, "Evolving from AFAP: Teaching NICs about time", keynote slides, netdev 0x12, Montreal, July 2018 (19 slides); E. Dumazet, "tcp: switch to Early Departure Time model", cover letter of merge a88e24f270eb (net-next, 21 September 2018, first in v4.20), mirrored as LWN 766564; and Linux v7.2 (net/ipv4/tcp_output.c, tcp_input.c, net/sched/sch_fq.c, sch_etf.c, net/core/sock.c, net/ipv4/ip_output.c). Slides are cited by number, the cover letter by paragraph (§n), the kernel by file:line in v7.2. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

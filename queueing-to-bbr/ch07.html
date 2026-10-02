@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carousel · chapter 7 · From a full buffer to BBR</title>
+<link rel="stylesheet" href="assets/dossier.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.19/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+<header class="hero hero-ch">
+  <div class="hero-in">
+    <p class="crumbs"><a href="index.html">From a full buffer to BBR</a> · chapter 7 of 14</p>
+    <h1>Carousel</h1>
+    <p class="sub">After this chapter you can explain how one queue ordered by time does the work of thousands of token buckets, size a timing wheel's slots and horizon by hand, and say why a shaper must hold each completion until the packet leaves, with your own kernel's timer wheel and <code>sch_fq</code> as the Linux evidence.</p>
+  </div>
+</header>
+<div class="wrap">
+  <nav id="toc">
+    <h2>Before you read</h2>
+    <ol><li><a href="#question">The question</a></li><li><a href="#words">Words you will meet</a></li>
+        <li><a href="#model">The mental model</a></li><li><a href="#guide">Reading guide</a></li>
+        <li><a href="#carry">Carry these in</a></li><li><a href="#quiz-before">Pre-read quiz</a></li></ol>
+    <h2>The paper</h2>
+    <ol><li><a href="#book">pp. 404–417</a></li></ol>
+    <h2>After you read</h2>
+    <ol><li><a href="#carried">Your questions, answered</a></li><li><a href="#onescreen">The chapter on one screen</a></li>
+        <li><a href="#s-queue-per-limit">A queue and a lock per rate limit</a></li>
+        <li><a href="#s-release-times">A rate written as a release time</a></li>
+        <li><a href="#s-timing-wheel">A wheel of time slots</a></li>
+        <li><a href="#s-slot-and-horizon">Slot width and horizon</a></li>
+        <li><a href="#s-deferred-completions">Completions held until the wire</a></li>
+        <li><a href="#s-wheel-per-core">One wheel per core</a></li>
+        <li><a href="#systems">Real systems</a></li><li><a href="#labs">Hands-on</a></li>
+        <li><a href="#questions">Check yourself</a></li><li><a href="#quiz-after">Lock-in quiz</a></li></ol>
+  </nav>
+  <main>
+    <section id="before" class="chapter">
+      <span class="chnum">Chapter 7 · before you read</span>
+      <h2>Carousel</h2>
+      <p class="chmeta">~6 min before · pp. 404–417 (~1.5 h) · ~22 min after · <span class="tag HOST">HOST</span><br>
+        <span class="spine">One 1500-byte packet of a VM's paced TCP flow, in an aggregate held to 1 Gbit/s, on the paper's evaluation wheel of 2 µs slots and a 2 s horizon (p. 413): stamped with a release time, parked in one slot, released when the clock reaches it, and only then allowed to let its flow send the next packet.</span></p>
+
+      <h3 id="question">The question this chapter answers</h3>
+      <p>In 2017 Google paced the TCP flows of its video servers with fq, the qdisc from the <a href="ch05.html">small-queues chapter</a>. Retransmissions fell by 40%, and pacing cost 10% of each machine's CPU, up to six cores of 64 (Fig. 4, p. 407). HTB, the shapers chapter's tree of token buckets, held VM traffic to its rates and capped a test machine at 600,000 small transactions per second where it managed 800,000 without HTB. Every packet took the same qdisc lock (Fig. 6, p. 407). A busy host had tens of thousands of HTB classes (p. 408).</p>
+      <p>Follow one packet. It belongs to a TCP flow that wants to be <a href="index.html#g-pacing">paced</a>, and to a VM whose traffic to one destination is held to 1 Gbit/s. With HTB it waits in its class's queue, a scheduler polls thousands of such queues, and each enqueue takes the root lock. Carousel instead writes a time on the packet, drops it into one slot of one array indexed by time, and sends it when the clock reaches that slot. Only then does the sender hear that the packet left. The question is whether one queue ordered by time can do the work of thousands of token buckets, and what it gives up.</p>
+      <p>The paper is a Google systems paper, and its Carousel runs in a busy-polling software NIC (p. 409). Linux never built it as a qdisc. Your kernel does run a timing wheel for its own timeouts, so the after half ends inside <code>kernel/time/timer.c</code>.</p>
+
+      <div class="words" id="words"><h4>Words you will meet</h4><dl>
+        <dt id="w-traffic-shaping">traffic shaping</dt><dd>Making packets leave at a set rate. The paper names two kinds: pacing, gaps between the packets of one connection, and rate limiting, one rate on a flow aggregate (p. 404).</dd>
+        <dt id="w-flow-aggregate">flow aggregate</dt><dd>A group of connections held to one rate together, such as every flow from one VM to one destination.</dd>
+        <dt id="w-release-time">release time (earliest release time, ERT)</dt><dd>The absolute time before which a packet may not leave. Each shaping policy computes one, and the packet keeps the latest.</dd>
+        <dt id="w-timing-wheel">timing wheel</dt><dd>A circular array of slots, each covering one fixed slice of time. A packet goes into the slot that covers its release time, and a poller empties each slot when the clock passes it.</dd>
+        <dt id="w-slot-granularity">slot granularity</dt><dd>The slice of time one slot covers, written \(g\). Packets in the same slot leave together, first in, first out.</dd>
+        <dt id="w-horizon">horizon</dt><dd>How far past now the wheel reaches: the number of slots times \(g\). A release time beyond it is either clamped into the last slot or dropped.</dd>
+        <dt id="w-calendar-queue">calendar queue</dt><dd>A wheel that keeps every slot sorted and resizes its slots to fit the times inside: exact order, \(O(1)\) on average, \(O(n)\) when the times bunch up.</dd>
+        <dt id="w-deferred-completion">deferred completion</dt><dd>The shaper reports a packet as done only when it leaves for the wire, so the sender cannot park more than a couple of packets per flow in the shaper.</dd>
+        <dt id="w-backpressure">backpressure</dt><dd>A signal from a queue that slows the sender before the queue overflows. A drop is the coarse form; a withheld completion is the fine one.</dd>
+        <dt id="w-hol-blocking">head-of-line blocking (HoL)</dt><dd>A packet that has to wait holds up unrelated packets queued behind it.</dd>
+        <dt id="w-carousel">Carousel</dt><dd>The paper's shaper: release times on every packet, one timing wheel per core, and deferred completions, built into a software NIC.</dd>
+      </dl></div>
+
+      <h3 id="model">The mental model</h3>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  S["Socket buffers<br/>many flows from many VMs"] ==> T["Timestamper<br/>pacing stamp and aggregate stamp:<br/>keep the later one"]
+  T ==>|"release time"| W["Timing wheel<br/>one slot per g of time,<br/>out to the horizon"]
+  W ==>|"slots whose time has come"| N["NIC"]
+  W -.->|"deferred completion:<br/>only now may that flow<br/>hand down another packet"| S
+  style W fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 7.1 — Carousel in three steps, after the paper's Fig. 10 (p. 409).</b> Notice what is missing: there is no queue per class and no token bucket. Every packet of every flow goes into the same wheel, and the wheel's order is time. The dotted arrow is the third idea: the sender's next packet waits for this one to leave, so the wheel never holds more than a couple of packets per flow.</figcaption></figure>
+
+      <h3>Reading guide</h3>
+      <table class="guide" id="guide">
+        <tr><th>Paper section</th><th>Pages</th><th>How</th><th>Look for</th></tr>
+        <tr><td>Abstract, 1 Introduction</td><td>pp. 404–405</td><td><span class="how skim">skim</span></td><td>The definitions on p. 404 (shaping, pacing, rate limiting) and footnote 1 on p. 405. Skip the motivation for new congestion controllers.</td></tr>
+        <tr><td>2 Traffic shapers in practice: Fig. 1, policers, HTB, FQ/pacing</td><td>pp. 405–406</td><td><span class="how close">close</span></td><td>One queue per aggregate avoids head-of-line blocking; TSQ is already a form of backpressure; fq cannot hold an aggregate.</td></tr>
+        <tr><td>3 The cost of shaping, Figs 3–9</td><td>pp. 406–408</td><td><span class="how close">close</span></td><td>The memory paragraph with Fig. 8, and the Summary: why the CPU cost is in the structure. Skim the production figures.</td></tr>
+        <tr><td>4 Design principles, Fig. 10</td><td>pp. 408–409</td><td><span class="how close">close</span></td><td>The three requirements and the three tenets.</td></tr>
+        <tr><td>5, 5.1 Timestamps and the timing wheel, Algorithm 1</td><td>pp. 409–411</td><td><span class="how close">close</span></td><td>The stamp per policy and the rule that combines them; slots, granularity, horizon; the two choices past the horizon. Implement Algorithm 1 in your head; it has two slips.</td></tr>
+        <tr><td>5.2 Deferred completions, Fig. 11</td><td>pp. 411–412</td><td><span class="how close">close</span></td><td>When the completion is sent, and why completions must be allowed out of order.</td></tr>
+        <tr><td>5.3 Scaling with multiple cores</td><td>p. 412</td><td><span class="how close">close</span></td><td>One wheel per core, and the allocator that splits an aggregate's rate across cores.</td></tr>
+        <tr><td>6 Carousel at the receiver</td><td>p. 412</td><td><span class="how later">later</span></td><td>Shaping by rewriting acks on top of DCTCP. Nothing later in this dossier uses it.</td></tr>
+        <tr><td>7.1 Microbenchmarks, Figs 12–18, Table 1</td><td>pp. 412–414</td><td><span class="how close">close</span></td><td>Figs 14–15 (packets held in the shaper), Fig. 16 (slot width), Table 1 (cost per packet). Fig. 17's axis is garbled; read its caption only.</td></tr>
+        <tr><td>7.1.4, 7.2 Receiver test, production</td><td>pp. 414–416</td><td><span class="how skim">skim</span></td><td>Remember "8% of machine CPU, 12% of the software NIC". The rest is Google-internal.</td></tr>
+        <tr><td>8 Discussion</td><td>p. 416</td><td><span class="how close">close</span></td><td>Limitations: a stamped packet cannot be moved, and every source must share one clock.</td></tr>
+        <tr><td>9–10 Related work, conclusion</td><td>pp. 416–417</td><td><span class="how skim">skim</span></td><td>Pacing with one timer per flow was the old cost. The paragraph on new scheduling structures belongs to the programmable-schedulers chapter.</td></tr>
+      </table>
+
+      <div class="carry" id="carry"><h4>Carry these into the paper</h4><ol>
+        <li>A packet passes TCP's pacing and an aggregate's rate limit, and each computes its own release time. Which one does Carousel keep, and why does that act like a chain of token buckets?</li>
+        <li>How can one array of time slots replace a queue per rate limit, and what does the width of a slot cost?</li>
+        <li>If the shaper delays a packet, what stops the sender from filling the shaper with its whole window, and what new problem does that create?</li>
+      </ol></div>
+
+      <div class="quiz" data-when="before" id="quiz-before">
+        <h4>Quiz · before you read</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="queue-per-limit">A queue and a lock per rate limit</li>
+          <li data-strand="release-times">A rate written as a release time</li>
+          <li data-strand="timing-wheel">A wheel of time slots</li>
+          <li data-strand="slot-and-horizon">Slot width and horizon</li>
+          <li data-strand="deferred-completions">Completions held until the wire</li>
+          <li data-strand="wheel-per-core">One wheel per core</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills (<code>probe</code>, <code>teach</code>):</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 7 "Carousel" (A. Saeed, N. Dukkipati, V. Valancius, V. T. Lam, C. Contavalli, A. Vahdat, "Carousel: Scalable Traffic Shaping at End Hosts", SIGCOMM '17), printed pp. 404–417.
+I have NOT read it yet. Find what I already know, so I know where to read closely.
+Strands: queue-per-limit (A queue and a lock per rate limit), release-times (A rate written as a release time), timing-wheel (A wheel of time slots), slot-and-horizon (Slot width and horizon), deferred-completions (Completions held until the wire), wheel-per-core (One wheel per core).
+3–5 questions, broad first. Use the question tool, never A/B/C/D in chat. "I don't know" is a fine answer here.
+Write the map to .alvar/maps/qbbr-ch07.md.
+End with a reading plan: for each row of the reading guide in ch07.html, say "read closely" or "skim".</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+
+    <section id="book" class="card readnow">
+      <h2>Now read the paper</h2>
+      <p>Pages 404–417 of <code>06-carousel.pdf</code> (PDF pages 1–14), about an hour and a half. Keep the three questions in mind and note the page where each one is answered. Then come back for the after half.</p>
+    </section>
+
+    <section id="after" class="chapter">
+      <span class="chnum">Chapter 7 · after you read</span>
+      <div class="carried" id="carried"><h4>The questions you carried in</h4>
+        <p>1. A packet passes TCP's pacing and an aggregate's rate limit, and each computes its own release time. Which one does Carousel keep, and why does that act like a chain of token buckets? <span class="pageref">pp. 409–410</span></p>
+        <details class="ans"><summary>Answer</summary><p>The largest. Each policy advances its own stamp by the packet's length over its rate, and a later stamp means a slower rate, so the largest breaks none of them (p. 410). In a chain of <a href="index.html#g-token-bucket">token buckets</a> with no burst, a packet leaves when the slowest bucket allows it: "the slowest token bucket ends up dominating" (p. 410). Near miss: adding the delays.</p></details>
+        <p>2. How can one array of time slots replace a queue per rate limit, and what does the width of a slot cost? <span class="pageref">pp. 410–411, 414</span></p>
+        <details class="ans"><summary>Answer</summary><p>Once the rate is in the stamp, the shaper only has to send in time order. Insert appends to slot \(\lfloor t/g \rfloor \bmod N\), a poller empties slots as the clock passes them, both \(O(1)\), first in, first out inside a slot (p. 410). The width costs precision: 4 ms slots missed a 5 Gbit/s target by about 300 Mbit/s (Fig. 16, p. 414). Near miss: sorting, which only a calendar queue does (p. 410).</p></details>
+        <p>3. If the shaper delays a packet, what stops the sender from filling the shaper with its whole window, and what new problem does that create? <span class="pageref">pp. 408, 411–412</span></p>
+        <details class="ans"><summary>Answer</summary><p>The deferred completion. The wheel reports a packet as done only when it leaves, and the guest's TSQ waits for that report, so each flow has about two packets in the shaper (pp. 411, 414). Without it one 2 Gbit/s flow parked 21,000 packets, 32 MB (Fig. 8, p. 408). The new problem: packets leave out of arrival order, so completions must too, or a slow flow's pending completion blocks a fast flow (p. 411).</p></details>
+      </div>
+
+      <h3 id="onescreen">The chapter on one screen</h3>
+      <p><b>The setting</b> (pp. 404–406). Shaping means pacing or rate limiting, and hosts now do it for tens of thousands of flows. Policers keep no queue; HTB and fq keep a queue per class or per flow against head-of-line blocking, and TSQ already gives TCP backpressure.</p>
+      <p><b>The cost</b> (pp. 406–408). Policers miss their target by up to ten times. Pacing with fq costs 10% of machine CPU; HTB loses a quarter of its transaction rate to the qdisc lock; without backpressure one flow parks 21,000 packets. The Summary calls the cost structural: queues to poll, a lock per packet.</p>
+      <p><b>The design</b> (pp. 408–412). Stamp every packet, \(LTS_i' = LTS_i + \text{len}/R_i\) per policy, keep the largest stamp, and queue everything in one timing wheel (Algorithm 1). Hold each completion until the packet leaves. Run one wheel per core, and split an aggregate's rate across cores every 100 ms by water-filling.</p>
+      <p><b>The evidence</b> (pp. 412–416). HTB and fq deviate from target rates by 5% and 6%, and fq collapses above 200 flows; deferred completions hold about two packets per flow; the wheel costs 11–12 ns per packet at every size (Table 1); in production Carousel moves 6.4% to 8.2% more Gbit/s per CPU. Its limits (p. 416): a queued stamp cannot change, so strict priority is out, and every source must share one clock.</p>
+
+      <h3 class="strand" id="s-queue-per-limit">A queue and a lock per rate limit</h3>
+      <p>A token-bucket shaper needs one queue per rate limit, so that a packet waiting for its own tokens holds up no one else. That structure has two costs that better code cannot remove: the scheduler must find the queues that have work, and every packet takes a lock that all cores share (Summary, p. 408).</p>
+      <p>This is the <a href="ch04.html#s-htb-borrowing">shapers chapter's design</a>: Diagram 4.1 gave customers A and B separate <a href="index.html#g-htb-class">HTB classes</a> so that B's backlog could never delay A (p. 405). Google's hosts had tens of thousands of classes at the 90th percentile, 1,000–2,000 of them active, and lock waits near one second per host at the 99th (pp. 407–408). fq repeats the pattern per flow, under one qdisc lock (Fig. 2b, p. 406). The <a href="index.html#g-policer">policer</a> avoids both costs and pays in accuracy: 5 times below a 1 Gbit/s target at 100 ms RTT, even with a one-second burst (Fig. 3, p. 407). The shapers chapter's 16 KB policer gave 2.33 Mbit/s of a 5 Mbit/s target.</p>
+      <p>The bench lab holds 16 flows to 500 kbit/s each with 16 HTB classes, queues and filters, or with one fq; both deliver 8.00 Mbit/s, far too slow to show the CPU cost of Fig. 6 (p. 407).</p>
+      <p class="since"><b>Since the paper.</b> The lock is still in v7.2: an enqueue to a qdisc without <code>TCQ_F_NOLOCK</code> runs under <code>spin_lock(root_lock)</code> (<code>net/core/dev.c:4252</code>). Since v6.19 (<code>100dfa74cad9</code>, October 2025) the other CPUs push their skbs onto a lock-free list and one CPU enqueues the batch; the commit reports twice the packets per second at half the cycles, with fq on 30 transmit queues.</p>
+
+      <h3 class="strand" id="s-release-times">A rate written as a release time</h3>
+      <p>Any rate limit can be written as a release time on each packet. Policy \(i\) keeps its last stamp \(LTS_i\) and advances it by each packet's length over its rate \(R_i\); a packet that meets several policies keeps the largest stamp (p. 410):</p>
+      <p>\[ LTS_i' = LTS_i + \frac{\text{len}(P)}{R_i}, \qquad \text{ERT} = \max_i\, LTS_i'. \]</p>
+      <p>Put the spine through it. TCP paces the flow at 3 Gbit/s, so its stamps step by \(12{,}000\ \text{bits} / 3\ \text{Gbit/s} = 4\) µs. The VM's aggregate is held to 1 Gbit/s, so every packet of every flow in it steps the aggregate's stamp by 12 µs. Our packet carries TCP's stamp 5.000004 s; the aggregate's stamp, pushed on by 24 packets of other flows ahead, reads 5.000302 s. The release time is 5.000302 s: the aggregate decides.</p>
+      <details class="deriv"><summary>Derivation · the largest stamp is a chain of token buckets</summary>
+        <p>Take two shapers in series, each a token bucket with no burst, rates \(R_1\) and \(R_2\). Packet \(j\) leaves shaper 1 at \(d^{(1)}_j = \max(a_j,\ d^{(1)}_{j-1} + \ell_j/R_1)\), where \(a_j\) is its arrival. Shaper 2 sees it at \(d^{(1)}_j\) and releases it at \(d^{(2)}_j = \max(d^{(1)}_j,\ d^{(2)}_{j-1} + \ell_j/R_2)\).</p>
+        <p>While both are backlogged, the inner terms are the two running stamps, \(LTS_1\) and \(LTS_2\), so \(d^{(2)}_j = \max(LTS_{1,j},\ LTS_{2,j})\): the slower one's stamp, packet by packet. Computing both stamps at once and keeping the larger gives the same schedule without either queue. The paper's formula leaves out the arrival term \(a_j\); the last paragraph of this learning says what that costs.</p>
+      </details>
+      <p>Enforcement leaves the policies: each is now a counter and an addition, and none owns a queue. TCP stamps in the guest and a module in the software NIC stamps for the aggregates (p. 410). The <a href="ch02.html#sys-netem">queueing-maths chapter's netem</a> stamps the same way for one FIFO: the later of now and the previous release time, plus the packet's own transmission time (<code>sch_netem.c:588–626</code>).</p>
+      <p>The "later of now" matters. As printed, the formula never reads the clock, so a policy idle for one second keeps a stamp one second old: at 10 Mbit/s the next 1.25 MB all get stamps in the past, and Algorithm 1 puts them in the front slot together (lines 3–4). A practical stamper starts from \(\max(\text{now}, LTS_i)\), as the departure-time chapter shows Linux doing. This reading is mine: the paper never discusses idle flows.</p>
+
+      <h3 class="strand" id="s-timing-wheel">A wheel of time slots</h3>
+      <p>A timing wheel is an array of lists indexed by time. Insert computes the packet's slot and appends; extract empties slots as the clock reaches them. Both cost \(O(1)\) whatever the number of packets, and inside a slot the order is first in, first out (p. 410). A calendar queue keeps each slot sorted: exact order, \(O(1)\) only on average, \(O(n)\) when times bunch. Carousel needs no order inside a slot, so it takes the simpler structure with the smaller constant.</p>
+      <p>The spine's wheel has 2 µs slots and a 2 s horizon: 1,000,000 slots. The release time 5.000302 s is absolute slot \(\lfloor 5.000302\ \text{s} / 2\ \mu\text{s} \rfloor = 2{,}500{,}151\), index \(2{,}500{,}151 \bmod 10^6 = 500{,}151\), 151 slots after the front at 5.000000 s. The poller visits a slot every 2 µs and at index 500,151 takes the whole list. Nothing ever compared our packet with another.</p>
+      <figure class="dia"><div class="mermaid">
+flowchart LR
+  X["Poller, every 2 µs:<br/>sweep from the front slot,<br/>take whole slots"]
+  P["Packet with release time<br/>5.000302 s:<br/>slot 2,500,151, index 500,151"]
+  subgraph WH["Timing wheel: 1,000,000 slots of 2 µs, horizon 2 s, circular"]
+    S0["index 500,000<br/>front slot<br/>now = 5.000000 s"] --> S1["index 500,001"] --> S2["index 500,151<br/>a FIFO list"] --> S3["…"] --> S4["index 499,999<br/>last slot<br/>front + 2 s"]
+  end
+  X ==> S0
+  P --> S2
+  style S2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+</div><figcaption><b>Diagram 7.2 — The spine's packet in the paper's evaluation wheel (p. 413), after Algorithm 1 (p. 410).</b> Notice that the index wraps: the last slot, index 499,999, sits just before the front, and an emptied slot comes to stand for a time 2 s later.</figcaption></figure>
+      <p>The <a href="ch05.html#s-fq-throttled-tree">small-queues chapter's throttled tree</a> does this job with a red-black tree: an \(O(\log n)\) insert per waiting flow (<code>sch_fq.c:220–247</code>). In the Python lab a heap needed 8.8 comparisons per packet with 200 packets queued and 18.8 with 200,000; the wheel needed 4 at every size. Table 1 (p. 414) is the same flat line in C++: 11–12 ns per packet from 1,000 to 20 million packets.</p>
+      <details class="deriv"><summary>Derivation · cost per operation, after Varghese and Lauck (pp. 26–33)</summary>
+        <p>A timer module starts timers, stops them, and does bookkeeping every tick; \(n\) timers are outstanding. An ordered list (Scheme 2) makes the tick \(O(1)\) and the start \(O(n)\); a tree or heap (Scheme 3) makes the start \(O(\log n)\) (pp. 27–28). A wheel with one slot per tick out to the longest interval (Scheme 4) makes start, stop and tick all \(O(1)\), at the price of one slot per tick of range (p. 29). Carousel's wheel is Scheme 4, with FIFO lists and a clamp at the horizon.</p>
+        <p>When the range is too big for memory, hash the time into fewer slots (Scheme 6: each tick does \(n/M\) work on average for \(M\) slots, p. 30), or stack wheels of growing granularity (Scheme 7, p. 31). Days, hours, minutes and seconds need \(100 + 24 + 60 + 60 = 244\) slots instead of \(100 \times 24 \times 60 \times 60 = 8.64\) million; a timer moves between levels at most \(m\) times, so the cost per unit time is \(n\,c_7\,m/T\) against \(n\,c_6/M\) for hashing (p. 32). Skip the moves and accept less precision for long timers, as Wick Nichols suggested (p. 32), and you have Linux's wheel: 9 levels of 64 slots, 576 in all, reach about 12 days at 1 ms ticks, where one flat wheel would need \(2^{30}\) slots.</p>
+      </details>
+      <p class="erratum"><b>The paper's slip.</b> Algorithm 1 (p. 410) loses packets as printed. Lines 2 and 11 divide by <i>Granularity</i>, so <i>FrontTimestamp</i> counts slots, yet line 14 adds <i>Granularity</i> to it, skipping that many slots. And lines 13 and 16 test and pop <code>TW[now % NumberOfSlots]</code>, where the sweep must take <code>TW[FrontTimestamp % NumberOfSlots]</code>. Ported line by line onto 100 flows and a 1 µs wheel, it released 11,627 of 20,000 packets in twenty times the needed time, some 0.38 s late, and polling every third slot only 53; fixed, every packet left on time (<a href="labs/ch07-carousel/data/alg1-check.txt">alg1-check.txt</a>).</p>
+      <p class="since"><b>Since the paper.</b> Linux has no wheel qdisc: no file under <code>net/sched/</code> in v7.2 mentions a wheel, and <code>sch_fq</code> still parks flows in its tree (<code>sch_fq.c:138</code>). The wheel arrived as a hook for NICs that have one: <code>f858cc9eed5b</code> and <code>f26080d47007</code> (v6.13, October 2024), whose messages link the Carousel paper, let fq hand a packet early to a device whose wheel horizon covers it. No in-tree driver sets that horizon in v7.2.</p>
+
+      <h3 class="strand" id="s-slot-and-horizon">Slot width and horizon</h3>
+      <p>A wheel has \(\text{horizon}/g\) slots. The width \(g\) cannot usefully be finer than the poller's period, \(g_{min} = 1/f_{max}\), and the horizon must reach the latest release time, \(\text{horizon} = l_{max}/r_{min}\) (p. 410). A flow faster than one packet per slot loses its gaps; a flow slower than one packet per horizon does not fit.</p>
+      <p>The paper's example has 8 µs slots and a 4 s horizon: 500,000 slots. One 1500-byte packet per slot is \(12{,}000\ \text{bits} / 8\ \mu\text{s} = 1.5\) Gbit/s; a faster flow puts two packets in one slot and they leave back to back, the average rate kept and the gap gone (p. 410).</p>
+      <p>Deferred completions size the horizon. An aggregate of 1,000 flows held to 10 Mbit/s, two 1500-byte packets per flow, can queue 3 MB, so its last release time is \(24\ \text{Mbit} / 10\ \text{Mbit/s} = 2.4\) s away, past the spine's 2 s horizon. Past the horizon there are two choices (p. 411): clamp into the last slot, which drops nothing and suits pacing but bunches packets into a brief overshoot, or drop, which suits a hard rate limit.</p>
+      <details class="deriv"><summary>Derivation · the wheel's limits, and why its rounding does not add up</summary>
+        <p>A flow keeps its spacing while it sends at most \(s\) bytes per slot, so \(r_{max} = s/g\). Each packet must land inside the horizon \(H\) after the one before it, so \(r_{min} = s/H\). With \(s = 1500\) bytes, \(g = 8\) µs and \(H = 4\) s: \(r_{max} = 1.5\) Gbit/s and \(r_{min} = 12{,}000 / 4 = 3{,}000\) bit/s. An aggregate that may queue \(l_{max}\) bytes at rate \(r_{min}\) has its last release time \(l_{max}/r_{min}\) ahead, which is the paper's horizon.</p>
+        <p>A packet stamped \(t\) leaves with slot \(\lfloor t/g \rfloor\), up to \(g\) early. The next stamp is computed from \(t\), never from the slot, so one packet's rounding does not carry into the next. Over \(k\) packets the error stays below \(g\) while the time covered grows as \(k\,s/r\).</p>
+      </details>
+      <p>At 5 Gbit/s the deviation stays near zero from 2 µs slots to past 32 µs, then reaches about 200 Mbit/s at 500 µs and 300 Mbit/s at 4 ms (Fig. 16, p. 414); over 90% of packets leave within one 2 µs slot of their stamp (Fig. 18).</p>
+      <p class="erratum"><b>The paper's slip.</b> Page 410 sizes the example wheel "for a minimum rate of 1.5Mbps for 1500B packet size", then defines that minimum as "one packet sent per time horizon". One 1500-byte packet per 4 s is \(12{,}000\ \text{bits}/4\ \text{s} = 3\) kbit/s, 500 times less; 1.5 Mbit/s needs \(l_{max} = 500\) packets in the horizon formula. Fig. 17's axis (p. 414) says nanoseconds where 8,000 slots of 2 µs need microseconds.</p>
+      <p>Your kernel makes this trade with a hierarchy. Its timer wheel puts a timeout under 63 ms into 1 ms slots, one under 504 ms into 8 ms slots, then 64 ms and 512 ms slots, and rounds each up to the end of its slot (<code>calc_index()</code>, <code>kernel/time/timer.c:524–539</code>). So a long timeout fires up to one slot late, never early.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch07-wheelwait-->
+<svg viewBox="0 0 720 332" role="img" aria-label="How late each timeout fired: timer-wheel waits stay under the bucket width of their wheel level; hrtimer sleeps are a tenth of a millisecond late" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="280.6" y2="280.6" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="284.6" text-anchor="end" fill="#898781">0.03</text>
+<line x1="58" x2="570" y1="252.7" y2="252.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="256.7" text-anchor="end" fill="#898781">0.1</text>
+<line x1="58" x2="570" y1="199.4" y2="199.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="203.4" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="570" y1="146.1" y2="146.1" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="150.1" text-anchor="end" fill="#898781">10</text>
+<line x1="58" x2="570" y1="92.7" y2="92.7" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="96.7" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="39.4" y2="39.4" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="43.4" text-anchor="end" fill="#898781">1000</text>
+<line x1="58" x2="570" y1="290.0" y2="290.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="160.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 160.0)">late (ms, log scale)</text>
+<polyline points="58.0,199.4 169.5,199.4 169.5,151.2 323.6,151.2 323.6,103.1 477.7,103.1 477.7,54.9 570.0,54.9" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<line x1="574" x2="586" y1="54.9" y2="54.9" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="58.9" fill="#1b1f24">bucket width</text>
+<circle cx="84.4" cy="219.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="217.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="233.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="222.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="161.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="215.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="214.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="229.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="193.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="206.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="218.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="275.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="204.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="173.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="223.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="234.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="208.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="171.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="240.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="212.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="224.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="202.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="151.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="227.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="243.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="233.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="169.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="202.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="261.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="228.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="207.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="152.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="218.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="227.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="84.4" cy="204.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="118.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="220.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="186.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="221.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="173.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="251.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="169.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="212.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="161.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="221.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="164.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="220.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="153.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="198.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="107.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="210.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="161.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="206.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="234.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="163.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="151.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="219.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="152.4" cy="230.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="193.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="205.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="194.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="162.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="195.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="118.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="156.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="176.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="154.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="154.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="162.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="175.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="107.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="166.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="170.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="217.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="160.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="158.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="163.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="193.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="203.7" cy="154.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="114.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="152.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="158.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="119.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="241.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="152.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="493.7" cy="145.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="182.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="170.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="165.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="153.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="158.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="163.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="184.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="208.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="176.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="142.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="168.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="171.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="152.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="255.1" cy="153.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="155.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="177.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="106.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="191.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="178.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="545.1" cy="130.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="123.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="155.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="239.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="306.5" cy="202.0" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="116.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="142.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="117.2" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="146.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="357.9" cy="109.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="493.7" cy="56.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="137.3" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="113.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="113.1" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="404.4" cy="116.7" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="493.7" cy="60.8" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="154.4" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="545.1" cy="58.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="455.8" cy="125.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="493.7" cy="60.5" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="493.7" cy="61.9" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<circle cx="545.1" cy="84.6" r="3" fill="#2a78d6" stroke="#fff" stroke-width="1.5"/>
+<path d="M80.4,253.0L88.4,261.0M80.4,261.0L88.4,253.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,250.9L88.4,258.9M80.4,258.9L88.4,250.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,252.2L156.4,260.2M148.4,260.2L156.4,252.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,245.5L88.4,253.5M80.4,253.5L88.4,245.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,250.7L88.4,258.7M80.4,258.7L88.4,250.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,260.9L156.4,268.9M148.4,268.9L156.4,260.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,253.0L207.7,261.0M199.7,261.0L207.7,253.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,252.8L88.4,260.8M80.4,260.8L88.4,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,259.4L88.4,267.4M80.4,267.4L88.4,259.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,261.7L88.4,269.7M80.4,269.7L88.4,261.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.8L156.4,262.8M148.4,262.8L156.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.5L88.4,262.5M80.4,262.5L88.4,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,255.1L88.4,263.1M80.4,263.1L88.4,255.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,253.3L259.1,261.3M251.1,261.3L259.1,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.8L156.4,262.8M148.4,262.8L156.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,254.5L207.7,262.5M199.7,262.5L207.7,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,252.2L88.4,260.2M80.4,260.2L88.4,252.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.2L156.4,262.2M148.4,262.2L156.4,254.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.5L156.4,262.5M148.4,262.5L156.4,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,254.8L207.7,262.8M199.7,262.8L207.7,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,253.0L88.4,261.0M80.4,261.0L88.4,253.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,251.2L156.4,259.2M148.4,259.2L156.4,251.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,251.7L88.4,259.7M80.4,259.7L88.4,251.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,237.4L156.4,245.4M148.4,245.4L156.4,237.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,254.2L259.1,262.2M251.1,262.2L259.1,254.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,247.2L310.5,255.2M302.5,255.2L310.5,247.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M80.4,254.8L88.4,262.8M80.4,262.8L88.4,254.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,253.3L207.7,261.3M199.7,261.3L207.7,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,250.9L156.4,258.9M148.4,258.9L156.4,250.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.5L156.4,262.5M148.4,262.5L156.4,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,253.3L207.7,261.3M199.7,261.3L207.7,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.5L156.4,262.5M148.4,262.5L156.4,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,252.8L156.4,260.8M148.4,260.8L156.4,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,253.9L259.1,261.9M251.1,261.9L259.1,253.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,251.9L207.7,259.9M199.7,259.9L207.7,251.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,248.5L156.4,256.5M148.4,256.5L156.4,248.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,248.5L156.4,256.5M148.4,256.5L156.4,248.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,248.5L207.7,256.5M199.7,256.5L207.7,248.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,248.5L156.4,256.5M148.4,256.5L156.4,248.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,249.0L156.4,257.0M148.4,257.0L156.4,249.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,252.2L310.5,260.2M302.5,260.2L310.5,252.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,251.9L259.1,259.9M251.1,259.9L259.1,251.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,249.7L361.9,257.7M353.9,257.7L361.9,249.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,251.7L207.7,259.7M199.7,259.7L207.7,251.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,250.9L156.4,258.9M148.4,258.9L156.4,250.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,249.2L156.4,257.2M148.4,257.2L156.4,249.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,254.5L207.7,262.5M199.7,262.5L207.7,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,254.5L156.4,262.5M148.4,262.5L156.4,254.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M148.4,249.7L156.4,257.7M148.4,257.7L156.4,249.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,252.8L259.1,260.8M251.1,260.8L259.1,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,253.3L207.7,261.3M199.7,261.3L207.7,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,252.8L207.7,260.8M199.7,260.8L207.7,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,252.8L310.5,260.8M302.5,260.8L310.5,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,253.3L259.1,261.3M251.1,261.3L259.1,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,249.9L207.7,257.9M199.7,257.9L207.7,249.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,247.8L207.7,255.8M199.7,255.8L207.7,247.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,249.4L259.1,257.4M251.1,257.4L259.1,249.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,246.9L207.7,254.9M199.7,254.9L207.7,246.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,247.4L408.4,255.4M400.4,255.4L408.4,247.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,234.1L207.7,242.1M199.7,242.1L207.7,234.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,252.5L310.5,260.5M302.5,260.5L310.5,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,251.2L259.1,259.2M251.1,259.2L259.1,251.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,247.4L361.9,255.4M353.9,255.4L361.9,247.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,251.2L207.7,259.2M199.7,259.2L207.7,251.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,249.2L207.7,257.2M199.7,257.2L207.7,249.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,250.4L259.1,258.4M251.1,258.4L259.1,250.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,246.7L207.7,254.7M199.7,254.7L207.7,246.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,249.2L207.7,257.2M199.7,257.2L207.7,249.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,248.0L310.5,256.0M302.5,256.0L310.5,248.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,250.7L259.1,258.7M251.1,258.7L259.1,250.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M199.7,250.4L207.7,258.4M199.7,258.4L207.7,250.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,248.5L259.1,256.5M251.1,256.5L259.1,248.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,257.3L310.5,265.3M302.5,265.3L310.5,257.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,252.5L259.1,260.5M251.1,260.5L259.1,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,253.3L361.9,261.3M353.9,261.3L361.9,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,252.5L259.1,260.5M251.1,260.5L259.1,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,255.1L310.5,263.1M302.5,263.1L310.5,255.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,252.5L259.1,260.5M251.1,260.5L259.1,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,249.0L459.8,257.0M451.8,257.0L459.8,249.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,251.7L259.1,259.7M251.1,259.7L259.1,251.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,241.1L408.4,249.1M400.4,249.1L408.4,241.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,236.3L310.5,244.3M302.5,244.3L310.5,236.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,253.3L259.1,261.3M251.1,261.3L259.1,253.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,249.0L361.9,257.0M353.9,257.0L361.9,249.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,252.5L259.1,260.5M251.1,260.5L259.1,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,246.9L310.5,254.9M302.5,254.9L310.5,246.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,257.7L259.1,265.7M251.1,265.7L259.1,257.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,253.9L259.1,261.9M251.1,261.9L259.1,253.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,255.7L310.5,263.7M302.5,263.7L310.5,255.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M251.1,251.4L259.1,259.4M251.1,259.4L259.1,251.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,251.4L361.9,259.4M353.9,259.4L361.9,251.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,253.9L310.5,261.9M302.5,261.9L310.5,253.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,252.8L408.4,260.8M400.4,260.8L408.4,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,259.8L310.5,267.8M302.5,267.8L310.5,259.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,250.7L361.9,258.7M353.9,258.7L361.9,250.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M489.7,250.9L497.7,258.9M489.7,258.9L497.7,250.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,253.9L310.5,261.9M302.5,261.9L310.5,253.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,251.7L310.5,259.7M302.5,259.7L310.5,251.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,251.7L361.9,259.7M353.9,259.7L361.9,251.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M302.5,257.7L310.5,265.7M302.5,265.7L310.5,257.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,251.4L459.8,259.4M451.8,259.4L459.8,251.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,250.7L408.4,258.7M400.4,258.7L408.4,250.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,251.2L361.9,259.2M353.9,259.2L361.9,251.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,248.3L361.9,256.3M353.9,256.3L361.9,248.3" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,249.4L408.4,257.4M400.4,257.4L408.4,249.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M353.9,250.9L361.9,258.9M353.9,258.9L361.9,250.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,249.4L459.8,257.4M451.8,257.4L459.8,249.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,250.7L408.4,258.7M400.4,258.7L408.4,250.7" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M541.1,251.9L549.1,259.9M541.1,259.9L549.1,251.9" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M489.7,245.1L497.7,253.1M489.7,253.1L497.7,245.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,247.8L408.4,255.8M400.4,255.8L408.4,247.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,255.4L459.8,263.4M451.8,263.4L459.8,255.4" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M400.4,211.0L408.4,219.0M400.4,219.0L408.4,211.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,259.1L459.8,267.1M451.8,267.1L459.8,259.1" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M489.7,252.8L497.7,260.8M489.7,260.8L497.7,252.8" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M451.8,252.5L459.8,260.5M451.8,260.5L459.8,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M541.1,215.2L549.1,223.2M541.1,223.2L549.1,215.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M489.7,251.2L497.7,259.2M489.7,259.2L497.7,251.2" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M489.7,252.5L497.7,260.5M489.7,260.5L497.7,252.5" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<path d="M541.1,215.0L549.1,223.0M541.1,223.0L549.1,215.0" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<text x="91.5" y="173.9" fill="#4a5560" text-anchor="start">level 0: 1 ms</text>
+<text x="210.8" y="130.0" fill="#4a5560" text-anchor="start">level 1: 8 ms</text>
+<text x="359.7" y="81.8" fill="#4a5560" text-anchor="start">level 2: 64 ms</text>
+<text x="482.5" y="37.2" fill="#4a5560" text-anchor="start">level 3: 512 ms</text>
+<circle cx="72" cy="18" r="4" fill="#2a78d6"/>
+<text x="85" y="22" fill="#1b1f24">timer wheel (SO_RCVTIMEO)</text>
+<path d="M269,14L277,22M269,22L277,14" stroke="#eb6834" stroke-width="2"/>
+<text x="286" y="22" fill="#1b1f24">hrtimer (time.sleep)</text>
+<line x1="433" x2="447" y1="18" y2="18" stroke="#1baf7a" stroke-width="2"/>
+<text x="452" y="22" fill="#1b1f24">bucket width</text>
+<text x="84.4" y="306.0" text-anchor="middle" fill="#898781">20 ms</text>
+<text x="152.4" y="306.0" text-anchor="middle" fill="#898781">50</text>
+<text x="203.7" y="306.0" text-anchor="middle" fill="#898781">100</text>
+<text x="255.1" y="306.0" text-anchor="middle" fill="#898781">200</text>
+<text x="323.0" y="306.0" text-anchor="middle" fill="#898781">500</text>
+<text x="374.4" y="306.0" text-anchor="middle" fill="#898781">1 s</text>
+<text x="425.8" y="306.0" text-anchor="middle" fill="#898781">2</text>
+<text x="493.7" y="306.0" text-anchor="middle" fill="#898781">5</text>
+<text x="545.1" y="306.0" text-anchor="middle" fill="#898781">10 s</text>
+<text x="314.0" y="324.0" text-anchor="middle" fill="#4a5560">requested timeout (log scale)</text>
+<g class="hit"><title>20 ms timeout · wheel bucket 1 ms · wheel late 0.04 to 0.89 ms (median 0.37) · hrtimer late median 0.077 ms</title><rect x="58.0" y="30" width="60.4" height="260.0" fill="transparent"/><line x1="84.4" x2="84.4" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>50 ms timeout · wheel bucket 1 ms · wheel late 0.07 to 1.02 ms (median 0.41) · hrtimer late median 0.088 ms</title><rect x="118.4" y="30" width="59.6" height="260.0" fill="transparent"/><line x1="152.4" x2="152.4" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>100 ms timeout · wheel bucket 8 ms · wheel late 1.18 to 7.79 ms (median 4.68) · hrtimer late median 0.089 ms</title><rect x="178.0" y="30" width="51.4" height="260.0" fill="transparent"/><line x1="203.7" x2="203.7" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>200 ms timeout · wheel bucket 8 ms · wheel late 0.16 to 7.77 ms (median 3.57) · hrtimer late median 0.085 ms</title><rect x="229.4" y="30" width="51.4" height="260.0" fill="transparent"/><line x1="255.1" x2="255.1" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>400 ms timeout · wheel bucket 8 ms · wheel late 0.17 to 7.68 ms (median 3.33) · hrtimer late median 0.084 ms</title><rect x="280.8" y="30" width="51.4" height="260.0" fill="transparent"/><line x1="306.5" x2="306.5" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>800 ms timeout · wheel bucket 64 ms · wheel late 2.56 to 48.86 ms (median 32.77) · hrtimer late median 0.091 ms</title><rect x="332.2" y="30" width="49.0" height="260.0" fill="transparent"/><line x1="357.9" x2="357.9" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>1500 ms timeout · wheel bucket 64 ms · wheel late 3.41 to 51.96 ms (median 28.80) · hrtimer late median 0.101 ms</title><rect x="381.2" y="30" width="49.0" height="260.0" fill="transparent"/><line x1="404.4" x2="404.4" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>3000 ms timeout · wheel bucket 64 ms · wheel late 6.98 to 54.77 ms (median 32.84) · hrtimer late median 0.087 ms</title><rect x="430.1" y="30" width="44.6" height="260.0" fill="transparent"/><line x1="455.8" x2="455.8" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>5000 ms timeout · wheel bucket 512 ms · wheel late 10.21 to 473.39 ms (median 397.08) · hrtimer late median 0.090 ms</title><rect x="474.8" y="30" width="44.6" height="260.0" fill="transparent"/><line x1="493.7" x2="493.7" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>10000 ms timeout · wheel bucket 512 ms · wheel late 19.90 to 431.59 ms (median 142.01) · hrtimer late median 0.425 ms</title><rect x="519.4" y="30" width="50.6" height="260.0" fill="transparent"/><line x1="545.1" x2="545.1" y1="30" y2="290.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch07-wheelwait--></div>
+        <figcaption><b>Diagram 7.3 — How late each timeout fired on this laptop, against the length asked for (HZ = 1000, both axes logarithmic).</b> Notice the staircase: each blue dot sits under its level's slot width, 1, 8, 64 or 512 ms, so a 5 s timeout fired up to 473 ms late. Blue dots are <code>recv()</code> calls with <code>SO_RCVTIMEO</code>, sleeping on a wheel timer (<code>kernel/time/sleep_timeout.c:98</code>); orange crosses are <code>time.sleep()</code>, an hrtimer, about 0.1 ms late throughout. Kernel 7.2.6, 2 October 2026. Data: <a href="labs/ch07-carousel/data/wheelwait.csv">wheelwait.csv</a>. Hover for values.</figcaption></figure>
+      <p class="since"><b>Since the paper.</b> <code>sch_fq</code> gained a horizon in v5.8 (<code>39d010504e6b</code>, May 2020), for senders that stamp their own release times (the departure-time chapter). A packet stamped more than <code>horizon</code> ahead, 10 s by default, is dropped (<code>horizon_drops</code>) or, with <code>horizon_cap</code>, cut to the horizon (<code>sch_fq.c:540–543, 615–623, 1250–1251</code>): Carousel's two options.</p>
+
+      <h3 class="strand" id="s-deferred-completions">Completions held until the wire</h3>
+      <p>Hold each completion until the shaper releases the packet. With TSQ in the sender, each flow then has about two packets in the shaper, so memory grows with the number of flows. Without it, memory grows with flows times congestion window until something drops (pp. 408, 411).</p>
+      <p>Fig. 8 (p. 408) is the case without: one VM flow shaped to 2 Gbit/s on a 50 ms path parked 21,000 MTU packets in a hypervisor shaper, 32 MB and \(21{,}000 \times 12{,}000\ \text{bits} / 2\ \text{Gbit/s} = 126\) ms; with backpressure, two 64 KB TSO packets (footnote 3). In Fig. 15 (pp. 413–414) the shaper without deferred completions fills all 70,000 entries, and with them holds about twice the active flows.</p>
+      <p>The completion is the <a href="ch05.html#s-tsq-limits-bytes-below-the-socket">small-queues chapter's</a> free of the skb: <a href="index.html#g-tsq">TSQ</a> counts a socket's bytes until <code>tcp_wfree()</code> runs (<code>tcp_output.c:1387</code>). A deferred completion moves that moment to the wheel's release: TSQ generalised to the hypervisor switch (p. 409). In the bench lab, 16 HTB classes on the sender's <code>s0</code> held two skbs per flow: 96,896 bytes, a 137 ms RTT, no loss. On the router, behind qnet's netem on <code>s0</code>, which orphans each skb at enqueue (<code>sch_netem.c:499–500</code>), the same classes held a median 1.40 MB and peaked at their 1,600-packet limit; the RTT swung from 1.2 to 2.5 s and 1,614 packets were resent. Both delivered 8.00 Mbit/s.</p>
+      <figure class="dia"><div class="plot"><!--PLOT:ch07-occupancy-->
+<svg viewBox="0 0 720 438" role="img" aria-label="Bytes held by a 16-flow shaper at 500 kbit/s per flow: megabytes on the router, where TCP gets no completion signal; 97 KB on the sender, where TCP small queues holds each flow to two skbs" xmlns="http://www.w3.org/2000/svg" font-size="12" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Inter,Roboto,sans-serif">
+<line x1="58" x2="570" y1="200.0" y2="200.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="204.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="166.0" y2="166.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="170.0" text-anchor="end" fill="#898781">0.5</text>
+<line x1="58" x2="570" y1="132.0" y2="132.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="136.0" text-anchor="end" fill="#898781">1</text>
+<line x1="58" x2="570" y1="98.0" y2="98.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="102.0" text-anchor="end" fill="#898781">1.5</text>
+<line x1="58" x2="570" y1="64.0" y2="64.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="68.0" text-anchor="end" fill="#898781">2</text>
+<line x1="58" x2="570" y1="30.0" y2="30.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="34.0" text-anchor="end" fill="#898781">2.5</text>
+<line x1="58" x2="570" y1="200.0" y2="200.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="115.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 115.0)">held (MB)</text>
+<line x1="58" x2="570" y1="35.3" y2="35.3" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="576" y="39.3" fill="#898781">16 x 100-packet limit</text>
+<polyline points="58.0,200.0 58.9,200.0 59.8,200.0 60.7,200.0 61.6,200.0 62.5,200.0 63.4,200.0 64.3,200.0 65.2,200.0 66.1,200.0 66.9,200.0 67.8,200.0 68.7,200.0 69.6,200.0 70.5,188.0 71.4,181.9 72.3,178.6 73.2,175.3 74.0,171.6 74.9,165.4 75.8,162.1 76.7,160.5 77.6,157.2 78.5,153.9 79.4,150.6 80.3,147.3 81.2,144.0 82.1,142.3 83.0,139.1 83.8,135.8 84.7,132.5 85.6,125.4 86.5,119.3 87.4,116.5 88.3,117.2 89.2,116.8 90.1,116.0 91.0,110.6 91.9,100.3 92.8,97.0 93.7,95.4 94.6,91.5 95.5,88.2 96.3,84.5 97.2,77.1 98.1,73.6 99.0,71.7 99.9,68.2 100.8,64.9 101.7,61.6 102.6,58.3 103.5,54.0 104.4,49.0 105.3,46.8 106.1,43.5 107.0,40.6 107.9,37.3 108.8,35.3 109.7,35.3 110.6,36.9 111.5,36.9 112.4,36.9 113.3,36.9 114.2,36.9 115.1,36.8 115.9,37.1 116.8,38.5 117.7,38.5 118.6,38.5 119.5,36.6 120.4,35.3 121.3,36.6 122.2,36.9 123.1,36.9 124.0,36.9 124.9,36.9 125.8,36.7 126.7,36.7 127.6,38.4 128.5,38.4 129.3,38.4 130.2,38.4 131.1,35.3 132.0,35.3 132.9,36.9 133.8,36.9 134.7,36.9 135.6,36.9 136.5,35.7 137.4,35.5 138.3,36.2 139.2,37.1 140.1,37.1 140.9,37.1 141.8,37.1 142.7,35.3 143.6,35.3 144.5,36.9 145.4,36.9 146.3,36.9 147.2,36.9 148.1,35.4 149.0,35.3 149.9,36.9 150.8,38.6 151.7,40.2 152.5,41.9 153.4,42.6 154.3,43.5 155.2,45.4 156.1,48.5 157.0,50.1 157.9,51.7 158.8,53.4 159.7,55.0 160.6,56.7 161.5,60.0 162.3,61.6 163.2,63.3 164.1,64.9 165.0,65.3 165.9,66.6 166.8,68.9 167.7,71.5 168.6,73.2 169.5,74.8 170.4,76.5 171.3,78.1 172.2,81.0 173.1,83.0 174.0,84.7 174.9,86.3 175.8,85.9 176.7,87.3 177.6,90.3 178.5,91.4 179.4,92.1 180.2,92.8 181.1,93.5 182.0,93.4 182.9,94.3 183.8,91.9 184.7,86.0 185.6,80.3 186.5,74.1 187.4,65.5 188.3,60.7 189.2,56.1 190.1,50.5 191.0,45.0 191.9,38.8 192.7,35.3 193.6,35.3 194.5,36.9 195.4,36.9 196.3,36.9 197.2,36.9 198.1,35.3 199.0,35.3 199.9,36.9 200.8,36.9 201.7,36.9 202.6,36.9 203.5,36.3 204.3,35.3 205.2,35.5 206.1,36.9 207.0,36.9 207.9,36.9 208.8,36.9 209.7,35.4 210.6,35.3 211.4,36.0 212.3,36.9 213.2,36.9 214.1,36.9 215.0,35.6 215.9,35.3 216.8,35.9 217.7,36.9 218.6,36.9 219.5,36.9 220.4,35.5 221.3,35.3 222.2,36.0 223.1,36.9 224.0,36.9 224.9,36.9 225.7,36.9 226.7,35.3 227.5,35.3 228.4,36.9 229.3,36.9 230.2,36.9 231.1,36.9 232.0,35.9 232.9,35.3 233.8,35.8 234.7,36.9 235.6,36.9 236.4,36.9 237.3,36.2 238.2,35.3 239.1,35.6 240.0,36.9 240.9,36.9 241.8,36.9 242.7,36.8 243.6,35.3 244.5,35.3 245.4,36.9 246.3,36.9 247.2,36.9 248.1,36.9 249.0,35.3 249.8,35.3 250.7,36.2 251.6,36.9 252.5,36.9 253.4,36.9 254.3,36.7 255.2,35.3 256.1,35.3 257.0,36.9 257.9,36.9 258.7,36.9 259.6,36.9 260.5,36.0 261.4,35.3 262.3,35.6 263.2,36.9 264.1,36.9 265.0,36.9 265.8,36.9 266.7,35.3 267.6,35.3 268.5,36.9 269.4,36.9 270.3,36.9 271.2,36.9 272.1,35.3 273.0,35.3 273.9,36.5 274.8,36.9 275.7,36.9 276.6,36.9 277.4,36.7 278.3,35.3 279.2,35.3 280.1,36.9 281.0,36.9 281.9,36.9 282.8,36.9 283.7,35.3 284.6,35.3 285.5,36.9 286.4,36.9 287.3,37.0 288.2,37.0 289.0,35.7 289.9,35.3 290.8,36.0 291.7,36.9 292.6,36.9 293.5,36.9 294.4,36.9 295.3,35.4 296.2,35.4 297.1,37.0 297.9,37.0 298.8,37.0 299.7,37.0 300.6,35.3 301.5,35.3 302.4,36.9 303.3,36.9 304.2,36.9 305.1,36.9 306.0,35.4 306.9,35.4 307.8,36.1 308.7,37.0 309.6,37.0 310.5,37.0 311.3,37.0 312.2,36.4 313.1,35.3 314.0,36.9 314.9,36.9 315.8,36.9 316.7,36.9 317.6,36.8 318.5,37.3 319.4,38.4 320.3,40.0 321.2,41.7 322.1,43.3 323.0,43.9 323.8,45.3 324.7,47.6 325.6,50.2 326.5,51.9 327.4,53.5 328.3,55.1 329.2,56.6 330.1,58.1 330.9,61.4 331.8,63.1 332.7,64.7 333.6,66.4 334.5,66.8 335.4,68.3 336.3,71.0 337.2,73.3 338.1,74.9 339.0,76.6 339.9,78.2 340.8,79.5 341.7,81.5 342.6,84.5 343.5,86.1 344.3,87.8 345.2,89.4 346.1,89.7 347.0,91.4 347.9,94.6 348.8,96.3 349.7,98.0 350.6,99.6 351.5,101.1 352.4,102.6 353.3,105.9 354.2,107.5 355.1,109.2 356.0,110.8 356.9,111.2 357.8,113.0 358.6,115.9 359.6,117.0 360.4,119.3 361.3,119.3 362.2,117.6 363.1,117.6 364.0,119.1 364.9,119.3 365.8,119.3 366.7,119.3 367.6,118.9 368.5,118.9 369.4,120.1 370.3,120.5 371.2,120.5 372.1,120.5 373.0,117.8 373.9,117.8 374.8,118.7 375.6,119.5 376.5,119.5 377.4,119.5 378.3,119.5 379.2,118.8 380.1,118.4 381.0,120.0 381.9,120.0 382.8,118.9 383.7,118.9 384.6,116.2 385.5,116.2 386.3,117.4 387.2,117.9 388.1,117.9 389.0,117.9 389.9,116.0 390.8,116.0 391.7,117.3 392.6,117.7 393.5,117.8 394.4,117.8 395.3,117.8 396.2,117.2 397.1,117.2 398.0,118.9 398.8,118.9 399.7,118.9 400.6,118.9 401.5,115.7 402.5,116.3 403.3,116.1 404.2,116.1 405.1,117.2 406.0,115.4 406.9,114.5 407.8,115.1 408.7,116.2 409.6,116.3 410.5,116.3 411.4,116.3 412.3,114.3 413.2,114.3 414.1,116.0 414.9,116.1 415.9,116.2 416.8,116.2 417.7,115.6 418.6,116.1 419.5,117.2 420.4,117.2 421.3,117.2 422.2,114.5 423.1,114.2 424.0,115.2 424.8,115.7 425.7,114.5 426.6,115.7 427.5,114.5 428.4,113.9 429.3,113.9 430.2,115.6 431.1,115.6 432.0,115.5 432.9,115.5 433.8,113.0 434.7,114.1 435.5,115.8 436.5,115.8 437.4,115.7 438.3,115.2 439.1,112.9 440.1,112.9 440.9,114.5 441.8,114.5 442.7,114.5 443.6,114.5 444.5,113.9 445.4,114.2 446.3,115.2 447.2,115.2 448.1,115.2 449.0,113.2 449.9,111.2 450.8,112.6 451.7,113.9 452.6,113.9 453.5,113.9 454.4,113.9 455.3,111.4 456.2,111.4 457.1,113.0 458.0,114.1 458.9,114.1 459.8,113.7 460.7,111.2 461.5,111.3 462.4,112.9 463.3,112.9 464.2,112.9 465.1,112.9 466.0,112.3 466.9,112.3 467.8,113.1 468.7,113.5 469.6,113.3 470.5,113.3 471.4,109.8 472.3,110.9 473.1,111.8 474.0,111.5 474.9,111.5 475.8,111.5 476.7,111.5 477.6,110.6 478.5,110.5 479.4,112.2 480.3,112.2 481.2,111.0 482.1,111.0 483.0,111.0 483.8,110.9 484.7,112.2 485.6,112.5 486.5,112.5 487.4,112.5 488.3,109.6 489.2,109.6 490.1,111.0 491.0,111.2 491.9,110.9 492.8,110.7 493.7,109.6 494.6,109.2 495.5,109.8 496.4,110.9 497.2,110.9 498.1,109.8 499.0,109.8 499.9,109.0 500.8,109.0 501.7,110.3 502.6,110.5 503.5,110.5 504.4,110.5 505.2,109.4 506.1,109.4 507.0,109.4 507.9,110.9 508.8,110.8 509.7,110.8 510.6,110.8 511.5,108.0 512.4,108.0 513.3,109.6 514.2,109.6 515.1,109.3 516.0,109.3 516.9,108.6 517.8,106.3 518.6,107.5 519.5,107.8 520.4,107.9 521.3,107.9 522.2,107.1 523.1,106.5 524.0,107.7 524.9,108.2 525.8,108.2 526.7,108.2 527.6,108.3 528.5,107.2 529.3,106.1 530.2,107.8 531.1,107.8 532.0,107.8 532.9,107.9 533.8,108.0 534.7,107.5 535.6,107.9 536.4,109.2 537.3,109.2 538.2,109.2 539.1,109.2 540.0,106.0 540.9,105.8 541.8,106.0 542.7,106.3 543.6,106.3 544.5,106.1 545.3,106.2 546.2,106.0 547.1,105.0 548.0,106.5 548.9,106.5 549.8,106.5 550.7,106.5 551.6,106.1 552.5,105.6 553.4,107.2 554.3,106.1 555.2,106.1 556.1,106.1 556.9,106.0 557.8,105.9 558.7,106.4 559.6,107.5 560.5,107.5 561.4,107.5 562.3,107.5 563.2,104.6 564.1,104.2 565.0,105.9 565.9,105.9 566.7,104.8 567.6,105.9 568.5,105.3 569.4,102.8" fill="none" stroke="#eb6834" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="104.8" y2="104.8" stroke="#eb6834" stroke-width="2"/>
+<text x="590" y="108.8" fill="#1b1f24">HTB on the router</text>
+<text x="66.5" y="53.8" fill="#4a5560" text-anchor="start">past the namespace boundary: no completion reaches TCP</text>
+<line x1="66" x2="80" y1="18" y2="18" stroke="#eb6834" stroke-width="2"/>
+<text x="85" y="22" fill="#1b1f24">16 HTB classes on rtr:r1, no deferred completion</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="400.0" text-anchor="end" fill="#898781">0</text>
+<line x1="58" x2="570" y1="366.0" y2="366.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="370.0" text-anchor="end" fill="#898781">25</text>
+<line x1="58" x2="570" y1="336.0" y2="336.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="340.0" text-anchor="end" fill="#898781">50</text>
+<line x1="58" x2="570" y1="306.0" y2="306.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="310.0" text-anchor="end" fill="#898781">75</text>
+<line x1="58" x2="570" y1="276.0" y2="276.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="280.0" text-anchor="end" fill="#898781">100</text>
+<line x1="58" x2="570" y1="246.0" y2="246.0" stroke="#e8ebef" stroke-width="1"/>
+<text x="50" y="250.0" text-anchor="end" fill="#898781">125</text>
+<line x1="58" x2="570" y1="396.0" y2="396.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="14" y="321.0" fill="#4a5560" text-anchor="middle" transform="rotate(-90 14 321.0)">held (KB)</text>
+<polyline points="58.0,396.0 58.9,396.0 59.8,396.0 60.7,396.0 61.6,396.0 62.5,396.0 63.4,396.0 64.2,396.0 65.1,396.0 66.0,396.0 66.9,396.0 67.8,396.0 68.7,396.0 69.6,396.0 70.5,279.7 71.4,279.7 72.3,279.7 73.2,279.7 74.1,279.7 74.9,279.7 75.8,279.7 76.7,279.7 77.6,279.7 78.5,279.7 79.4,279.7 80.2,279.7 81.1,279.7 82.0,279.7 82.9,279.7 83.8,279.7 84.7,279.7 85.6,279.7 86.5,279.7 87.3,279.7 88.2,279.7 89.1,279.7 90.0,279.7 90.9,279.7 91.8,279.7 92.7,279.7 93.6,279.7 94.5,279.7 95.4,279.7 96.2,279.7 97.1,279.7 98.0,279.7 98.9,279.7 99.8,279.7 100.7,279.7 101.6,279.7 102.5,279.7 103.4,279.7 104.3,279.7 105.1,279.7 106.0,279.7 106.9,279.7 107.8,279.7 108.7,279.7 109.6,279.7 110.5,279.7 111.4,279.7 112.3,279.7 113.2,279.7 114.1,279.7 115.1,279.7 115.9,279.7 116.8,279.7 117.7,279.7 118.6,279.7 119.5,279.7 120.4,279.7 121.3,279.7 122.2,279.7 123.1,279.7 123.9,279.7 124.9,279.7 125.7,279.7 126.6,279.7 127.5,279.7 128.5,279.7 129.3,279.7 130.2,279.7 131.1,279.7 132.0,279.7 132.9,279.7 133.8,279.7 134.7,279.7 135.6,279.7 136.5,279.7 137.4,279.7 138.2,283.4 139.1,279.7 140.0,279.7 140.9,279.7 141.8,279.7 142.7,279.7 143.6,279.7 144.5,279.7 145.4,279.7 146.3,279.7 147.2,279.7 148.1,279.7 149.0,279.7 150.0,279.7 150.9,279.7 151.8,279.7 152.7,279.7 153.6,279.7 154.5,279.7 155.4,279.7 156.3,279.7 157.2,290.6 158.0,279.7 158.9,279.7 159.8,279.7 160.7,279.7 161.6,279.7 162.6,279.7 163.5,279.7 164.4,279.7 165.3,279.7 166.2,279.7 167.1,279.7 168.0,279.7 168.8,279.7 169.7,279.7 170.6,279.7 171.5,279.7 172.4,279.7 173.3,279.7 174.2,279.7 175.1,279.7 176.0,283.4 176.9,279.7 177.8,279.7 178.7,279.7 179.6,279.7 180.5,279.7 181.3,279.7 182.3,279.7 183.2,279.7 184.1,279.7 184.9,279.7 185.8,279.7 186.7,279.7 187.6,279.7 188.5,279.7 189.4,279.7 190.3,279.7 191.2,283.4 192.1,279.7 193.0,279.7 193.9,279.7 194.8,279.7 195.7,279.7 196.5,279.7 197.4,279.7 198.3,279.7 199.2,279.7 200.1,279.7 201.0,279.7 201.9,279.7 202.8,279.7 203.7,279.7 204.6,279.7 205.5,279.7 206.3,283.4 207.2,279.7 208.2,279.7 209.1,279.7 209.9,279.7 210.8,279.7 211.8,279.7 212.6,279.7 213.5,279.7 214.4,279.7 215.3,279.7 216.2,279.7 217.1,279.7 218.0,279.7 218.9,279.7 219.8,279.7 220.7,279.7 221.6,279.7 222.5,279.7 223.4,279.7 224.2,279.7 225.1,279.7 226.0,279.7 226.9,279.7 227.8,279.7 228.7,279.7 229.6,279.7 230.5,279.7 231.4,279.7 232.3,279.7 233.3,279.7 234.2,279.7 235.0,279.7 235.9,279.7 236.8,279.7 237.7,279.7 238.6,279.7 239.5,279.7 240.4,279.7 241.3,279.7 242.2,279.7 243.1,279.7 243.9,279.7 244.8,279.7 245.8,279.7 246.7,279.7 247.5,279.7 248.4,279.7 249.4,279.7 250.3,279.7 251.1,279.7 252.0,279.7 252.9,279.7 253.8,279.7 254.7,279.7 255.6,279.7 256.5,279.7 257.4,279.7 258.3,279.7 259.1,290.6 260.1,279.7 261.0,279.7 261.9,279.7 262.7,279.7 263.7,279.7 264.5,279.7 265.4,279.7 266.3,279.7 267.3,279.7 268.2,279.7 269.1,279.7 270.0,279.7 270.8,279.7 271.7,279.7 272.6,279.7 273.5,283.4 274.4,279.7 275.3,279.7 276.2,279.7 277.1,279.7 278.0,279.7 278.9,279.7 279.8,279.7 280.7,279.7 281.6,279.7 282.5,279.7 283.4,279.7 284.3,279.7 285.1,279.7 286.0,279.7 286.9,279.7 287.8,279.7 288.7,279.7 289.6,279.7 290.5,279.7 291.4,283.4 292.3,279.7 293.1,279.7 294.0,279.7 294.9,279.7 295.8,279.7 296.7,279.7 297.6,279.7 298.5,279.7 299.4,279.7 300.3,279.7 301.2,279.7 302.1,279.7 303.0,279.7 303.9,279.7 304.8,279.7 305.7,279.7 306.6,279.7 307.4,279.7 308.3,279.7 309.2,279.7 310.1,279.7 311.0,279.7 311.9,279.7 312.8,279.7 313.7,279.7 314.6,279.7 315.5,279.7 316.4,279.7 317.3,279.7 318.2,279.7 319.1,283.4 320.0,283.4 320.9,279.7 321.8,279.7 322.7,279.7 323.6,279.7 324.5,279.7 325.4,279.7 326.3,279.7 327.2,279.7 328.1,279.7 329.0,279.7 329.9,279.7 330.8,279.7 331.7,279.7 332.6,279.7 333.5,279.7 334.4,279.7 335.3,279.7 336.2,279.7 337.1,279.7 337.9,279.7 338.8,279.7 339.7,279.7 340.6,279.7 341.5,279.7 342.4,279.7 343.3,279.7 344.2,279.7 345.1,279.7 346.0,279.7 346.9,279.7 347.8,279.7 348.7,279.7 349.6,279.7 350.5,279.7 351.4,279.7 352.3,279.7 353.2,279.7 354.1,279.7 355.0,279.7 355.8,279.7 356.7,279.7 357.6,279.7 358.5,279.7 359.4,279.7 360.3,279.7 361.2,279.7 362.1,279.7 363.0,279.7 363.9,279.7 364.7,279.7 365.6,279.7 366.5,279.7 367.5,279.7 368.4,279.7 369.3,279.7 370.2,279.7 371.1,279.7 372.0,279.7 372.9,279.7 373.8,279.7 374.6,279.7 375.5,279.7 376.4,279.7 377.3,279.7 378.2,279.7 379.1,279.7 380.0,279.7 380.9,279.7 381.8,279.7 382.7,279.7 383.6,279.7 384.5,279.7 385.4,279.7 386.3,279.7 387.2,279.7 388.1,279.7 389.0,279.7 389.9,279.7 390.8,279.7 391.7,279.7 392.5,279.7 393.4,279.7 394.3,279.7 395.2,279.7 396.1,279.7 397.0,279.7 397.9,279.7 398.8,279.7 399.7,279.7 400.6,279.7 401.5,279.7 402.4,279.7 403.3,283.4 404.2,279.7 405.1,279.7 406.0,279.7 406.8,279.7 407.7,279.7 408.6,279.7 409.5,279.7 410.4,279.7 411.3,279.7 412.2,279.7 413.1,279.7 414.0,279.7 414.9,279.7 415.8,279.7 416.7,279.7 417.6,279.7 418.5,279.7 419.4,279.7 420.3,279.7 421.1,279.7 422.0,279.7 422.9,279.7 423.8,283.4 424.7,279.7 425.6,279.7 426.5,279.7 427.4,279.7 428.3,279.7 429.1,279.7 430.1,279.7 431.0,279.7 431.8,279.7 432.7,279.7 433.6,279.7 434.5,279.7 435.4,279.7 436.3,279.7 437.2,279.7 438.1,279.7 439.0,279.7 439.9,279.7 440.8,279.7 441.7,279.7 442.6,279.7 443.5,279.7 444.4,279.7 445.3,279.7 446.1,279.7 447.0,279.7 447.9,279.7 448.8,279.7 449.7,279.7 450.6,279.7 451.5,279.7 452.4,279.7 453.3,279.7 454.2,279.7 455.1,279.7 456.0,279.7 456.9,279.7 457.8,279.7 458.7,279.7 459.6,279.7 460.5,279.7 461.4,279.7 462.3,283.4 463.1,279.7 464.1,279.7 465.0,279.7 465.9,279.7 466.8,279.7 467.7,279.7 468.6,279.7 469.4,279.7 470.4,279.7 471.3,279.7 472.2,279.7 473.0,279.7 473.9,279.7 474.8,279.7 475.7,279.7 476.6,279.7 477.5,279.7 478.4,279.7 479.3,279.7 480.2,279.7 481.0,279.7 481.9,279.7 482.8,279.7 483.7,279.7 484.6,279.7 485.5,279.7 486.4,279.7 487.3,279.7 488.2,279.7 489.1,283.4 490.0,279.7 490.9,279.7 491.8,279.7 492.7,279.7 493.6,279.7 494.4,279.7 495.3,279.7 496.2,279.7 497.1,279.7 498.0,279.7 498.9,279.7 499.8,283.4 500.7,279.7 501.6,279.7 502.5,279.7 503.4,279.7 504.3,279.7 505.2,279.7 506.1,279.7 507.0,279.7 507.9,279.7 508.7,279.7 509.6,279.7 510.5,283.4 511.4,279.7 512.3,279.7 513.2,279.7 514.1,279.7 515.0,279.7 515.9,279.7 516.8,279.7 517.7,279.7 518.6,279.7 519.4,279.7 520.3,279.7 521.2,279.7 522.1,279.7 523.0,279.7 523.9,279.7 524.8,279.7 525.7,279.7 526.6,279.7 527.5,279.7 528.4,279.7 529.3,279.7 530.1,279.7 531.0,279.7 531.9,279.7 532.8,279.7 533.7,279.7 534.6,279.7 535.5,279.7 536.4,279.7 537.3,279.7 538.2,279.7 539.1,279.7 540.0,279.7 540.9,279.7 541.8,279.7 542.7,279.7 543.6,279.7 544.5,279.7 545.4,279.7 546.2,279.7 547.1,279.7 548.0,279.7 548.9,279.7 549.8,279.7 550.7,279.7 551.6,283.4 552.5,279.7 553.4,279.7 554.3,279.7 555.2,279.7 556.1,279.7 557.0,279.7 557.8,279.7 558.7,283.4 559.6,279.7 560.5,279.7 561.4,279.7 562.3,279.7 563.2,279.7 564.1,279.7 565.0,279.7 565.9,279.7 566.8,279.7 567.7,279.7 568.5,279.7 569.4,279.7" fill="none" stroke="#2a78d6" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="574" x2="586" y1="266.4" y2="266.4" stroke="#2a78d6" stroke-width="2"/>
+<text x="590" y="270.4" fill="#1b1f24">HTB on the sender</text>
+<polyline points="58.0,396.0 58.9,396.0 59.8,396.0 60.7,396.0 61.6,396.0 62.5,396.0 63.3,396.0 64.2,396.0 65.1,396.0 66.0,396.0 66.9,396.0 67.8,396.0 68.7,396.0 69.6,396.0 70.5,279.7 71.4,279.7 72.3,279.7 73.2,279.7 74.1,279.7 75.0,279.7 75.9,279.7 76.8,279.7 77.7,279.7 78.5,279.7 79.4,279.7 80.3,279.7 81.2,279.7 82.1,279.7 83.0,279.7 83.9,279.7 84.8,279.7 85.7,279.7 86.6,279.7 87.5,279.7 88.4,287.0 89.2,279.7 90.2,279.7 91.0,279.7 91.9,279.7 92.8,279.7 93.7,279.7 94.6,279.7 95.5,279.7 96.4,279.7 97.3,279.7 98.2,279.7 99.1,279.7 100.0,279.7 100.9,279.7 101.8,279.7 102.7,279.7 103.6,279.7 104.5,279.7 105.3,279.7 106.2,279.7 107.2,279.7 108.1,279.7 109.0,279.7 109.8,279.7 110.7,279.7 111.6,279.7 112.5,279.7 113.4,283.4 114.3,279.7 115.2,279.7 116.0,279.7 116.9,279.7 117.9,279.7 118.8,279.7 119.7,279.7 120.6,279.7 121.5,279.7 122.3,279.7 123.2,279.7 124.1,287.0 125.0,279.7 125.9,279.7 126.8,279.7 127.7,279.7 128.6,279.7 129.4,279.7 130.3,279.7 131.2,279.7 132.1,279.7 133.0,279.7 133.9,279.7 134.8,279.7 135.7,279.7 136.6,279.7 137.5,279.7 138.4,279.7 139.3,279.7 140.2,279.7 141.1,279.7 142.0,279.7 142.9,279.7 143.7,279.7 144.6,279.7 145.5,279.7 146.4,279.7 147.3,279.7 148.2,279.7 149.1,283.4 150.0,279.7 150.9,279.7 151.8,279.7 152.7,279.7 153.6,279.7 154.5,279.7 155.4,279.7 156.3,279.7 157.2,283.4 158.1,279.7 159.0,279.7 159.9,279.7 160.8,279.7 161.6,279.7 162.5,279.7 163.4,279.7 164.3,279.7 165.2,279.7 166.1,279.7 167.0,279.7 167.9,279.7 168.8,279.7 169.7,279.7 170.6,279.7 171.4,279.7 172.3,279.7 173.2,279.7 174.1,279.7 175.0,279.7 175.9,279.7 176.8,279.7 177.7,279.7 178.6,279.7 179.5,279.7 180.4,279.7 181.3,279.7 182.1,279.7 183.0,279.7 183.9,279.7 184.8,279.7 185.7,279.7 186.6,279.7 187.5,279.7 188.4,279.7 189.3,279.7 190.2,279.7 191.1,279.7 192.0,279.7 192.9,283.4 193.8,279.7 194.7,279.7 195.5,279.7 196.4,279.7 197.3,279.7 198.2,279.7 199.1,279.7 200.0,279.7 200.9,279.7 201.8,279.7 202.7,279.7 203.5,283.4 204.4,279.7 205.3,279.7 206.2,279.7 207.1,279.7 208.1,279.7 208.9,279.7 209.8,279.7 210.7,283.4 211.6,279.7 212.5,279.7 213.4,287.0 214.3,279.7 215.2,279.7 216.1,279.7 216.9,279.7 217.8,279.7 218.7,279.7 219.6,279.7 220.5,279.7 221.4,279.7 222.3,279.7 223.2,279.7 224.0,279.7 224.9,283.4 225.8,279.7 226.7,279.7 227.6,279.7 228.5,279.7 229.4,279.7 230.3,279.7 231.2,279.7 232.0,279.7 232.9,279.7 233.8,279.7 234.7,279.7 235.6,279.7 236.5,279.7 237.4,279.7 238.3,279.7 239.2,279.7 240.1,279.7 241.0,279.7 241.9,279.7 242.8,279.7 243.7,279.7 244.6,279.7 245.4,279.7 246.3,279.7 247.2,279.7 248.1,279.7 249.0,279.7 249.9,279.7 250.8,279.7 251.7,283.4 252.6,279.7 253.4,279.7 254.4,279.7 255.3,279.7 256.1,279.7 257.0,279.7 257.9,279.7 258.8,279.7 259.7,279.7 260.6,283.4 261.5,279.7 262.4,279.7 263.3,279.7 264.2,279.7 265.1,279.7 266.0,279.7 266.9,279.7 267.7,279.7 268.6,283.4 269.5,279.7 270.4,283.4 271.3,279.7 272.2,279.7 273.1,279.7 274.0,279.7 274.9,283.4 275.8,279.7 276.7,279.7 277.6,279.7 278.5,279.7 279.4,279.7 280.3,279.7 281.2,279.7 282.1,279.7 283.0,279.7 283.8,279.7 284.7,279.7 285.6,279.7 286.5,279.7 287.4,279.7 288.3,279.7 289.2,279.7 290.1,279.7 291.0,279.7 291.9,279.7 292.8,279.7 293.7,279.7 294.6,279.7 295.4,279.7 296.4,279.7 297.2,279.7 298.1,283.4 299.0,279.7 299.9,279.7 300.8,279.7 301.7,279.7 302.6,279.7 303.5,279.7 304.4,279.7 305.2,279.7 306.1,279.7 307.0,279.7 307.9,279.7 308.8,279.7 309.7,279.7 310.6,279.7 311.5,279.7 312.4,279.7 313.3,279.7 314.2,279.7 315.1,279.7 316.0,279.7 316.9,279.7 317.7,279.7 318.6,279.7 319.5,279.7 320.4,279.7 321.3,279.7 322.2,279.7 323.1,279.7 324.0,279.7 324.9,279.7 325.7,279.7 326.6,279.7 327.5,279.7 328.4,279.7 329.3,279.7 330.2,279.7 331.1,279.7 332.0,279.7 332.9,279.7 333.8,279.7 334.7,279.7 335.6,279.7 336.4,279.7 337.3,279.7 338.2,279.7 339.1,279.7 340.0,279.7 340.9,279.7 341.8,279.7 342.7,279.7 343.6,279.7 344.5,279.7 345.4,279.7 346.3,279.7 347.2,279.7 348.1,279.7 349.0,279.7 349.9,279.7 350.8,279.7 351.6,279.7 352.5,279.7 353.4,279.7 354.3,279.7 355.2,279.7 356.1,279.7 357.0,279.7 357.9,279.7 358.8,279.7 359.7,279.7 360.6,279.7 361.5,279.7 362.4,279.7 363.3,279.7 364.2,279.7 365.0,279.7 365.9,279.7 366.8,279.7 367.7,279.7 368.6,279.7 369.5,279.7 370.4,279.7 371.3,279.7 372.2,279.7 373.1,279.7 374.0,279.7 374.9,279.7 375.8,279.7 376.7,279.7 377.6,279.7 378.4,279.7 379.3,279.7 380.2,279.7 381.1,279.7 382.0,279.7 382.9,279.7 383.8,279.7 384.7,283.4 385.6,279.7 386.5,279.7 387.4,279.7 388.3,279.7 389.1,279.7 390.0,279.7 390.9,279.7 391.8,279.7 392.7,279.7 393.6,279.7 394.5,279.7 395.4,279.7 396.3,279.7 397.2,279.7 398.1,279.7 399.0,279.7 399.8,279.7 400.7,279.7 401.6,279.7 402.5,279.7 403.4,279.7 404.3,279.7 405.2,279.7 406.1,279.7 406.9,279.7 407.8,279.7 408.7,279.7 409.6,279.7 410.5,279.7 411.4,279.7 412.3,279.7 413.2,279.7 414.1,279.7 415.0,279.7 415.9,279.7 416.7,279.7 417.6,279.7 418.5,279.7 419.4,279.7 420.3,279.7 421.2,279.7 422.1,279.7 423.0,279.7 423.9,279.7 424.8,279.7 425.7,279.7 426.5,279.7 427.4,279.7 428.3,279.7 429.2,279.7 430.1,279.7 431.0,279.7 431.9,279.7 432.8,279.7 433.7,279.7 434.6,279.7 435.4,279.7 436.4,279.7 437.3,279.7 438.1,279.7 439.0,279.7 439.9,279.7 440.8,279.7 441.7,279.7 442.6,279.7 443.5,279.7 444.4,279.7 445.3,279.7 446.2,279.7 447.1,279.7 448.0,279.7 448.8,279.7 449.7,279.7 450.6,279.7 451.5,279.7 452.4,279.7 453.3,279.7 454.2,279.7 455.1,279.7 456.0,279.7 456.9,279.7 457.8,279.7 458.6,279.7 459.5,279.7 460.4,279.7 461.3,279.7 462.2,279.7 463.1,279.7 464.0,279.7 464.9,279.7 465.8,279.7 466.7,279.7 467.5,279.7 468.5,279.7 469.3,279.7 470.2,279.7 471.1,279.7 472.0,279.7 472.9,279.7 473.8,279.7 474.7,279.7 475.6,279.7 476.5,279.7 477.4,279.7 478.3,279.7 479.2,279.7 480.0,279.7 480.9,279.7 481.8,279.7 482.7,279.7 483.6,279.7 484.5,279.7 485.4,279.7 486.3,279.7 487.2,279.7 488.1,279.7 489.0,279.7 489.9,283.4 490.7,279.7 491.6,279.7 492.5,279.7 493.4,279.7 494.3,279.7 495.2,279.7 496.1,279.7 497.0,279.7 497.9,279.7 498.8,279.7 499.7,279.7 500.5,279.7 501.4,279.7 502.3,279.7 503.2,279.7 504.1,283.4 505.0,279.7 505.9,279.7 506.8,279.7 507.7,279.7 508.5,279.7 509.4,279.7 510.3,279.7 511.2,279.7 512.1,279.7 513.0,279.7 513.9,279.7 514.8,279.7 515.7,279.7 516.6,279.7 517.5,283.4 518.4,279.7 519.3,279.7 520.2,279.7 521.1,279.7 521.9,279.7 522.8,279.7 523.7,279.7 524.6,279.7 525.5,279.7 526.4,279.7 527.3,279.7 528.2,279.7 529.1,279.7 530.0,279.7 530.8,279.7 531.8,279.7 532.7,279.7 533.6,279.7 534.5,279.7 535.3,279.7 536.2,279.7 537.1,283.4 538.0,279.7 538.9,279.7 539.8,279.7 540.6,283.4 541.5,279.7 542.4,279.7 543.3,279.7 544.2,279.7 545.1,279.7 546.0,279.7 546.9,279.7 547.8,279.7 548.6,279.7 549.6,279.7 550.4,279.7 551.3,279.7 552.2,279.7 553.1,283.4 554.0,279.7 554.9,279.7 555.8,279.7 556.7,279.7 557.6,279.7 558.4,279.7 559.3,279.7 560.2,279.7 561.1,279.7 562.0,279.7 562.9,279.7 563.8,279.7 564.7,283.4 565.6,279.7 566.5,279.7 567.4,279.7 568.2,279.7 569.1,279.7" fill="none" stroke="#1baf7a" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="6 4"/>
+<line x1="574" x2="586" y1="295.2" y2="295.2" stroke="#1baf7a" stroke-width="2"/>
+<text x="590" y="299.2" fill="#1b1f24">fq on the sender</text>
+<text x="66.5" y="258.0" fill="#4a5560" text-anchor="start">TCP small queues: 2 skbs per flow, 32 in all</text>
+<line x1="66" x2="80" y1="234" y2="234" stroke="#2a78d6" stroke-width="2"/>
+<text x="85" y="238" fill="#1b1f24">16 HTB classes on snd:s0</text>
+<line x1="260" x2="274" y1="234" y2="234" stroke="#1baf7a" stroke-width="2"/>
+<text x="279" y="238" fill="#1b1f24">fq maxrate 500kbit on snd:s0</text>
+<text x="58.0" y="412.0" text-anchor="middle" fill="#898781">0</text>
+<text x="143.3" y="412.0" text-anchor="middle" fill="#898781">5</text>
+<text x="228.7" y="412.0" text-anchor="middle" fill="#898781">10</text>
+<text x="314.0" y="412.0" text-anchor="middle" fill="#898781">15</text>
+<text x="399.3" y="412.0" text-anchor="middle" fill="#898781">20</text>
+<text x="484.7" y="412.0" text-anchor="middle" fill="#898781">25</text>
+<text x="570.0" y="412.0" text-anchor="middle" fill="#898781">30</text>
+<text x="314.0" y="430.0" text-anchor="middle" fill="#4a5560">seconds since the 16 flows connected</text>
+<g class="hit"><title>t = 0.0 s · HTB on the router: 0.00 MB held, RTT 40 ms · HTB on the sender: 0.0 KB, RTT 40 ms · fq on the sender: 0.0 KB</title><rect x="58.0" y="30" width="4.3" height="366.0" fill="transparent"/><line x1="58.0" x2="58.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 0.5 s · HTB on the router: 0.00 MB held, RTT 275 ms · HTB on the sender: 0.0 KB, RTT 128 ms · fq on the sender: 0.0 KB</title><rect x="62.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="66.5" x2="66.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.0 s · HTB on the router: 0.51 MB held, RTT 458 ms · HTB on the sender: 96.9 KB, RTT 135 ms · fq on the sender: 96.9 KB</title><rect x="70.8" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="75.1" x2="75.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 1.5 s · HTB on the router: 0.94 MB held, RTT 764 ms · HTB on the sender: 96.9 KB, RTT 136 ms · fq on the sender: 96.9 KB</title><rect x="79.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="83.6" x2="83.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.0 s · HTB on the router: 1.47 MB held, RTT 993 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="87.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="92.1" x2="92.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 2.5 s · HTB on the router: 1.99 MB held, RTT 1206 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="96.4" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="100.7" x2="100.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.0 s · HTB on the router: 2.42 MB held, RTT 1448 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="104.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="109.2" x2="109.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 3.5 s · HTB on the router: 2.38 MB held, RTT 1694 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="113.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="117.7" x2="117.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.0 s · HTB on the router: 2.40 MB held, RTT 2013 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="122.0" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="126.3" x2="126.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 4.5 s · HTB on the router: 2.40 MB held, RTT 2280 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="130.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="134.8" x2="134.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.0 s · HTB on the router: 2.42 MB held, RTT 2426 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="139.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="143.3" x2="143.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 5.5 s · HTB on the router: 2.35 MB held, RTT 2433 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="147.6" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="151.9" x2="151.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.0 s · HTB on the router: 2.11 MB held, RTT 2434 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="156.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="160.4" x2="160.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 6.5 s · HTB on the router: 1.87 MB held, RTT 2444 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="164.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="168.9" x2="168.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 7.0 s · HTB on the router: 1.61 MB held, RTT 2446 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="173.2" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="177.5" x2="177.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 7.5 s · HTB on the router: 1.76 MB held, RTT 2230 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="181.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="186.0" x2="186.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 8.0 s · HTB on the router: 2.40 MB held, RTT 1743 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="190.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="194.5" x2="194.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 8.5 s · HTB on the router: 2.41 MB held, RTT 1658 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="198.8" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="203.1" x2="203.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 9.0 s · HTB on the router: 2.41 MB held, RTT 1968 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="207.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="211.6" x2="211.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 9.5 s · HTB on the router: 2.42 MB held, RTT 2290 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="215.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="220.1" x2="220.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 10.0 s · HTB on the router: 2.40 MB held, RTT 2437 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="224.4" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="228.7" x2="228.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 10.5 s · HTB on the router: 2.41 MB held, RTT 2446 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="232.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="237.2" x2="237.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 11.0 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="241.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="245.7" x2="245.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 11.5 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="250.0" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="254.3" x2="254.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 12.0 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="258.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="262.8" x2="262.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 12.5 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="267.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="271.3" x2="271.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 13.0 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="275.6" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="279.9" x2="279.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 13.5 s · HTB on the router: 2.40 MB held, RTT 2447 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="284.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="288.4" x2="288.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 14.0 s · HTB on the router: 2.40 MB held, RTT 2457 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="292.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="296.9" x2="296.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 14.5 s · HTB on the router: 2.40 MB held, RTT 2466 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="301.2" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="305.5" x2="305.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 15.0 s · HTB on the router: 2.40 MB held, RTT 2449 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="309.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="314.0" x2="314.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 15.5 s · HTB on the router: 2.30 MB held, RTT 2448 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="318.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="322.5" x2="322.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 16.0 s · HTB on the router: 2.04 MB held, RTT 2448 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="326.8" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="331.1" x2="331.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 16.5 s · HTB on the router: 1.79 MB held, RTT 2439 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="335.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="339.6" x2="339.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 17.0 s · HTB on the router: 1.55 MB held, RTT 2435 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="343.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="348.1" x2="348.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 17.5 s · HTB on the router: 1.31 MB held, RTT 2210 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="352.4" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="356.7" x2="356.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 18.0 s · HTB on the router: 1.19 MB held, RTT 1821 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="360.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="365.2" x2="365.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 18.5 s · HTB on the router: 1.21 MB held, RTT 1433 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="369.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="373.7" x2="373.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 19.0 s · HTB on the router: 1.18 MB held, RTT 1284 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="378.0" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="382.3" x2="382.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 19.5 s · HTB on the router: 1.24 MB held, RTT 1252 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="386.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="390.8" x2="390.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 20.0 s · HTB on the router: 1.19 MB held, RTT 1259 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="395.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="399.3" x2="399.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 20.5 s · HTB on the router: 1.25 MB held, RTT 1260 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="403.6" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="407.9" x2="407.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 21.0 s · HTB on the router: 1.23 MB held, RTT 1277 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="412.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="416.4" x2="416.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 21.5 s · HTB on the router: 1.24 MB held, RTT 1284 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="420.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="424.9" x2="424.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 22.0 s · HTB on the router: 1.28 MB held, RTT 1284 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="429.2" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="433.5" x2="433.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 22.5 s · HTB on the router: 1.26 MB held, RTT 1302 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="437.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="442.0" x2="442.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 23.0 s · HTB on the router: 1.29 MB held, RTT 1308 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="446.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="450.5" x2="450.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 23.5 s · HTB on the router: 1.26 MB held, RTT 1308 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="454.8" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="459.1" x2="459.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 24.0 s · HTB on the router: 1.28 MB held, RTT 1329 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="463.3" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="467.6" x2="467.6" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 24.5 s · HTB on the router: 1.30 MB held, RTT 1332 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="471.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="476.1" x2="476.1" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 25.0 s · HTB on the router: 1.29 MB held, RTT 1341 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="480.4" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="484.7" x2="484.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 25.5 s · HTB on the router: 1.31 MB held, RTT 1357 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="488.9" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="493.2" x2="493.2" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 26.0 s · HTB on the router: 1.32 MB held, RTT 1357 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="497.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="501.7" x2="501.7" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 26.5 s · HTB on the router: 1.31 MB held, RTT 1376 ms · HTB on the sender: 93.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="506.0" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="510.3" x2="510.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 27.0 s · HTB on the router: 1.36 MB held, RTT 1382 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="514.5" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="518.8" x2="518.8" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 27.5 s · HTB on the router: 1.35 MB held, RTT 1381 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="523.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="527.3" x2="527.3" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 28.0 s · HTB on the router: 1.36 MB held, RTT 1401 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="531.6" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="535.9" x2="535.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 28.5 s · HTB on the router: 1.38 MB held, RTT 1406 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="540.1" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="544.4" x2="544.4" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 29.0 s · HTB on the router: 1.36 MB held, RTT 1405 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 93.9 KB</title><rect x="548.7" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="552.9" x2="552.9" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 29.5 s · HTB on the router: 1.36 MB held, RTT 1426 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="557.2" y="30" width="8.5" height="366.0" fill="transparent"/><line x1="561.5" x2="561.5" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+<g class="hit"><title>t = 30.0 s · HTB on the router: 1.42 MB held, RTT 1430 ms · HTB on the sender: 96.9 KB, RTT 137 ms · fq on the sender: 96.9 KB</title><rect x="565.7" y="30" width="4.3" height="366.0" fill="transparent"/><line x1="570.0" x2="570.0" y1="30" y2="396.0" stroke="#898781" stroke-width="1" opacity="0"/></g>
+</svg>
+<!--/PLOT:ch07-occupancy--></div>
+        <figcaption><b>Diagram 7.4 — Bytes held by a 16-flow shaper at 500 kbit/s per flow, measured.</b> Notice the units: megabytes on top, kilobytes below. On the router (orange) nothing reaches TCP until a packet is lost, so each window grows into its class's 100-packet queue: Fig. 8 in miniature. On the sender (blue for HTB, green for fq with <code>maxrate</code>) TSQ is the deferred completion, and both hold a flat 97 KB. Rootless bench, kernel 7.2.6, Reno, 2 October 2026. Data: <a href="labs/ch07-carousel/data/htb-rtr-qdisc.csv">htb-rtr</a>, <a href="labs/ch07-carousel/data/htb-snd-qdisc.csv">htb-snd</a>, <a href="labs/ch07-carousel/data/fq-snd-qdisc.csv">fq-snd</a>. Hover for values.</figcaption></figure>
+      <p>Holding completions creates a new problem (p. 411). The wheel releases out of arrival order: of two flows, one limited to half the other's rate, the faster one's later packet leaves first. Completions reported in arrival order would make it wait for the slow flow's packet, head-of-line blocking at the completion queue, so Carousel tracks held packets in a hash map in the guest's virtio driver and completes each as it leaves (pp. 411–412).</p>
+
+      <h3 class="strand" id="s-wheel-per-core">One wheel per core</h3>
+      <p>Give each core its own wheel and hash each connection to one core, and no packet takes a shared lock. An aggregate spread over cores then needs its rate split: the NIC-level bandwidth allocator (NBA) water-fills it about every 100 ms, keeping 1% for idle cores (pp. 409, 412).</p>
+      <p>Water-filling is the shapers chapter's <a href="index.html#g-max-min-fairness">max-min fairness</a>. A VM held to 1 Gbit/s has flows on four cores that want 100, 200, 600 and 600 Mbit/s. An even 250 each is more than the first core needs, so 900 remain for three; 300 each is more than the second needs, so 700 remain for two. The split is 100, 200, 350 and 350, and an idle core still keeps 10 Mbit/s so a new flow can start. Updates travel lazily so the data path never locks.</p>
+      <p>Busy polling lets each wheel run without timers (pp. 409–410); a kernel qdisc cannot spin, so fq arms an hrtimer. Linux's nearest relative is <code>mq</code>, one child qdisc per transmit queue (<code>sch_mq.c:89</code>), CPUs mapped to queues by XPS (<code>net/core/dev.c:4621</code>): an <code>mq</code> of fqs has a lock per queue, and no NBA to hold an aggregate across them.</p>
+      <h3 id="systems">Real systems</h3>
+      <div class="system" id="sys-linux-timer-wheel" data-system="linux-timer-wheel">
+        <h4>Meet the system · Linux's timer wheel, <code>kernel/time/timer.c</code></h4>
+        <p><b>What it is.</b> The structure that holds every <code>timer_list</code> timeout in the kernel: TCP's retransmit and delayed-ack timers, socket receive timeouts, keepalives. It is a hierarchical timing wheel, 9 levels of 64 slots at HZ = 1000, each level eight times coarser than the one below.</p>
+        <p><b>Why it exists.</b> Most timeouts are cancelled before they fire, so starting and stopping one must cost \(O(1)\), and a late expiry hardly matters. Thomas Gleixner's 2016 rework (<code>500462a9de65</code>, v4.8) stopped moving timers down to finer levels as they neared expiry, because "the vast majority of the timer wheel timers are canceled or rearmed before expiration".</p>
+        <p><b>The parts you need.</b></p>
+        <ul>
+          <li>Levels: <code>LVL_CLK_SHIFT</code> 3, <code>LVL_BITS</code> 6, <code>LVL_DEPTH</code> 9 (<code>timer.c:153–176</code>).</li>
+          <li><code>calc_wheel_index()</code>: picks the level by distance and rounds the expiry up to a slot's end (lines 524–577).</li>
+          <li><code>__run_timers()</code>: each tick, collects the slots that came due (line 2344).</li>
+          <li>The hrtimer, its precise sibling: a red-black tree per CPU (<code>include/linux/hrtimer_defs.h:24</code>).</li>
+        </ul>
+        <p class="here"><b>Where this chapter lives inside it.</b> It is Carousel's time-indexed queue with Varghese and Lauck's hierarchy on top: insert computes a slot and appends, each tick sweeps the slots that came due, both \(O(1)\). Slot width and horizon trade once per level: 63 ms of horizon in 1 ms slots, 504 ms in 8 ms, 4 s in 64 ms, 32 s in 512 ms, out to about 12 days. The price is precision: up to one slot late, never early, so at most 1 ms below 63 ms and at most \(8/63 \approx 13\%\) of the timeout beyond. So one TCP socket uses both structures: its retransmit timer is a <code>timer_list</code> (<code>include/net/sock.h:495</code>) armed through <code>mod_timer()</code> (<code>net/core/sock.c:3721–3726</code>), while the pacing timer is an <code>hrtimer</code> (<code>include/linux/tcp.h:434</code>).</p>
+        <p><b>Try it</b> (~1 min, no sudo, from the dossier folder):</p>
+        <pre><code>cd labs/ch07-carousel
+python3 wheelwait.py --quick</code></pre>
+        <p><b>What you should see.</b> Real output, 2 October 2026, kernel 7.2.6 (the full run is Diagram 7.3):</p>
+        <pre><code>HZ=1000; late = elapsed - requested, in ms
+ timeout level   bucket | wheel late: min  median     max | hrtimer median
+    20 ms     0     1 ms |            0.54    0.70    0.81 |          0.078
+   100 ms     1     8 ms |            2.91    5.31    7.69 |          0.075
+   200 ms     1     8 ms |            5.03    7.16   10.85 |          0.350
+   800 ms     2    64 ms |           37.16   46.25   55.33 |          1.030
+  3000 ms     2    64 ms |           22.23   36.84   51.45 |          0.076
+  5000 ms     3   512 ms |          226.98  281.86  336.73 |          0.224</code></pre>
+        <p>Each wheel row stays under its level's slot width, except one 200 ms wait at 10.9 ms: 8 ms of slot plus scheduling delay on a shared CPU, which the hrtimer column shows too. Rows are cut; the file is <a href="labs/ch07-carousel/data/wheelwait-quick.txt">wheelwait-quick.txt</a>.</p>
+        <p><b>Clean up.</b> Nothing to clean: the script only sleeps.</p>
+        <p class="drift">Stable: 64-slot levels, eight times coarser each, rounding up, no cascading. Drifting (as of October 2026, kernel 7.2): HZ (1000 here; 250 and 300 are common), the number of levels, and which timeouts use the wheel or an hrtimer.</p>
+      </div>
+
+      <div class="system back" id="sys-sch-fq-back" data-system="sch-fq">
+        <h4>Back to <code>sch_fq</code></h4>
+        <p>The fair-queue and pacing qdisc as Carousel's foil: <code>maxrate</code> stamps each flow's next send time (<code>sch_fq.c:796–833</code>) but only per flow, the throttled tree is the \(O(\log n)\) queue a wheel replaces, and <code>horizon</code> is the clamp-or-drop choice. The bench lab's fq (real output, 2 October 2026, cut where marked), then the NIC wheel hook on a dummy device inside <code>unshare -Urn</code>:</p>
+        <pre><code>qdisc fq 8741: root [...] maxrate 500Kbit low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us
+  flows 21 (inactive 5 throttled 16) band0_pkts 0 band1_pkts 32 band2_pkts 0 next_packet_delay 1.67ms
+$ tc qdisc add dev d0 root fq offload_horizon 1ms
+Error: sch_fq: invalid offload_horizon.</code></pre>
+        <p>All 16 flows wait in the tree; no device offers a wheel, so the hook refuses any horizon. <a href="ch05.html#sys-sch-fq">The full card in the small-queues chapter</a> reads the rest.</p>
+      </div>
+
+      <div class="system back" id="sys-htb-back" data-system="htb">
+        <h4>Back to HTB</h4>
+        <p>The structure Carousel replaces: per rate limit a class, its two buckets and a leaf queue, found by a filter, served under the qdisc lock (Fig. 2a, p. 406). One of the lab's 16 router classes, 20 s in (real output, 2 October 2026):</p>
+        <pre><code>class htb 1:11 root leaf 8745: prio 0 rate 500Kbit ceil 500Kbit burst 1600b cburst 1600b
+ Sent 1206798 bytes 799 pkt (dropped 103, overlimits 796 requeues 0)
+ backlog 74186b 49p requeues 0</code></pre>
+        <p>49 packets, 1.2 s at 500 kbit/s, wait in one class, and 103 were dropped: its queue is its only backpressure. <a href="ch04.html#sys-htb">The full card in the shapers chapter</a> reads the rest.</p>
+      </div>
+
+      <h3 id="labs">Hands-on</h3>
+      <p class="note">The paper lab needs nothing; the build lab needs Python 3; the bench lab uses <code>labs/common/qnet.sh</code> with this chapter's <code>shapers.sh</code>, <code>mflow.py</code> and <code>qwatch.py</code>. Commands paste into fish or bash. The author's runs shared the CPU with other jobs.</p>
+
+      <div class="lab" id="lab-slot-arithmetic">
+        <h4>Hands-on · Size a wheel and place a packet</h4>
+        <p class="labmeta">~25 min · trace by hand · paper and pencil</p>
+        <p><b>Task.</b> For the 2 µs, 2 s wheel: (a) slots, and memory at 16 bytes per slot plus 8 per reference with 200,000 packets queued; (b) the fastest 1500-byte flow that keeps its gaps, and the slowest that fits; (c) the horizon for 1,000 flows held to 10 Mbit/s, two packets each queued; (d) with the front at 5.000000 s, the index for stamps 5.000302 s, 6.999999 s and 7.5 s, and both horizon options for the last.</p>
+        <p><b>Done when.</b> You have four numbers for (a) to (c), three indices, and one sentence per option for the 7.5 s packet.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>The slot-and-horizon learning has every formula: slots are horizon over width, the fastest flow sends one packet per slot, the slowest one packet per horizon, and an aggregate needs \(l_{max}/r_{min}\).</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>An index is the absolute slot \(\lfloor t/g \rfloor\) taken \(\bmod N\). The latest slot the wheel can hold is the front plus \(N - 1\); anything later is past the horizon.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary><p>\(7.5\ \text{s} / 2\ \mu\text{s} = 3{,}750{,}000\), and the last slot is \(2{,}500{,}000 + 999{,}999 = 3{,}499{,}999\). Index 750,000 exists, but on this lap it stands for a different time.</p></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>(a) slots      2 s / 2 us = 1,000,000;  slot heads 16 MB;  references 200,000 x 8 B = 1.6 MB
+(b) fastest    12,000 bits / 2 us = 6 Gbit/s;  slowest 12,000 bits / 2 s = 6 kbit/s
+(c) horizon    2,000 packets x 1500 B = 24 Mbit;  24 Mbit / 10 Mbit/s = 2.4 s  (more than 2 s)
+(d) 5.000302 s  slot 2,500,151  index 500,151   151 slots after the front
+    6.999999 s  slot 3,499,999  index 499,999   the last slot
+    7.5 s       slot 3,750,000  past 3,499,999: clamp into index 499,999 (sent at about 7.0 s,
+                0.5 s early, a burst for that flow) or drop it (a hard limit holds)</code></pre>
+          <p><b>Expected output.</b> The table above. The packets themselves stay in the sender's memory until their completion, which is why the wheel needs only 8-byte references (p. 412); one million queued references cost the paper's 8 MB.</p>
+          <p><b>What this shows.</b> Every limit of a wheel comes from two numbers, \(g\) and the horizon (the slot-and-horizon learning, pp. 410–411). The slowest rate is 6 kbit/s for one packet per horizon, the same rule that makes the paper's printed 1.5 Mbit/s 500 times too high. Deferred completions decide (c): two packets per flow times 1,000 flows overflow a 2 s wheel at 10 Mbit/s.</p>
+          <p><b>Common wrong turn.</b> Putting the 7.5 s packet at index 750,000 because the index arithmetic works. On this lap index 750,000 is absolute slot 2,750,000, 5.5 s, so a wheel without the horizon check sends the packet 2 s early. The same mistake hides in computing an index from the offset to the front (151) instead of the absolute slot; the two agree only when the front sits at index 0.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-wheel-vs-heap">
+        <h4>Hands-on · Build the wheel and race it against a heap</h4>
+        <p class="labmeta">~45 min · build · needs Python 3</p>
+        <p><b>Task.</b> Write <code>TimingWheel.insert()</code> and <code>extract_due()</code> in <a href="labs/ch07-carousel/wheel_starter.py">wheel_starter.py</a>: \(N\) flows share 12 Gbit/s, two packets each in the shaper, and a poller advances 1 µs at a time. Race it against the starter's heap from 100 to 100,000 flows, then run the printed Algorithm 1.</p>
+        <pre><code>cd labs/ch07-carousel                       # from the dossier folder
+python3 wheel_starter.py --flows 100 1000 10000 100000 --releases 300000
+python3 wheel_starter.py --literal --flows 100 --releases 20000 --poll 3</code></pre>
+        <p><b>Done when.</b> Your wheel releases what the heap releases, errors inside one slot, with flat operations per packet while the heap's grow, and you can say why the printed algorithm releases a few dozen packets.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>Work in absolute slot numbers, \(\lfloor t/g \rfloor\), and take the index \(\bmod N\) only to touch the array. The front is the earliest slot not yet swept.</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>Insert: clamp the slot to at least the front and at most the front plus \(N - 1\), then append. Extract: visit slots from the front up to \(\lfloor \text{now}/g \rfloor\), take whole lists, and advance the front. Count one operation per slot visited and per item moved.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary>
+          <pre><code>last = now_ns // self.g
+while True:
+    i = self.front % self.n          # sweep from the front's slot
+    ...                              # take self.slots[i], set it to None
+    if self.front &gt;= last: break     # keep the front on the slot that holds now
+    self.front += 1                  # advance by exactly one slot</code></pre></details>
+        <details class="sol"><summary>Solution</summary>
+          <pre><code>def insert(self, t_ns, item):
+    s = t_ns // self.g                          # absolute slot number
+    if s &lt; self.front: s = self.front           # overdue: the front slot
+    elif s &gt;= self.front + self.n: s = self.front + self.n - 1   # past the horizon: clamp
+    i = s % self.n
+    if self.slots[i] is None: self.slots[i] = [item]
+    else: self.slots[i].append(item)
+    self.ops += 1
+
+def extract_due(self, now_ns):
+    out, last = [], now_ns // self.g
+    while True:
+        i = self.front % self.n
+        self.ops += 1                           # one slot visit
+        if self.slots[i] is not None:
+            out.extend(self.slots[i]); self.ops += len(self.slots[i])
+            self.slots[i] = None
+        if self.front &gt;= last: break
+        self.front += 1
+    return out</code></pre>
+          <p><b>Expected output</b> (the author's run, 2 October 2026, shared CPU; <a href="labs/ch07-carousel/data/wheel-vs-heap.txt">wheel-vs-heap.txt</a>, <a href="labs/ch07-carousel/data/starter-literal-poll3.txt">starter-literal-poll3.txt</a>):</p>
+          <pre><code>   scheduler   flows  queued   horizon  released        error (us)  ops/pkt  ns/pkt
+        heap     100     200     0.8ms    300002      +0.0 .. +1.0      8.8     528
+       wheel     100     200     0.8ms    300002      -1.0 .. +0.9      4.1     529
+        heap   10000   20000    80.0ms    300002      +0.0 .. +1.0     15.4     832
+       wheel   10000   20000    80.0ms    300002      -1.0 .. +0.9      4.0     586
+        heap  100000  200000   800.0ms    300001      +0.0 .. +1.0     18.8    2522
+       wheel  100000  200000   800.0ms    300001      -1.0 .. +1.0      4.0    1275
+alg1-literal     100     200     0.8ms        53 -0.3 .. +152999.9      0.0  611772</code></pre>
+          <p><b>What this shows.</b> The heap's comparisons grow by about 3.3 per tenfold, \(\log_2 10\): roughly \(\log_2 n + 1\) per packet. The wheel's operations stay at 4, and it releases up to one slot early, the rounding of Fig. 18 (the timing-wheel learning, p. 410). Time per packet grows for both at 100,000 flows, the heap 4.8 times and the wheel 2.4 times, most likely because an 800,000-slot array no longer fits in cache; heapq is C and the wheel is Python, so only the growth is a fair comparison. The printed algorithm strands packets in slots it never looks at.</p>
+          <p><b>Common wrong turn.</b> Copying Algorithm 1 line by line: testing <code>TW[now % N]</code> instead of the front's slot, and adding <i>Granularity</i> to a front counted in slots. Polling every slot hides the first slip, because then now and the front coincide; poll every third slot, as a busy NIC sometimes will, and packets wait a whole lap, or forever.</p>
+        </details>
+      </div>
+
+      <div class="lab" id="lab-shaper-memory">
+        <h4>Hands-on · Sixteen rate limits, with and without a completion signal</h4>
+        <p class="labmeta">~40 min · measure · no sudo, needs Python 3</p>
+        <p><b>Task.</b> Hold 16 Reno flows to 500 kbit/s each, on a fresh 40 ms bench each time: 16 HTB classes on <code>s0</code>, fq <code>maxrate 500kbit</code> on <code>s0</code>, and the 16 classes on the router's <code>r1</code> (watch <code>rtr</code> <code>r1</code> then). Predict held bytes, RTT and retransmissions first.</p>
+        <pre><code>cd labs/ch07-carousel                       # from the dossier folder
+../common/qnet.sh                           # opens a shell inside the lab
+./shapers.sh htb-snd                        # then fq-snd, then htb-rtr, each in a new qnet shell
+ip netns exec rcv python3 mflow.py recv --flows 16 &
+ip netns exec snd python3 qwatch.py --dev s0 --every 0.05 --seconds 31 --csv q.csv &
+ip netns exec snd python3 mflow.py send --dst 10.0.2.1 --flows 16 --seconds 30 --csv f.csv</code></pre>
+        <p><b>Done when.</b> Three rows of measurements sit next to your predictions, and you can name the mechanism that makes the router hold 14 times more. <code>./run-bench.sh</code> runs all three in two minutes.</p>
+        <details class="hint"><summary>Hint 1 · direction</summary><p>On <code>s0</code> the small-queues chapter's TSQ is the deferred completion. On the router, which signal reaches the sender before a packet is lost?</p></details>
+        <details class="hint"><summary>Hint 2 · mechanism</summary><p>At 500 kbit/s an skb holds two segments (the floor), and TSQ allows two skbs: four 1514-byte frames per flow, each 24.2 ms at 500 kbit/s. On the router each class has a 100-packet queue, and nothing stops a flow's window short of filling it.</p></details>
+        <details class="hint"><summary>Hint 3 · nearly there</summary>
+          <pre><code>python3 -c "import csv,statistics as s; q=[r for r in csv.DictReader(open('q.csv')) if float(r['t_s'])&gt;5]; b=[int(r['backlog_bytes']) for r in q]; print('held median', s.median(b), 'max', max(b), 'out Mbit/s', (int(q[-1]['sent_bytes'])-int(q[0]['sent_bytes']))*8/(float(q[-1]['t_s'])-float(q[0]['t_s']))/1e6)"</code></pre></details>
+        <details class="sol"><summary>Solution</summary>
+          <p>Predictions: on <code>s0</code>, \(16 \times 4 \times 1514 = 96{,}896\) bytes and \(40 + 4 \times 24.2 \approx 137\) ms, no loss. On the router, up to \(16 \times 100 = 1{,}600\) frames, 2.42 MB, a full class queue adding \(100 \times 24.2 = 2.4\) s, and losses every time a queue fills.</p>
+          <p><b>Expected output</b> (the author's runs, 2 October 2026, seconds 5–30; <a href="labs/ch07-carousel/data/bench-summary.txt">bench-summary.txt</a>, <a href="labs/ch07-carousel/data/README.md">README</a>):</p>
+          <pre><code>shaper         held median / max          out (Mbit/s)  RTT median (min-max)   resent  wmem_alloc
+htb on s0         96,896 /    96,896 B    8.007           137 ms (132-138)        0     7,712 B
+fq on s0          96,896 /    96,896 B    7.990           137 ms (126-137)        0     7,712 B
+htb on r1      1,401,964 / 2,422,400 B    8.002         1,743 ms (1,236-2,471)  1,614       0 B</code></pre>
+          <p><b>What this shows.</b> All three hold the rate to within 0.15%; what differs is memory and delay. On <code>s0</code> each socket's <code>wmem_alloc</code> sits at two truesizes, so TSQ stops TCP until the shaper sends: a deferred completion, and Fig. 15's two packets per flow (the completions learning, pp. 411, 414). On the router netem has already orphaned each skb on <code>s0</code>, so the only signal is loss, and each window grows into its class queue: Fig. 8 (p. 408) in miniature. HTB needed 16 classes, 16 queues and 16 filters where fq needed one qdisc, and fq could not have held the 16 flows to 8 Mbit/s together: <code>maxrate</code> is per flow (p. 406).</p>
+          <p><b>Common wrong turn.</b> Reading accuracy from the router run's goodput: <code>mflow.py</code> reports 0.485 Mbit/s per flow, above the 0.478 a 500 kbit/s class leaves for payload. Bytes acked between 5 s and 30 s came out of the shaper over a different window, because the RTT shrank from 2.4 s to 1.4 s in between. Measure rate where the paper does, at the shaper's output (p. 413): <code>qwatch.py</code>'s <code>sent_bytes</code> gives 8.002 Mbit/s.</p>
+        </details>
+      </div>
+      <div class="check" id="questions">
+        <h4>Check yourself</h4>
+        <p class="note"><button id="answerctl">Open all answers</button> Answer out loud first, then open.</p>
+        <p>1. Predict the value: an aggregate of 500 flows is held to 20 Mbit/s, with two 1500-byte packets per flow in the shaper. What horizon avoids clamping, and how many 2 µs slots is that?</p>
+        <details class="ans"><summary>Answer</summary><p>0.6 s, 300,000 slots. The aggregate can queue \(1{,}000 \times 1500\) bytes, 12 Mbit, and the last release time is \(12/20 = 0.6\) s ahead, the paper's \(l_{max}/r_{min}\) (p. 410); \(0.6\ \text{s} / 2\ \mu\text{s} = 300{,}000\). Near miss: one packet per flow, 0.3 s; under deferred completions two wait (p. 411).</p></details>
+        <p>2. Predict the value: a 10 Mbit/s rate limit stamps exactly as p. 410 prints. Its flow idles for one second, then sends again. How much leaves at once?</p>
+        <details class="ans"><summary>Answer</summary><p>About 1.25 MB, 833 packets. The policy's stamp stayed one second behind, so the next \(10\ \text{Mbit/s} \times 1\ \text{s}\) all carry release times in the past, and Algorithm 1 puts them in the front slot (lines 3–4, p. 410). Starting from \(\max(\text{now}, LTS)\) removes the burst. Near miss: "the wheel still sends at 10 Mbit/s"; the wheel knows only stamps.</p></details>
+        <p>3. Here is a symptom: a hypervisor shaper holding 16 VM flows to 500 kbit/s each shows 900 to 1,600 packets queued, 1.7 s RTTs and steady drops. The same classes on the senders' own interfaces held 32 skbs and 137 ms. What differs?</p>
+        <details class="ans"><summary>Answer</summary><p>The completion. On the sender's interface TSQ counts each skb until the shaper sends it, which is a deferred completion: two skbs per flow (p. 411). Past the VM boundary the skb was already freed, so only loss slows TCP, and each window grows into its class queue, Fig. 8's case (p. 408). Near miss: a slow or inaccurate shaper. Both setups delivered 8.00 Mbit/s.</p></details>
+        <p>4. Here is a symptom: a 5 s socket receive timeout fires anywhere from 5.0 to 5.5 s, while a 50 ms one is never more than about 1 ms late. Is the kernel's clock drifting?</p>
+        <details class="ans"><summary>Answer</summary><p>No: the timer wheel's level 3. At HZ = 1000 a timeout of 4,032 to 32,255 ms lands in 512 ms slots and is rounded up to its slot's end (<code>timer.c:524–539</code>); 50 ms sits in 1 ms slots. That is Varghese and Lauck's precision traded for range (p. 32). Near miss: CPU load, which would delay short timeouts and hrtimers too (Diagram 7.3).</p></details>
+        <p>5. Choose and defend: 2,000 VMs on one host, each to be held to its own rate across up to 50 flows. HTB with 2,000 classes, or fq with <code>maxrate</code>?</p>
+        <details class="ans"><summary>Answer</summary><p>HTB, because it is correct. fq's <code>maxrate</code> caps each flow, and fq "does not support flow aggregates" (p. 406), so a VM with 50 flows would get 50 times its rate. The price is Carousel's complaint: 2,000 classes to classify into and poll, under one lock (pp. 407–408). Carousel's fix is one stamp per aggregate and one wheel; the pods chapter reads Linux's.</p></details>
+        <p>6. Choose and defend: a stamp lands past the horizon. Clamp or drop, for a flow that is only paced, and for a VM under a hard limit?</p>
+        <details class="ans"><summary>Answer</summary><p>Clamp for pacing, drop for the hard limit (p. 411). A clamped packet is never lost, which suits a smoothing target, but clamped packets bunch in the last slot and overshoot briefly. Under a hard limit that overshoot breaks the contract, and a drop tells TCP to slow down. fq offers both: <code>horizon_drop</code>, the default, and <code>horizon_cap</code> (<code>sch_fq.c:615–623</code>).</p></details>
+      </div>
+
+      <div class="recap"><h4>Recap</h4><p>Token-bucket shapers keep a queue and a lock per rate limit, a structural cost. Carousel writes each limit as a release time, keeps the latest stamp, and queues every packet in one timing wheel: \(O(1)\) both ways, precise to a slot, reaching one horizon ahead. Deferred completions keep about two packets per flow in it, and a wheel per core removes the lock. Linux kept fq's tree and added fq's horizon; its own wheel holds the kernel's timeouts.</p></div>
+
+      <div class="refs"><h4>Go deeper</h4><ul>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> G. Varghese, T. Lauck, "Hashed and Hierarchical Timing Wheels: Data Structures for the Efficient Implementation of a Timer Facility", SOSP '87, pp. 25–38, <a href="https://doi.org/10.1145/41457.37504">doi:10.1145/41457.37504</a>. Carousel's reference [43]. Read after the wheel learning, for Schemes 4, 6 and 7 and the costs on p. 32. A copy is in <code>extra/</code>.</li>
+        <li class="ref" data-layer="HOST"><span class="tag HOST">HOST</span> J. Corbet, "Reinventing the timer wheel", LWN, 3 June 2015, <a href="https://lwn.net/Articles/646950/">lwn.net/Articles/646950</a>. The draft of the wheel without cascading (32 slots per level; v7.2 has 64). Read with the timer-wheel card.</li>
+        <li class="ref" data-layer="MATH"><span class="tag MATH">MATH</span> R. Brown, "Calendar queues: a fast O(1) priority queue implementation for the simulation event set problem", <i>CACM</i> 31(10), 1988, pp. 1220–1227, <a href="https://doi.org/10.1145/63039.63045">doi:10.1145/63039.63045</a>. Carousel's reference [16], the structure it declined; read for the resizing rule.</li>
+      </ul></div>
+
+      <div class="quiz" data-when="after" id="quiz-after">
+        <h4>Quiz · lock it in</h4>
+        <p>This chapter's strands:</p>
+        <ul class="strands">
+          <li data-strand="queue-per-limit">A queue and a lock per rate limit</li>
+          <li data-strand="release-times">A rate written as a release time</li>
+          <li data-strand="timing-wheel">A wheel of time slots</li>
+          <li data-strand="slot-and-horizon">Slot width and horizon</li>
+          <li data-strand="deferred-completions">Completions held until the wire</li>
+          <li data-strand="wheel-per-core">One wheel per core</li>
+        </ul>
+        <p>Paste this to an agent that has the Alvar skills:</p>
+        <pre class="prompt"><code>/probe Book: reading list "From a full buffer to BBR", chapter 7 "Carousel" (A. Saeed, N. Dukkipati, V. Valancius, V. T. Lam, C. Contavalli, A. Vahdat, "Carousel: Scalable Traffic Shaping at End Hosts", SIGCOMM '17), printed pp. 404–417.
+I have read the chapter and the after half of ch07.html. Lock in.
+Strands: queue-per-limit (A queue and a lock per rate limit), release-times (A rate written as a release time), timing-wheel (A wheel of time slots), slot-and-horizon (Slot width and horizon), deferred-completions (Completions held until the wire), wheel-per-core (One wheel per core).
+Quiz every strand at least once, and include at least one "here is a symptom, what happened?" question.
+1–3 questions per call. Score my reasoning, not the letter. One-line correction after each batch.
+Update .alvar/maps/qbbr-ch07.md and keep the pre-read round in the quiz log.
+Then offer /teach on every strand still edge or unknown, one reasoning step at a time.
+Finally, list the claims in ch07.html that the quiz showed were loose, so the page can get a revision card.</code></pre>
+        <button class="copy">Copy prompt</button>
+        <p class="note">known: right, with a sound reason · edge: right but thin, or a near miss · unknown: the foundation is missing · blocked: "I don't know".</p>
+      </div>
+    </section>
+  </main>
+</div>
+<nav class="chnav"><a href="ch06.html">← TCP pacing</a><a href="index.html">All chapters</a><a href="ch08.html">Teaching NICs about time →</a></nav>
+<footer>From a full buffer to BBR · chapter 7 reads A. Saeed, N. Dukkipati, V. Valancius, V. T. Lam, C. Contavalli, A. Vahdat, "Carousel: Scalable Traffic Shaping at End Hosts", SIGCOMM '17, Los Angeles, printed pp. 404–417, with G. Varghese and T. Lauck, "Hashed and Hierarchical Timing Wheels", SOSP '87, printed pp. 25–38, and Linux v7.2 (kernel/time/timer.c, net/sched/sch_fq.c, net/core/dev.c). Page references are to the printed folios; the kernel is cited by file:line in v7.2. Built October 2026.</footer>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({startOnLoad:true, deterministicIds:true, theme:'neutral', flowchart:{htmlLabels:true, curve:'basis'}, securityLevel:'loose'});
+</script>
+<script src="assets/dossier.js"></script>
+</body>
+</html>

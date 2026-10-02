@@ -1,0 +1,15 @@
+== SO_MAX_PACING_RATE 20mbit, fq on s0, capture on rtr:r0, seconds 4-8
+average rate: 20.914 Mbit/s of frames, 20.003 Mbit/s of payload
+bursts (packets < 30 us apart): 3607 of 2 packets; median gap between bursts 1157 us
+== SO_MAX_PACING_RATE 50mbit, fq on s0, capture on rtr:r0, seconds 4-8
+average rate: 52.287 Mbit/s of frames, 50.008 Mbit/s of payload
+bursts (packets < 30 us apart): 4677 of 4 packets; median gap between bursts 923 us
+== SO_MAX_PACING_RATE 100mbit, fq on s0, capture on rtr:r0, seconds 4-8
+average rate: 104.564 Mbit/s of frames, 100.005 Mbit/s of payload
+bursts (packets < 30 us apart): 4520 of 8 packets, 1 of 3 packets; median gap between bursts 920 us
+== SO_MAX_PACING_RATE 200mbit, fq on s0, capture on rtr:r0, seconds 4-8
+average rate: 209.119 Mbit/s of frames, 200.003 Mbit/s of payload
+bursts (packets < 30 us apart): 4408 of 16 packets, 1 of 2 packets; median gap between bursts 913 us
+== SO_MAX_PACING_RATE 500mbit, fq on s0, capture on rtr:r0, seconds 4-8
+average rate: 522.907 Mbit/s of frames, 500.112 Mbit/s of payload
+bursts (packets < 30 us apart): 4121 of 42 packets, 1 of 41 packets; median gap between bursts 938 us

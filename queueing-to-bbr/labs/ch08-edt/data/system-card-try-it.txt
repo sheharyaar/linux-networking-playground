@@ -1,0 +1,10 @@
+qnet: snd 10.0.1.1 -> rtr -> rcv 10.0.2.1 | bottleneck rtr:r1 netem rate 10mbit limit 50 | delay 20ms each way | offloads off
+txtime: clock=mono sent 20 of 20 datagrams of 200 B, stamps 1000 us apart, first 11005 ms after start, all handed down at once
+ horizon_drops 20
+txtime: clock=tai sent 0 of 50 datagrams of 200 B, stamps 1000 us apart, first -45 ms after start
+txtime: 50 sendmsg() calls failed: ['ENOBUFS']
+txtime: 50 SO_EE_ORIGIN_TXTIME errors on the error queue
+  EINVAL TXTIME_INVALID_PARAM: 50
+qdisc etf 85cf: root refcnt 17 clockid TAI delta 500000 offload off deadline_mode off skip_sock_check off
+ Sent 0 bytes 0 pkt (dropped 51, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0

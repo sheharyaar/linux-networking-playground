@@ -1,0 +1,18 @@
+# t = 6 s
+qdisc tbf 1: root refcnt 17 rate 10Mbit burst 1540b lat 2s 
+ Sent 6412334 bytes 4301 pkt (dropped 13, overlimits 8786 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc fq_codel 2: parent 1:1 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+ Sent 6412334 bytes 4301 pkt (dropped 13, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  maxpacket 1514 drop_overlimit 0 new_flow_count 1717 ecn_mark 0
+  new_flows_len 0 old_flows_len 0
+# t = 9 s
+qdisc tbf 1: root refcnt 17 rate 10Mbit burst 1540b lat 2s 
+ Sent 9696112 bytes 6498 pkt (dropped 16, overlimits 13266 requeues 0) 
+ backlog 12112b 8p requeues 0
+qdisc fq_codel 2: parent 1:1 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+ Sent 9697626 bytes 6499 pkt (dropped 16, overlimits 0 requeues 0) 
+ backlog 12112b 8p requeues 0
+  maxpacket 1514 drop_overlimit 0 new_flow_count 2626 ecn_mark 0 memory_used 16856
+  new_flows_len 0 old_flows_len 1

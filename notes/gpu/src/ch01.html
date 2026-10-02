@@ -1,0 +1,146 @@
+    <div class="part">Part I · The machine</div>
+    <section id="ch1" class="chapter">
+      <span class="chnum">Chapter 1</span>
+      <h2>Four ways to be parallel</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> — Last chapter we chose our object: a matvec made of 16.8 million multiplications that do not depend on each other. This chapter asks how a machine can do many of them at once. The answer comes in four shapes, and the GPU uses a fifth that borrows from two of them.</p>
+
+      <h3>Flynn's four boxes</h3>
+      <p>In 1972 Michael Flynn sorted computers by two counts, and the sorting is still the clearest way in. The first count is <b>instruction streams</b>: how many separate sequences of instructions the machine follows at once, each with its own program counter. The second is data streams: how many separate pieces of data those instructions work on at once. One or many, times one or many, gives four boxes. This is <b>Flynn's taxonomy</b>.</p>
+      <p><b>SISD</b>, single instruction stream and single data stream, is one plain CPU core running ordinary code. The inner loop of our matvec, <code>sum += w[j] * x[j]</code>, compiled without vector instructions, does one multiply-add per instruction. <b>SIMD</b>, single instruction and multiple data, is one instruction that works on several numbers side by side. <b>MIMD</b>, multiple instructions and multiple data, is several independent processors, each following its own program: the eight cores of the laptop's Ryzen are MIMD. The fourth box, many instruction streams on one data stream, is almost never built, and nothing here needs it.</p>
+
+
+      <h3>SIMD on the CPU you already have</h3>
+      <p>The laptop's CPU is a Ryzen 7 8845HS, and it has AVX-512. A <b>vector register</b> is a wide register that holds several numbers. An AVX-512 register (<code>zmm0</code> to <code>zmm31</code>) is 512 bits wide, which is sixteen 4-byte floats. Each slot is a <b>lane</b>. One instruction then works on all sixteen lanes at once. Here is one row of our matvec written with AVX-512 intrinsics, and the inner loop that <code>gcc -O2 -mavx512f</code> made of it:</p>
+<pre><code>__m512 acc = _mm512_setzero_ps();
+for (int j = 0; j &lt; n; j += 16)
+    acc = _mm512_fmadd_ps(_mm512_loadu_ps(w + j), _mm512_loadu_ps(x + j), acc);
+return _mm512_reduce_add_ps(acc);
+
+    vmovups      (%rdi,%rax,4), %zmm2          # 16 numbers of the row of W
+    vfmadd231ps  (%rsi,%rax,4), %zmm2, %zmm0   # 16 multiply-adds, one instruction</code></pre>
+      <p class="lcap">Listing 1.1 — one row of the matvec, as CPU SIMD. Compiled on this laptop with gcc.</p>
+      <p>Two things about SIMD matter for what follows. First, the program is written in vectors. The code says "sixteen at a time", the loop steps by 16, and the data has to be laid out so that sixteen useful numbers sit next to each other in memory. Second, lanes cannot easily go their own way. If some lanes should skip a step, the programmer uses a <b>mask</b>: a set of bits, one per lane, that switches lanes off for one instruction. AVX-512 has eight mask registers for this, <code>k0</code> to <code>k7</code>. Every branch has to be turned into masks by hand or by the compiler.</p>
+
+      <h3>SIMT: write one thread, run thirty-two</h3>
+      <p>A GPU programmer writes code for one thread. A <b>GPU thread</b> is one running copy of the kernel's function, with its own registers and its own index number, and that index is how it knows which part of the data is its own. In our first kernel, thread number <code>row</code> computes <code>y[row]</code> with a plain scalar loop. Nothing in the source says "thirty-two at a time".</p>
+      <p>The hardware groups the threads anyway. Thirty-two threads with consecutive index numbers form a <b>warp</b>, and the GPU fetches and issues each instruction once for the whole warp. Each thread of the warp occupies one lane, so one multiply-add instruction does thirty-two multiply-adds, exactly as one AVX-512 instruction does sixteen. NVIDIA calls this <b>SIMT</b>, single instruction, multiple threads.</p>
+      <p>The difference from SIMD is where the grouping lives. In SIMD it is in the program: the code is written in vectors. In SIMT it is in the hardware, and the program describes one thread. Each lane can load from its own unrelated address, which SIMD can only do with special gather instructions. And each lane can take its own side of a branch, which SIMD handles only through masks the program builds. A GPU builds those masks itself.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart LR
+  subgraph CPU["CPU core, SIMD: the program is written in vectors"]
+    direction TB
+    c1["source: _mm512_fmadd_ps on 16 floats"] --> c2["one vfmadd231ps instruction"]
+    c2 --> c3["16 lanes of one zmm register"]
+  end
+  subgraph GPU["GPU, SIMT: the program is written for one thread"]
+    direction TB
+    g1["source: sum += w[j] * x[j]<br/>for one thread"] --> g2["32 threads with neighbouring index numbers<br/>are grouped into one warp"]
+    g2 --> g3["one multiply-add instruction<br/>issued once for the warp"]
+    g3 --> g4["32 lanes, one per thread,<br/>each with its own registers"]
+  end
+  CPU ~~~ GPU
+  style g2 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 1.1 — SIMD and SIMT side by side.</b> Notice where the grouping happens: in the CPU column the source code already says "16 at a time"; in the GPU column the highlighted box, where 32 threads become one warp, is done by hardware, below anything the source code says.</figcaption>
+      </figure>
+
+      <h3>When threads disagree: divergence</h3>
+      <p>Lanes may disagree at a branch. Some threads of a warp take the <code>if</code>, the others take the <code>else</code>. That is <b>divergence</b>. The warp still issues one instruction at a time, so it runs the two sides one after the other. While it runs one side, the lanes that chose the other side are switched off by an <b>active mask</b>, the GPU's own per-lane on/off bits. When both sides are done, the paths meet again and the warp continues with all lanes on. That meeting point is <b>reconvergence</b>.</p>
+      <p>The cost is simple to state: a divergent branch costs the time of both sides added together, and every lane waits for the slower combination. Diagram 1.2 shows one warp running <code>if (lane &lt; 20) A(); else B();</code>, where A takes 10 cycles and B takes 20.</p>
+
+      <figure class="dia">
+        @@SVG:divergence@@
+        <figcaption><b>Diagram 1.2 — One warp through a divergent branch.</b> Notice that the two paths are stacked in time, never side by side. Twenty lanes idle through path B, twelve idle through path A, and the warp leaves the branch only when both are done.</figcaption>
+      </figure>
+
+      <p>Our matvec barely diverges, and you can check that in the source. The naive kernel's only branch is <code>if (row &gt;= d) return;</code>, which with d = 4096 threads launched in groups of 256 is never true for any thread. The warp-per-row kernel ends with <code>if (lane == 0) y[warp] = sum;</code>, which idles 31 lanes for exactly one store. Divergence becomes expensive in code with data-dependent branches inside loops. It also matters to probes later: an eBPF program injected into a kernel runs in every lane, and an <code>if</code> in your probe diverges like any other.</p>
+
+      <h3>One program counter per warp, or one per thread</h3>
+      <p>How does the warp remember which lanes are waiting, and where? Before 2017, NVIDIA GPUs kept one program counter per warp, plus a small stack of masks that the compiler pushed at each branch and popped at each reconvergence point. Pascal works this way. Starting with Volta in 2017, and so on Ada and Hopper, each thread has its own program counter and call stack in hardware. This is <b>independent thread scheduling</b>. The warp still issues one instruction for the lanes that share a program counter, but the scheduler can now switch between the divergent groups whenever it likes, rather than finishing one side before starting the other.</p>
+      <p>That sounds like a detail until two lanes of one warp wait for each other. Suppose lane 0 takes a lock and lane 1 spins on it:</p>
+<pre><code>if (lane == 0) { lock(); work(); unlock(); }
+if (lane == 1) { while (!try_lock()) ; work(); unlock(); }</code></pre>
+      <p class="lcap">Listing 1.2 — two lanes of one warp and one lock. Illustrative.</p>
+      <p>With one program counter per warp, the hardware runs one group of lanes until it reaches the reconvergence point. If it picks lane 1's spin loop first, lane 1 spins forever, because lane 0 can only run after lane 1's side is done, and lane 1's side is never done. On Pascal this kernel can hang. With independent thread scheduling the scheduler eventually runs lane 0, lane 0 releases the lock, and lane 1 gets it. This is why every warp-level intrinsic in modern CUDA takes an explicit mask of which lanes take part, and why code that sends one request at a time from a warp, as bpftime's helper calls do, walks the lanes in a deliberate loop.</p>
+      <p>Across warps, there was never any lockstep. Different warps are independent: one can be inside a branch while another is at the top of the loop. Counted warp by warp, a GPU is a MIMD machine with a very large number of instruction streams. Counted lane by lane inside one warp, it is SIMD with masks it manages itself. SIMT is the name for that combination.</p>
+
+      <figure class="dia">
+        @@SVG:flynn@@
+        <figcaption><b>Diagram 1.3 — Flynn's four boxes, and where the GPU sits.</b> Notice that the blue SIMT box straddles the line between SIMD and MIMD. Inside one warp, a GPU is SIMD with the masks managed for it. Across its many warps, it is MIMD.</figcaption>
+      </figure>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000, sm_61)</th><th>Ada (laptop, sm_89)</th><th>Hopper (H100, sm_90)</th></tr>
+        <tr><td>Threads per warp</td><td>32</td><td>32</td><td>32</td></tr>
+        <tr><td>Program counters</td><td>one per warp, plus a mask stack</td><td>one per thread</td><td>one per thread</td></tr>
+        <tr><td>Two lanes of one warp waiting on each other</td><td>can hang</td><td>makes progress</td><td>makes progress</td></tr>
+        <tr><td>Divergent branch costs both sides</td><td>yes</td><td>yes</td><td>yes</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>See the SIMD width of the CPU you are sitting at, then compile the dot product yourself:</p>
+<pre><code>grep -o 'avx512[a-z_0-9]*' /proc/cpuinfo | sort -u   # avx512f = base set
+gcc -O2 -mavx512f -S dot.c -o - | grep zmm           # dot.c = listing 1.1</code></pre>
+        <p>Count the lanes: a <code>zmm</code> register is 512 bits, so 16 floats. A warp is 32 threads. The GPU's advantage does not come from wider lanes. It comes from how many warps one chip keeps in flight at once, which is the next chapter.</p>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Flynn's taxonomy sorts machines by instruction streams and data streams: SISD is a scalar core, SIMD is one instruction over many lanes, MIMD is many independent programs. A GPU is SIMT: the program is written for one thread, the hardware groups 32 threads into a warp and issues each instruction once for all of them. When lanes disagree at a branch, the warp runs both sides one after the other under an active mask and reconverges afterwards, so divergence costs both sides' time. Since Volta, and so on Ada and Hopper but not on Pascal, each thread has its own program counter, which lets lanes of one warp wait on each other without hanging.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>instruction stream</dt><dd>One sequence of instructions with its own program counter.</dd>
+          <dt>Flynn's taxonomy</dt><dd>The 1972 sorting of machines by instruction streams × data streams.</dd>
+          <dt>SISD</dt><dd>Single instruction, single data: one scalar core.</dd>
+          <dt>SIMD</dt><dd>Single instruction, multiple data: one instruction over several lanes of a vector register.</dd>
+          <dt>MIMD</dt><dd>Multiple instruction streams on multiple data: independent processors.</dd>
+          <dt>vector register</dt><dd>A wide register holding several numbers side by side; AVX-512's hold 16 floats.</dd>
+          <dt>lane</dt><dd>One slot of a vector register, or one thread's place in a warp.</dd>
+          <dt>mask</dt><dd>Per-lane on/off bits that switch lanes off for an instruction.</dd>
+          <dt>GPU thread</dt><dd>One running copy of a kernel's function, with its own registers and index.</dd>
+          <dt>warp</dt><dd>32 threads with consecutive indices that the GPU issues instructions for together.</dd>
+          <dt>SIMT</dt><dd>Single instruction, multiple threads: NVIDIA's model of scalar threads grouped into warps by hardware.</dd>
+          <dt>divergence</dt><dd>Lanes of one warp taking different sides of a branch.</dd>
+          <dt>active mask</dt><dd>The GPU's own record of which lanes of a warp are on for the current instruction.</dd>
+          <dt>reconvergence</dt><dd>The point after a branch where divergent lanes run together again.</dd>
+          <dt>independent thread scheduling</dt><dd>One program counter per thread (Volta and later), so divergent groups can interleave.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: a warp runs <code>if (lane &lt; 8) A(); else B();</code>. A takes 10 cycles and B takes 30. How many cycles does the warp spend in the branch, and what fraction of its lane-cycles do useful work?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>40 cycles, and 62.5% of lane-cycles are useful. The two sides run one after the other (diagram 1.2), so 10 + 30 = 40. Useful lane-cycles are 8 × 10 + 24 × 30 = 800, out of 32 × 40 = 1280 available.</p>
+          <p>The near-miss is 30 cycles, "the slower side". That would be true only if the two groups of lanes ran at the same time. Within one warp they never do, even with independent thread scheduling: that feature lets the groups interleave, but each instruction still issues for one group at a time.</p>
+        </details>
+        <p>2. A kernel in which lane 1 of each warp spins on a flag that lane 0 sets inside an <code>if</code> finishes on the laptop and hangs on the customer's P5000. Same source, same data. What is different?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>Pascal has one program counter per warp. If it starts lane 1's spinning side first, it will not run lane 0's side until the spinning side reaches reconvergence, which it never does. The warp hangs.</p>
+          <p>Ada has independent thread scheduling (listing 1.2 and the table above), so the scheduler eventually switches to lane 0's group, the flag is set, and the spin ends. The near-miss is "the P5000 is slower, so it is a timeout". No amount of waiting helps: lane 0's instruction is never issued at all.</p>
+        </details>
+        <p>3. "With SIMT the programmer writes scalar code, so warps never need to be thought about." Name two situations from this chapter where that sentence stops being true, and the mechanism behind each.</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>First, speed with data-dependent branches: lanes of one warp that disagree make the warp pay for both sides, because it issues for one group at a time under the active mask. Second, correctness when lanes of one warp wait on each other: on Pascal, one program counter per warp can hang such code. With independent thread scheduling it makes progress, but warp-level operations still need an explicit mask of participating lanes.</p>
+          <p>A third, which the next chapters add: which addresses neighbouring lanes load together decides how fast memory runs. The sentence is only safe for code whose lanes take the same path and never talk to each other.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://doi.org/10.1109/TC.1972.5009071">Some Computer Organizations and Their Effectiveness</a> (Flynn, IEEE Transactions on Computers, 1972). The original four boxes. The first two pages are enough.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#simt-execution-model">CUDA Programming Guide: SIMT execution model</a>, and on the same page <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#independent-thread-scheduling">independent thread scheduling</a>. NVIDIA's own statement of this chapter. Read after the chapter, to check it.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://images.nvidia.com/content/volta-architecture/pdf/volta-architecture-whitepaper.pdf">NVIDIA Tesla V100 GPU Architecture</a> (whitepaper, 2017). The SM section introduces independent thread scheduling, with the before-and-after diagrams of how divergent paths are run.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://cs184.eecs.berkeley.edu/public/sp19/lectures/lec-23-how-gpus-work/lec-23-how-gpus-work.pdf">How GPUs Work</a> (Berkeley CS184 lecture, slides by Kayvon Fatahalian). The classic picture-driven argument for why GPU cores look the way they do. Kayvon Fatahalian's original "From Shader Code to a Teraflop" talk has no stable public copy; this lecture uses its slides.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/">Using CUDA Warp-Level Primitives</a> (NVIDIA blog). Why every warp intrinsic takes a mask, with the independent-thread-scheduling hazards spelled out.</li>
+        </ul>
+      </div>
+    </section>

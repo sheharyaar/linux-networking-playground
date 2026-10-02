@@ -1,0 +1,159 @@
+    <section id="ch9" class="chapter">
+      <span class="chnum">Chapter 9</span>
+      <h2>Scheduling, from grid to warp</h2>
+      <p class="chmeta">@@RT@@ · <span class="tag HW">HW</span> <span class="tag TOOLS">TOOLS</span> — The last chapter got our launch as far as the GPU's front end. This one follows it the rest of the way: who decides which kernel runs, which SM gets each block, and which warp issues on each cycle. It also finishes the occupancy sum that the SM chapter left open.</p>
+      <p class="readfirst">Optional neighbours: the GPU-sharing dossier's <a href="gpu-sharing-dossier.html#ch4">Time-slicing (chapter 4)</a> and <a href="gpu-sharing-dossier.html#ch5">MPS (chapter 5)</a> cover the top level of this chapter, sharing one GPU between processes, in depth. This chapter skips graphics work, MIG, and green contexts, CUDA's newer way to give a stream a fixed set of SMs.</p>
+
+      <h3>Five levels, five clocks</h3>
+      <p>Scheduling on a GPU happens at five levels, and each one works on its own time scale. At the top, contexts from different processes take turns. The GPU's runlist scheduler gives each context a <b>time slice</b> of the whole GPU, in the millisecond range, and two contexts never run kernels on the SMs at the same instant unless MPS has merged them. Within a context, streams feed a fixed set of <b>hardware work queues</b>. NVIDIA calls this Hyper-Q. A context gets 8 queues by default, and <code>CUDA_DEVICE_MAX_CONNECTIONS</code> sets anywhere from 1 to 32. When there are more busy streams than queues, two streams share a queue and their work is serialised, a false dependency that no line of your code asked for.</p>
+      <p>Below the queues, the GPU's front end takes kernels from the queues and hands them to the <b>work distributor</b>, the block scheduler. Up to 128 kernels can be resident on Ada and Hopper, and 32 on the P5000's compute capability 6.1. The work distributor places each block on an SM that has room for all of it. The block then stays on that SM until it finishes. At the bottom, each SM sub-partition's warp scheduler picks one eligible warp per cycle, as in the SM chapter.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  L1["<b>1. Contexts take turns</b><br/>runlist scheduler, time slices of milliseconds<br/>MPS merges processes into one context"]
+  L2["<b>2. Streams map onto hardware work queues</b><br/>8 queues by default, up to 32<br/>each queue runs its items in order"]
+  L3["<b>3. Kernels are taken from the queues</b><br/>up to 128 resident kernels, 32 on Pascal 6.1"]
+  L4["<b>4. The work distributor places blocks on SMs</b><br/>a block needs room for all its warps, registers<br/>and shared memory; once placed, it stays"]
+  L5["<b>5. Warp schedulers pick a warp</b><br/>every cycle, one eligible warp per sub-partition"]
+  L1 --> L2 --> L3 --> L4 --> L5
+  style L4 fill:#e8f1fb,stroke:#0b6bcb,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 9.1 — Five levels of scheduling, slowest at the top.</b> Notice the time scales: milliseconds at level 1, one launch at a time at levels 2 and 3, one block at a time at level 4, one cycle at level 5. The highlighted level is the one this chapter adds; the SM chapter covered level 5, and the GPU-sharing dossier covers level 1.</figcaption>
+      </figure>
+
+      <h3>Where a block fits: finishing the occupancy sum</h3>
+      <p>The work distributor places a block on an SM only when four resources all have room for the whole block. These are warp slots (48 per SM on Ada), block slots (24 per SM), registers (65,536 per SM) and shared memory (100 KB per SM). The number of blocks that fit is the smallest of the four limits. A block is never split, so the remainder of a resource that cannot hold a whole block goes unused. That is the limit the SM chapter promised, and it lowers the float4 kernel's 36 warps.</p>
+
+      <table class="gen">
+        <caption>Blocks of 256 threads (8 warps) on one Ada SM, from the register counts of the SASS chapter</caption>
+        <tr><th></th><th><code>matvec_warp</code></th><th><code>matvec_warp4</code></th></tr>
+        <tr><td>registers per thread, rounded up to a multiple of 8</td><td>40</td><td>56</td></tr>
+        <tr><td>registers per block, × 256</td><td>10,240</td><td>14,336</td></tr>
+        <tr><td>blocks by registers, 65,536 ÷ that</td><td>6</td><td>4 (4.57 rounded down)</td></tr>
+        <tr><td>blocks by warp slots, 48 ÷ 8</td><td>6</td><td>6</td></tr>
+        <tr><td>blocks by block slots</td><td>24</td><td>24</td></tr>
+        <tr><td>blocks by shared memory</td><td>no limit, none used</td><td>no limit, none used</td></tr>
+        <tr><td><b>blocks per SM, the smallest</b></td><td><b>6 = 48 warps, 100%</b></td><td><b>4 = 32 warps, 67%</b></td></tr>
+      </table>
+      <p>By registers alone the float4 kernel would fit 36 warps. In blocks of 8 warps, only 4 whole blocks fit, so 32 warps, and the register space for the other 4 warps stays unused. You do not have to do this by hand. <code>cudaOccupancyMaxActiveBlocksPerMultiprocessor</code> does the same sum, and the lab program now prints its answer for each kernel (<code>matvec.cu:189–196</code>). NVIDIA's kernel profiler, which the tooling chapter uses, reports the four limits separately, as <code>launch__occupancy_limit_registers</code>, <code>_warps</code>, <code>_blocks</code> and <code>_shared_mem</code>, so you can see which one is binding.</p>
+
+      <h3>Waves, and the tail</h3>
+      <p>Our <code>matvec_warp</code> launch is 512 blocks. The laptop's 20 SMs hold 6 blocks each, 120 at a time. So the grid runs as 512 / 120 = 4.27 <b>waves</b>: four rounds in which every block slot of the GPU is busy, and a fifth in which only 32 blocks are left for 120 slots. The time when only that last partial wave is running is the <b>tail</b>. During it most of the GPU is idle while the kernel is still "running". NVIDIA's kernel profiler reports the number as <code>launch__waves_per_multiprocessor</code>, and its documentation warns that partial waves cause exactly this.</p>
+      <p>Real blocks do not run in lockstep rounds. A new block starts whenever an old one finishes, so the boundaries between waves blur after the first. The model is still the right first estimate, and the tail at the end is real. It costs most when there are few waves, because then the partial one is a large share of the whole. Now move the same launch to an H100. It has 132 SMs, and at sm_90's 32 registers per thread each SM holds 8 of these blocks: 1,056 slots. Our 512 blocks fill less than half of one wave.</p>
+
+      <figure class="dia">
+        @@SVG:waves@@
+        <figcaption><b>Diagram 9.2 — The same 512 blocks on two GPUs.</b> Notice that the laptop's problem is the last row, a partial fifth wave, while the H100's problem is that there is only one row and it is half empty. Each SM still gets 3 or 4 blocks, 24 to 32 warps out of 64. Whether that is enough to keep HBM busy is a measurement for the H100 bench. The work a language model does for each new token, with small batches, lives in the H100 picture.</figcaption>
+      </figure>
+
+      <p>There are three ways out of a tail. You can give the GPU more, smaller pieces of work, so the partial wave is a small share. You can do more work per launch, which is what batching does for LLM serving. Or you can write a <b>persistent kernel</b>: launch exactly as many blocks as fit at once, 120 on the laptop, and have each block loop, taking the next piece of work from a counter in global memory with an atomic add until none is left. A persistent kernel has no waves and no per-launch cost after the first. In exchange it holds every SM until it is done, so nothing else from the same context runs beside it. CUDA does not promise that 20 blocks land on 20 different SMs. bpftime's <code>threadscheduling</code> example reads <code>%smid</code> from inside the kernel and shows you where they went.</p>
+
+      <h3>What a warp does while it waits</h3>
+      <p>Once its block is placed, each warp is in one of a few states on every cycle. It can be <b>selected</b>, issuing an instruction. It can be <b>eligible but not selected</b>, ready while another warp of the same sub-partition issues. Or it can be <b>stalled</b>, because its next instruction cannot issue yet. A stall always has a reason, and NVIDIA's kernel profiler samples the warps' states and names the reasons. These are the <b>stall reasons</b>, reported as metrics like <code>smsp__pcsamp_warps_issue_stalled_long_scoreboard</code> and attributed to the instruction that was waiting.</p>
+
+      <figure class="dia">
+        <div class="mermaid">
+flowchart TB
+  pl(["block placed on an SM"]) --> el["eligible:<br/>next instruction ready"]
+  el -->|"another warp is picked"| ns["not selected"]
+  ns --> el
+  el -->|"scheduler picks it"| se["selected:<br/>issues one instruction"]
+  se --> q{"next instruction<br/>ready?"}
+  q -->|yes| el
+  q -->|no| st["stalled,<br/>with a reason"]
+  st -->|"reason cleared"| el
+  se -->|"after its last instruction"| ex(["warp exits"])
+  style st fill:#fdf3e3,stroke:#b45309,stroke-width:2px
+        </div>
+        <figcaption><b>Diagram 9.3 — The states of a resident warp.</b> Notice that "not selected" is not a stall: the warp was ready, and another one used the cycle. Only the orange state has a reason, and the table below lists the reasons that matter here.</figcaption>
+      </figure>
+
+      <table class="gen">
+        <caption>The stall reasons this document needs, with the names NVIDIA's profiler gives them</caption>
+        <tr><th>Reason</th><th>What the warp is waiting for</th><th>Where you met it</th></tr>
+        <tr><td><code>long_scoreboard</code></td><td>the result of a global or local memory load</td><td>the scoreboards of the SASS chapter</td></tr>
+        <tr><td><code>wait</code></td><td>a fixed-latency result, such as one <code>FFMA</code> feeding the next</td><td>the stall counts in the control codes</td></tr>
+        <tr><td><code>lg_throttle</code></td><td>room in the queue for global and local loads</td><td>a kernel issuing many narrow loads</td></tr>
+        <tr><td><code>barrier</code></td><td>the other warps of the block, at <code>__syncthreads</code></td><td>the CUDA chapter</td></tr>
+        <tr><td><code>short_scoreboard</code></td><td>a shared-memory result</td><td>bank conflicts, the memory chapter</td></tr>
+        <tr><td><code>no_instructions</code></td><td>its next instruction to be fetched</td><td>very short kernels, less than one wave</td></tr>
+      </table>
+
+      <p>For a memory-bound kernel like ours, the prediction is clear: most samples should be <code>long_scoreboard</code> on the first <code>FFMA</code> after each batch of loads. If instead <code>lg_throttle</code> dominates, the kernel is issuing loads faster than the load queue drains, and wider loads such as the float4 version's are the usual fix. A kernel with only a few warps per SM and a high <code>no_instructions</code> share is usually too short or too small, the H100 half of diagram 9.2. These are predictions until you profile the kernels on the bench. The tools chapter shows how.</p>
+
+      <h3>Kernels side by side, and preemption</h3>
+      <p>Two kernels in different streams of one context can be resident at the same time, but only if the first leaves room. Our 512-block matvec fills every slot for four waves. A second kernel's blocks get slots only as the first kernel runs out of blocks, so in practice concurrent kernels mostly overlap in each other's tails. Streams pay off most with small kernels that each fill only a few SMs, which is the shape of the work a language model does for each new token.</p>
+      <p>A running block can also be stopped. When a context's time slice ends, or <code>cuda-gdb</code> halts a kernel, the GPU <b>preempts</b> the running blocks: it saves each warp's registers and the block's shared memory to device memory, and restores them later. On Ada and Hopper this happens at instruction granularity. For Pascal the sources disagree. The GP104 whitepaper says Pascal preempts CUDA compute at instruction level. NVIDIA's Pascal tuning guide calls it a GP100 feature, and the P5000 is a GP104. The lab program now prints <code>cudaDevAttrComputePreemptionSupported</code>; run it on the P5000 before relying on either. A preempted block may resume on a different SM. That is why the PTX manual says <code>%smid</code> may change during execution, and why a probe should treat it as a sample.</p>
+
+      <table class="gen">
+        <caption>Across the three benches, as of October 2026</caption>
+        <tr><th></th><th>Pascal (P5000)</th><th>Ada (laptop)</th><th>Hopper (H100)</th></tr>
+        <tr><td>SMs</td><td>20</td><td>20</td><td>132 (SXM5), 114 (PCIe)</td></tr>
+        <tr><td>Resident warps / blocks per SM</td><td>64 / 32</td><td>48 / 24</td><td>64 / 32</td></tr>
+        <tr><td>Shared memory per SM</td><td>96 KB</td><td>100 KB</td><td>228 KB</td></tr>
+        <tr><td>Resident kernels per GPU</td><td>32</td><td>128</td><td>128</td></tr>
+        <tr><td><code>matvec_warp</code>, 256-thread blocks</td><td>needs a CUDA 12 <code>ptxas</code> to count registers</td><td>6 blocks per SM, 4.27 waves</td><td>8 blocks per SM, 0.48 waves</td></tr>
+        <tr><td>Compute preemption</td><td>sources disagree for GP104; query the attribute</td><td>instruction level</td><td>instruction level</td></tr>
+        <tr><td>Extra scheduling level</td><td>none</td><td>none</td><td>thread block clusters: groups of blocks guaranteed to run at the same time, on a group of neighbouring SMs (chapter 11)</td></tr>
+      </table>
+
+      <aside class="tryit">
+        <h4>Try it</h4>
+        <p>With the dGPU in Hybrid mode, rebuild and run the lab program. Before you run it, write down what the table above predicts for each kernel: 6, 6 and 4 blocks per SM, and 0.13, 4.27 and 6.40 waves for the naive, warp and float4 kernels. The naive kernel's 16 blocks are less than one wave, which is the first question of the CUDA chapter (chapter 4) again.</p>
+<pre><code>cd lab/gpu &amp;&amp; nvcc -O3 -lineinfo -arch=sm_89 matvec.cu -lcublas -o out/matvec
+./out/matvec | grep -E 'blocks/SM|preemption'</code></pre>
+        <p>Then, once NVIDIA's kernel profiler from the tooling chapter is installed, look at the limits and the stall reasons for the warp kernel alone:</p>
+<pre><code>ncu -k matvec_warp -c 1 --section LaunchStats --section Occupancy \
+    --section WarpStateStats ./out/matvec 4096 4096 5</code></pre>
+      </aside>
+
+      <div class="recap">
+        <h4>Recap</h4>
+        <p>Scheduling has five levels: contexts take time slices, streams map onto 8 to 32 hardware queues, kernels are taken from the queues, the work distributor places whole blocks on SMs with room, and warp schedulers pick a warp each cycle. A block fits only if warp slots, block slots, registers and shared memory all have room, so <code>matvec_warp4</code> gets 4 blocks, 32 warps, on an Ada SM. A grid runs in waves; the partial last wave is the tail, and on an H100 our grid is less than one wave. Stalled warps carry reasons, and a memory-bound kernel should show <code>long_scoreboard</code>. Preemption saves running blocks, which may resume on another SM.</p>
+      </div>
+
+      <div class="words">
+        <h4>New words in this chapter</h4>
+        <dl>
+          <dt>time slice</dt><dd>A turn of the whole GPU given to one context by the runlist scheduler.</dd>
+          <dt>hardware work queue (Hyper-Q)</dt><dd>One of up to 32 queues that a context's streams are mapped onto.</dd>
+          <dt>work distributor</dt><dd>The GPU unit that places blocks on SMs with room for them.</dd>
+          <dt>wave</dt><dd>One round of blocks that fills every block slot on the GPU.</dd>
+          <dt>tail</dt><dd>The end of a kernel, when only a partial wave runs and most SMs are idle.</dd>
+          <dt>persistent kernel</dt><dd>A kernel launched with exactly as many blocks as fit, each looping over work.</dd>
+          <dt>stall reason</dt><dd>Why a resident warp could not issue on a cycle, as sampled by NVIDIA's kernel profiler.</dd>
+          <dt>preemption</dt><dd>Saving a running block's state to memory so other work can use the SMs.</dd>
+        </dl>
+      </div>
+
+      <div class="check">
+        <h4>Check yourself</h4>
+        <p>1. Predict the value: <code>matvec_warp4</code> keeps its 56 registers per thread but is launched with blocks of 128 threads instead of 256, with twice as many blocks. How many blocks and warps fit on one Ada SM now, and why did the block size change the answer?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>9 blocks of 4 warps, 36 warps, 75% occupancy. A block now needs 56 × 128 = 7,168 registers, and 65,536 / 7,168 = 9.14, so 9 blocks fit by registers. Warp slots allow 48 / 4 = 12 and block slots 24, so registers bind at 9. With 256-thread blocks only 4 fitted, 32 warps.</p>
+          <p>The block size changed the answer because a block is placed whole: smaller blocks waste less of the register file at the end. The near-miss is to think occupancy depends only on registers per thread. It depends on registers per block too, which is why block size is a tuning knob.</p>
+        </details>
+        <p>2. You run bpftime's <code>threadscheduling</code> probe against <code>matvec_warp</code> on the laptop and on an H100. The laptop shows all 20 SMs with about 25 or 26 blocks each. The H100 shows every SM with 3 or 4 blocks. A colleague concludes the H100 is "barely used". What do the two histograms show, and what can they not show?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>They show placement: 512 / 20 ≈ 25.6 blocks per laptop SM over about 4.3 waves, and 512 / 132 ≈ 3.9 blocks per H100 SM in a single partial wave (diagram 9.2). A count of blocks per SM has no time in it, so it cannot show whether the blocks ran together, in waves, or in a tail.</p>
+          <p>Nor can it show whether 24 to 32 warps per SM were enough to keep the H100's memory busy, which is the question that matters for a memory-bound kernel. For that you need time: the kernel's duration against the 20 µs bandwidth floor of the memory chapter, or timestamps from <code>%globaltimer</code> in the probe. The near-miss is to read low occupancy as slow. It can be, and that is a measurement.</p>
+        </details>
+        <p>3. Your probe records <code>%smid</code> at a block's first instruction and again at its last, and on a shared GPU a few blocks report two different SMs. Is the probe broken?</p>
+        <details class="ans"><summary>Answer</summary>
+          <p>No. Those blocks were preempted, most likely at the end of a time slice when another process had work on the GPU, and resumed on a different SM. The PTX manual documents that <code>%smid</code> may change during execution for exactly this reason.</p>
+          <p>Treat <code>%smid</code> as a sample taken when you read it, and read it once per event you care about. On a GPU used by one process the effect should be rare; on a shared GPU it is normal. The near-miss is to suspect the helper. Helper 509 reads the register correctly; the block moved.</p>
+        </details>
+      </div>
+
+      <div class="refs">
+        <h4>Go deeper</h4>
+        <ul>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html#features-and-technical-specifications">CUDA Programming Guide: Compute capabilities</a>. The per-SM limits of this chapter's tables. Compute capability 6.1 is in the <a href="https://docs.nvidia.com/cuda/archive/12.9.0/cuda-c-programming-guide/index.html">CUDA 12.9 guide</a>.</li>
+          <li class="ref" data-layer="TOOLS"><span class="tag TOOLS">TOOLS</span><a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#statistical-sampler">Nsight Compute Profiling Guide: Warp scheduler states</a>, with every stall reason explained, and its <a href="https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#occupancy-metrics">occupancy</a> and launch metrics. The best single page on what a warp is doing.</li>
+          <li class="ref" data-layer="CUDA"><span class="tag CUDA">CUDA</span><a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html#cuda-device-max-connections">CUDA Programming Guide: <code>CUDA_DEVICE_MAX_CONNECTIONS</code></a> and <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__OCCUPANCY.html">CUDA Runtime API: Occupancy</a>. The hardware work queues and the false dependency in NVIDIA's words, and the calls that do this chapter's sum for you.</li>
+          <li class="ref" data-layer="HW"><span class="tag HW">HW</span><a href="https://docs.nvidia.com/cuda/archive/12.9.0/pascal-tuning-guide/index.html#compute-preemption">Pascal Tuning Guide: Compute preemption</a>, and the <a href="https://international.download.nvidia.com/geforce-com/international/pdfs/GeForce_GTX_1080_Whitepaper_FINAL.pdf">GTX 1080 (GP104) whitepaper</a>. Read both for the disagreement in this chapter.</li>
+          <li class="ref" data-layer="EBPF"><span class="tag EBPF">EBPF</span><a href="https://github.com/eunomia-bpf/bpftime/tree/master/example/gpu/threadscheduling">bpftime <code>threadscheduling</code> example</a>. Block-to-SM placement read from inside the kernel with helpers 509 to 511.</li>
+        </ul>
+      </div>
+    </section>
